@@ -129,7 +129,7 @@ class TestFakeLauncher:
         """Finish with a planned signal."""
         clock = FakeClock(START)
         launcher = FakeLauncher(clock)
-        launcher.plan("d", FakeResult(duration=timedelta(seconds=5), exit_code=None, signal=6))
+        launcher.plan("d", FakeResult(duration=timedelta(seconds=5), signal=signal.SIGABRT))
 
         async def main() -> AttemptResult:
             """Launch and advance past the duration."""
@@ -137,4 +137,32 @@ class TestFakeLauncher:
             await clock.advance(timedelta(seconds=5))
             return await handle.wait()
 
-        assert pynet.loop.run(main()).signal == signal.SIGABRT
+        result = pynet.loop.run(main())
+        assert result.signal == signal.SIGABRT
+        assert result.exit_code is None
+        assert not result.succeeded
+
+    def test_signals_are_plain_ints(self) -> None:
+        """Report terminate and kill signals as plain ints, as the minder does."""
+        clock = FakeClock(START)
+        launcher = FakeLauncher(clock)
+
+        async def main() -> tuple[AttemptResult, AttemptResult]:
+            """Terminate one attempt and kill another."""
+            termed = await launcher.launch(spec("t.2026-10-19.1"))
+            killed = await launcher.launch(spec("k.2026-10-19.1"))
+            termed.terminate()
+            killed.kill()
+            return await termed.wait(), await killed.wait()
+
+        termed, killed = pynet.loop.run(main())
+        assert type(termed.signal) is int
+        assert type(killed.signal) is int
+        assert termed.signal == signal.SIGTERM
+        assert killed.signal == signal.SIGKILL
+
+
+def test_fake_result_with_signal_has_no_exit_code() -> None:
+    """Drop the default exit code 0 when a signal is planned."""
+    assert FakeResult(signal=signal.SIGKILL).exit_code is None
+    assert FakeResult().exit_code == 0

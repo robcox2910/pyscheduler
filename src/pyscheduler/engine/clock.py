@@ -226,9 +226,19 @@ class FakeClock:
         return None
 
     def _fire_due(self) -> None:
-        """Run every live callback that is due now (outside ``advance``)."""
+        """Run every live callback that is due now (outside ``advance``).
+
+        A callback that raises does not stop the rest; the first error is
+        raised again once they have all run, so the loop reports it.
+        """
+        first_error: Exception | None = None
         while (timer := self._pop_due(self._now)) is not None:
-            timer.callback()
+            try:
+                timer.callback()
+            except Exception as exc:  # noqa: BLE001 -- re-raised below
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
 
     @staticmethod
     async def _settle() -> None:

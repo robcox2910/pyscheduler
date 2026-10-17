@@ -26,7 +26,7 @@ class FakeResult:
 
     Attributes:
         duration: How long it runs on the fake clock.
-        exit_code: The exit code it ends with (None when a signal ends it).
+        exit_code: The exit code it ends with; forced to None when ``signal`` is set.
         signal: The signal that ends it, if any.
         start_error: If set, it fails at launch with this message.
         ignores_term: If true, ``terminate()`` has no effect; only ``kill()`` stops it.
@@ -38,6 +38,11 @@ class FakeResult:
     signal: int | None = None
     start_error: str | None = None
     ignores_term: bool = False
+
+    def __post_init__(self) -> None:
+        """Drop the default exit code when a signal ends the attempt."""
+        if self.signal is not None:
+            object.__setattr__(self, "exit_code", None)
 
 
 class FakeHandle:
@@ -75,11 +80,11 @@ class FakeHandle:
     def terminate(self) -> None:
         """End the attempt with SIGTERM, unless it ignores TERM."""
         if not self.plan.ignores_term:
-            self._finish(None, signal.SIGTERM)
+            self._finish(None, int(signal.SIGTERM))
 
     def kill(self) -> None:
         """End the attempt with SIGKILL."""
-        self._finish(None, signal.SIGKILL)
+        self._finish(None, int(signal.SIGKILL))
 
     def _finish(self, exit_code: int | None, signum: int | None, error: str | None = None) -> None:
         """Record the ending (once) and leave the launcher's running list."""

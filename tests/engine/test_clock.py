@@ -1,18 +1,20 @@
 """Tests for the clocks: the real wall clock and the fake one tests wind by hand."""
 
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pynet.loop
 import pytest
 
 from pyscheduler.engine import clock as clock_module
-from pyscheduler.engine.clock import Clock, FakeClock, SystemClock
+from pyscheduler.engine.clock import Cancel, Clock, FakeClock, SystemClock
 
 START = datetime(2026, 10, 19, tzinfo=UTC)
 SHORT_DELAY = 0.05
 TINY_NAP = 0.01
 SLEEP_SECONDS = 5
+BOOM = "boom"
 
 
 class TestFakeClock:
@@ -128,6 +130,43 @@ class TestFakeClock:
         pynet.loop.run(main())
         assert seen == ["now"]
 
+    def test_due_callback_error_does_not_stop_the_rest(self) -> None:
+        """Run every due callback even when an earlier one raises, then re-raise."""
+        clock = FakeClock(START)
+        seen: list[str] = []
+
+        def boom() -> None:
+            """Fail on purpose."""
+            raise RuntimeError(BOOM)
+
+        async def main() -> None:
+            """Schedule a failing and a working callback for now and fire them together."""
+            clock.call_at(START, boom)
+            clock.call_at(START, lambda: seen.append("after"))
+            with pytest.raises(RuntimeError, match=BOOM):
+                clock._fire_due()
+            assert seen == ["after"]
+            for _ in range(clock_module.SETTLE_TURNS):
+                await pynet.loop.sleep(0)
+
+        pynet.loop.run(main())
+        assert seen == ["after"]
+
+    def test_cancelled_sleep_leaves_no_timer(self) -> None:
+        """Cancel a task in ``sleep_until`` cleanly, leaving no live timer."""
+        clock = FakeClock(START)
+
+        async def main() -> None:
+            """Start a sleeper, cancel it, check it ended cancelled."""
+            task = pynet.loop.spawn(clock.sleep_until(START + timedelta(hours=1)))
+            await pynet.loop.sleep(0)
+            task.cancel()
+            with pytest.raises(pynet.loop.Cancelled):
+                await task
+            assert all(timer.cancelled for timer in clock._timers)
+
+        pynet.loop.run(main())
+
     def test_advance_to_never_goes_backwards(self) -> None:
         """Leave ``now`` alone when asked to advance to the past."""
         clock = FakeClock(START)
@@ -208,6 +247,36 @@ class TestSystemClock:
 
         pynet.loop.run(main())
         assert seen == []
+
+    def test_cancelled_sleep_leaves_no_timer(self) -> None:
+        """Cancel a task in ``sleep_until`` cleanly, leaving no live loop timer."""
+        timers: list[Cancel] = []
+
+        class SpyClock(SystemClock):
+            """A system clock that remembers the timers it hands out."""
+
+            def call_at(self, when: datetime, callback: Callable[[], None]) -> Cancel:
+                """Record and return the timer."""
+                timer = super().call_at(when, callback)
+                timers.append(timer)
+                return timer
+
+        clock = SpyClock()
+
+        async def main() -> None:
+            """Start a sleeper, cancel it, check it ended cancelled."""
+            task = pynet.loop.spawn(clock.sleep_until(clock.now() + timedelta(hours=1)))
+            await pynet.loop.sleep(0)
+            task.cancel()
+            with pytest.raises(pynet.loop.Cancelled):
+                await task
+
+        pynet.loop.run(main())
+        assert len(timers) == 1
+        timer = timers[0]
+        assert isinstance(timer, clock_module._SystemTimer)
+        assert timer._cancelled
+        assert timer._handle.cancelled()
 
     def test_sleep_until_past(self) -> None:
         """Return at once for an instant already gone."""

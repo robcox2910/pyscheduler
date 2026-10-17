@@ -20,6 +20,7 @@ WAIT_SECONDS = 5.0
 GONE_SECONDS = 2.0
 POLL = 0.01
 SETTLE = 0.2
+DEEP = 100_000
 
 
 def make_spec(tmp_path: Path, argv: list[str], *, stderr: bool = True) -> LaunchSpec:
@@ -111,6 +112,7 @@ class TestReadStatus:
             '{"exit_code": 0, "signal": null, "started_at": null}',
             '{"exit_code": true, "signal": null, "ended_at": "2026-10-19T09:00:00Z"}',
             '{"exit_code": 0, "signal": null, "ended_at": "2026-10-19T09:00:00"}',
+            pytest.param("[" * DEEP + "]" * DEEP, id="too-deep"),
         ],
     )
     def test_corrupt_note(self, tmp_path: Path, text: str) -> None:

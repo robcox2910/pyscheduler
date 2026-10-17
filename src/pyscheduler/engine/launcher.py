@@ -174,7 +174,7 @@ def read_status(path: Path) -> AttemptResult | None:
         return _corrupt(exc)
     try:
         return _parse_status(text)
-    except ValueError as exc:  # json.JSONDecodeError is a ValueError
+    except (ValueError, RecursionError) as exc:  # JSONDecodeError is a ValueError
         return _corrupt(exc)
 
 
