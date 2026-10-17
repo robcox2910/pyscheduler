@@ -61,9 +61,7 @@ The output lists all three problems together:
   offset (you can't wait for tomorrow).
 - **Calendars:** two jobs linked by a dependency must share one calendar.
   A UK job waiting on a US job would get stuck on every day that is a
-  holiday in one country but not the other. A dependency-only job with no
-  calendar of its own may follow a calendar job, because it simply takes
-  its upstream's run dates.
+  holiday in one country but not the other.
 - **Schedules:** `business_day` without a calendar or beyond 31; a schedule
   that never fires in the next four years (like 30 February); a calendar
   with no business days at all; an unknown time zone.
@@ -76,6 +74,31 @@ The output lists all three problems together:
   longer than `timeout`; a negative retry count; `backoff` below 1; a job
   naming an `agent` (agents arrive in phase 4); a job with no schedule, no
   dependencies and not `manual`, which could never run.
+
+## Borrowed Calendars
+
+A dependency-only job (no `schedule`) is like a younger sibling who goes
+to school whenever the older ones do. If it names no `calendar:`, it
+**inherits** the calendar of the jobs it depends on, all the way up the
+chain. So in this config `load-warehouse` is on `uk-business` too, and
+`config.calendar_for(...)` says so:
+
+```yaml
+jobs:
+  extract-trades:
+    command: extract.sh
+    schedule: "30 18 * * *"
+    calendar: uk-business
+  load-warehouse:              # no calendar: inherits uk-business
+    command: load.sh
+    depends_on: [extract-trades]
+```
+
+If its upstreams are on different calendars there is nothing sensible to
+borrow, which is an error: `upstreams are on different calendars
+(a: uk-business, b: us-business)`. An upstream with no calendar counts as
+the calendar `none`. A scheduled or manual job with no calendar never
+inherits; it stays on `none`.
 
 ## Warnings: These Are Kept, and the Load Carries On
 

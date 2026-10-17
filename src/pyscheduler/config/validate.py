@@ -16,6 +16,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 
 from pyscheduler.calendars import ALL_DAYS, BusinessCalendar
+from pyscheduler.config.calendar_inheritance import resolve_calendars
 from pyscheduler.config.model import Config, Dependency, JobDef, Overlap, Problem, SourceRef
 from pyscheduler.config.run_dates import (
     MAX_CHECKED_OFFSET,
@@ -102,6 +103,9 @@ class _Checker:
         self.broken = broken
         self.problems: list[Problem] = []
         self.dead_calendars: set[str] = set()
+        resolution = resolve_calendars(config.jobs)
+        self.effective = resolution.effective
+        self.conflicts = resolution.conflicts
         self.index = RunDateIndex(config, today, self.calendar)
 
     def add(
@@ -111,12 +115,13 @@ class _Checker:
         self.problems.append(Problem(where.file, where.line, message, job, severity))
 
     def calendar(self, job: JobDef) -> BusinessCalendar | None:
-        """Return the job's usable calendar, or ``None`` if it is unknown or has no days."""
-        if job.calendar is None:
+        """Return the job's usable effective calendar, or ``None`` if unknown or empty."""
+        name = self.effective.get(job.name, job.calendar)
+        if name is None:
             return ALL_DAYS
-        if job.calendar in self.dead_calendars:
+        if name in self.dead_calendars:
             return None
-        return self.config.calendars.get(job.calendar)
+        return self.config.calendars.get(name)
 
     def run(self) -> list[Problem]:
         """Run every check and return the problems found."""
@@ -126,6 +131,7 @@ class _Checker:
             if job.name in self.broken:
                 continue
             self.check_job(job)
+            self.check_inherited_calendar(job)
             self.check_dependencies(job)
             self.check_wait_forever(job)
         return self.problems
@@ -189,6 +195,18 @@ class _Checker:
                 "warning",
             )
         self.check_schedules(job)
+
+    def check_inherited_calendar(self, job: JobDef) -> None:
+        """Check that a dependency-only job's upstreams agree on one calendar."""
+        votes = self.conflicts.get(job.name)
+        if votes is None or self.broken & votes.keys():
+            return
+        listed = ", ".join(f"{up}: {cal or 'none'}" for up, cal in sorted(votes.items()))
+        message = (
+            f"upstreams are on different calendars ({listed}): a dependency-only job "
+            "inherits its upstreams' calendar, so they must share one"
+        )
+        self.add(job.source, message, job.name)
 
     def check_pools(self, job: JobDef) -> None:
         """Check that each pool exists and is big enough."""
@@ -276,13 +294,11 @@ class _Checker:
         return f"depends on unknown job {name!r}{hint}"
 
     def check_dependency_calendars(self, job: JobDef, dep: Dependency, up: JobDef) -> None:
-        """Check that a job and its upstream share one calendar.
-
-        A dependency-only job with no calendar of its own, depending on its
-        upstream's same run date, simply takes the upstream's run dates, so
-        it may follow a calendar job.
-        """
-        mine, theirs = job.calendar, up.calendar
+        """Check that a job and its upstream share one effective calendar."""
+        if job.name in self.conflicts or up.name in self.conflicts:
+            return
+        mine = self.effective.get(job.name, job.calendar)
+        theirs = self.effective.get(up.name, up.calendar)
         known = self.config.calendars
         if mine == theirs or (mine and mine not in known) or (theirs and theirs not in known):
             return
@@ -295,8 +311,6 @@ class _Checker:
                 f"calendar job depends on a job with no calendar: this job is on {mine!r} "
                 f"but {up.name!r} has none"
             )
-        elif job.dependency_only and dep.run_date_offset == 0:
-            return
         else:
             message = (
                 f"job with no calendar depends on a calendar job: {up.name!r} is on {theirs!r}"

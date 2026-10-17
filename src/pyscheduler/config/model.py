@@ -234,6 +234,9 @@ class Config:
     The mappings are read-only. ``calendar_includes`` and
     ``calendar_sources`` keep each calendar's raw ``include`` list and
     where it was defined, so validation can look for include cycles.
+    ``effective_calendars`` gives each job's calendar after inheritance (a
+    dependency-only job with no calendar takes its upstreams'); a job
+    missing from it uses its own ``calendar``.
     """
 
     settings: Settings
@@ -247,6 +250,7 @@ class Config:
         default_factory=dict[str, tuple[str, ...]]
     )
     calendar_sources: Mapping[str, SourceRef] = field(default_factory=dict[str, SourceRef])
+    effective_calendars: Mapping[str, str | None] = field(default_factory=dict[str, str | None])
     _dependents: Mapping[str, frozenset[str]] = field(
         init=False, repr=False, compare=False, default_factory=dict[str, frozenset[str]]
     )
@@ -260,6 +264,7 @@ class Config:
             "sources",
             "calendar_includes",
             "calendar_sources",
+            "effective_calendars",
         ):
             object.__setattr__(self, name, _frozen(getattr(self, name)))
         index: dict[str, set[str]] = {}
@@ -271,15 +276,19 @@ class Config:
         )
 
     def calendar_for(self, job: JobDef) -> BusinessCalendar:
-        """Return the job's business calendar (``ALL_DAYS`` when it has none).
+        """Return the job's effective business calendar (``ALL_DAYS`` when it has none).
+
+        A dependency-only job with no calendar of its own gets the calendar
+        it inherits from its upstreams.
 
         Raises:
-            KeyError: If the job names a calendar that is not defined.
+            KeyError: If the job's calendar is not defined.
 
         """
-        if job.calendar is None:
+        name = self.effective_calendars.get(job.name, job.calendar)
+        if name is None:
             return ALL_DAYS
-        return self.calendars[job.calendar]
+        return self.calendars[name]
 
     def dependents(self, job: str) -> frozenset[str]:
         """Return the names of the jobs that depend on ``job``."""

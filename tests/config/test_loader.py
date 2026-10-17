@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pyscheduler.calendars import ALL_DAYS
 from pyscheduler.config import (
     CatchUp,
     Config,
@@ -154,7 +153,7 @@ class TestFullExample:
         assert uk.weekdays == frozenset(range(5))
         assert len(uk.holidays) == HOLIDAY_COUNT  # three own plus one included
         assert config.calendar_for(config.jobs["extract-trades"]) is uk
-        assert config.calendar_for(config.jobs["load-warehouse"]) is ALL_DAYS
+        assert config.calendar_for(config.jobs["load-warehouse"]) is uk  # inherited
         text = path.read_text(encoding="utf-8")
         assert config.digest == _digest([(str(path), text)])
         assert config.sources == {str(path): text}

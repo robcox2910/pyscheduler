@@ -217,20 +217,141 @@ class TestDependencyErrors:
         problem = _one(_errors(tmp_path, text), "no calendar depends on a calendar job")
         _check(problem, "plain", _line(text, "- uk-job"))
 
-    def test_dependency_only_none_calendar_job_may_follow_calendar_job(
-        self, tmp_path: Path
-    ) -> None:
-        """A dependency-only job with no calendar takes its run dates from its upstream."""
-        text = _text("""
-            uk-job:
+
+class TestCalendarInheritance:
+    """A dependency-only job with no calendar inherits its upstreams' calendar."""
+
+    UPSTREAMS = """
+        uk-job:
+          command: x
+          schedule: "0 8 * * 1-5"
+          calendar: uk-business
+        us-job:
+          command: x
+          schedule: "0 8 * * 1-5"
+          calendar: us-business
+    """
+
+    def _text(self, jobs: str) -> str:
+        """Return a config with the two upstreams followed by ``jobs``."""
+        return _text(textwrap.dedent(self.UPSTREAMS) + textwrap.dedent(jobs))
+
+    def test_follower_inherits(self, tmp_path: Path) -> None:
+        """A follower of a uk-business job is effectively on uk-business, even with an offset."""
+        text = self._text("""
+            follower:
               command: x
-              schedule: "0 8 * * *"
+              depends_on:
+                - uk-job
+                - {job: uk-job, run_date: -1}
+        """)
+        config = load_config(_write(tmp_path, text), env={})
+        assert config.warnings == ()
+        assert config.effective_calendars["follower"] == "uk-business"
+        assert config.calendar_for(config.jobs["follower"]) is config.calendars["uk-business"]
+
+    def test_inheritance_is_transitive(self, tmp_path: Path) -> None:
+        """A chain of followers all inherit; a scheduled uk job may follow the last one."""
+        text = self._text("""
+            first:
+              command: x
+              depends_on: [uk-job]
+            second:
+              command: x
+              depends_on: [first]
+            report:
+              command: x
+              schedule: "0 9 * * 1-5"
               calendar: uk-business
+              depends_on: [second]
+        """)
+        config = load_config(_write(tmp_path, text), env={})
+        assert config.effective_calendars["second"] == "uk-business"
+
+    def test_inherited_calendar_must_match(self, tmp_path: Path) -> None:
+        """A us job following an inherited uk follower is on a different calendar."""
+        text = self._text("""
             follower:
               command: x
               depends_on: [uk-job]
+            us-report:
+              command: x
+              schedule: "0 9 * * 1-5"
+              calendar: us-business
+              depends_on:
+                - follower
         """)
-        assert load_config(_write(tmp_path, text), env={}).warnings == ()
+        problem = _one(_errors(tmp_path, text), "different calendars")
+        _check(problem, "us-report", _line(text, "- follower"))
+
+    def test_scheduled_none_job_on_follower(self, tmp_path: Path) -> None:
+        """A scheduled job with no calendar does not inherit, so it may not follow a uk follower."""
+        text = self._text("""
+            follower:
+              command: x
+              depends_on: [uk-job]
+            plain:
+              command: x
+              schedule: "0 9 * * *"
+              depends_on:
+                - follower
+        """)
+        problem = _one(_errors(tmp_path, text), "no calendar depends on a calendar job")
+        _check(problem, "plain", _line(text, "- follower"))
+
+    def test_upstreams_disagree(self, tmp_path: Path) -> None:
+        """A follower of a uk job and a us job has no one calendar to inherit."""
+        text = self._text("""
+            follower:
+              command: x
+              depends_on: [uk-job, us-job]
+        """)
+        problems = _errors(tmp_path, text)
+        problem = _one(problems, "upstreams are on different calendars")
+        assert "(uk-job: uk-business, us-job: us-business)" in problem.message
+        _check(problem, "follower", _line(text, "  follower:"))
+        assert len(problems) == 1
+
+    def test_none_upstream_disagrees_too(self, tmp_path: Path) -> None:
+        """An upstream with no calendar counts as a different calendar."""
+        text = self._text("""
+            plain:
+              command: x
+              schedule: "0 8 * * *"
+            follower:
+              command: x
+              depends_on: [uk-job, plain]
+        """)
+        problem = _one(_errors(tmp_path, text), "upstreams are on different calendars")
+        assert "(plain: none, uk-job: uk-business)" in problem.message
+
+    def test_follower_loop_does_not_hang(self, tmp_path: Path) -> None:
+        """Followers that follow each other (with an offset) still resolve."""
+        text = self._text("""
+            a:
+              command: x
+              depends_on: [uk-job, {job: b, run_date: -1}]
+            b:
+              command: x
+              depends_on: [a]
+        """)
+        config = load_config(_write(tmp_path, text), env={})
+        assert config.effective_calendars["a"] == "uk-business"
+        assert config.effective_calendars["b"] == "uk-business"
+
+    def test_closed_follower_loop_gets_no_calendar(self, tmp_path: Path) -> None:
+        """Followers that follow only each other have nothing to inherit."""
+        text = _text("""
+            a:
+              command: x
+              depends_on: [{job: b, run_date: -1}]
+            b:
+              command: x
+              depends_on: [a]
+        """)
+        config, problems = build_config(_write(tmp_path, text), env={})
+        assert problems == []
+        assert config.effective_calendars == {"a": None, "b": None}
 
 
 class TestScheduleErrors:

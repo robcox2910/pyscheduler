@@ -16,6 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pyscheduler.calendars import BusinessCalendar, merge_calendars
+from pyscheduler.config.calendar_inheritance import resolve_calendars
 from pyscheduler.config.fields import (
     Reader,
     check_keys,
@@ -378,6 +379,7 @@ def build_config(
         sources=loader.sources,
         calendar_includes={n: tuple(i for i, _ in c.includes) for n, c in raw.items()},
         calendar_sources={n: c.source for n, c in raw.items()},
+        effective_calendars=resolve_calendars(jobs).effective,
     )
     return config, problems
 
