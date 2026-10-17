@@ -68,4 +68,5 @@ includes them, in sorted order). A job name used twice is a problem that
 names both places.
 
 `load_config` does the same work but raises a `ConfigError` listing every
-problem if there are any, so a broken config never starts running.
+problem if there are any, so a broken config never starts running. It also
+runs the whole-config checks described in [Validation](validation.md).

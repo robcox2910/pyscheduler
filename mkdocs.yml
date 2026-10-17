@@ -48,3 +48,4 @@ nav:
       - "Cron Expressions (The Alarm Clock With Many Dials)": concepts/cron.md
       - "Time Zones and DST (The Clocks Change, and the Alarm Still Rings Once)": concepts/time-zones-and-dst.md
       - "Config Files (The Recipe Book)": concepts/config.md
+      - "Validation (The Teacher Who Checks Your Work Before the Test)": concepts/validation.md

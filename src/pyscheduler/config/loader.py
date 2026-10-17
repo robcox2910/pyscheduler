@@ -10,7 +10,7 @@ import hashlib
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -31,6 +31,7 @@ from pyscheduler.config.fields import (
 )
 from pyscheduler.config.job_fields import JobFields, build_job, merge_fields, read_job_fields
 from pyscheduler.config.model import Config, ConfigError, JobDef, Problem, Settings, SourceRef
+from pyscheduler.config.validate import validate_config
 from pyscheduler.values import check_name
 from pyscheduler.yamlish import Map, Node, YamlError, parse
 
@@ -382,14 +383,24 @@ def build_config(
 
 
 def load_config(path: Path, *, env: Mapping[str, str] | None = None) -> Config:
-    """Load ``path`` into a ``Config``.
+    """Load ``path`` into a ``Config``, checking each field and then the whole.
+
+    The semantic checks of ``validate_config`` run even when fields had
+    errors, so every problem is reported at once. Jobs with field errors
+    are left out of those checks, so one mistake is not reported twice.
 
     Raises:
         ConfigError: If there is any error (warnings do not stop the load).
 
     """
     config, problems = build_config(path, env=env)
+    broken = frozenset(p.job for p in problems if p.job is not None and p.severity == "error")
+    order = {name: i for i, name in enumerate(config.sources)}
+    problems = sorted(
+        [*problems, *validate_config(config, broken_jobs=broken)],
+        key=lambda p: (order.get(p.file, -1), p.line),
+    )
     errors = tuple(p for p in problems if p.severity == "error")
     if errors:
         raise ConfigError(errors)
-    return config
+    return replace(config, warnings=tuple(p for p in problems if p.severity == "warning"))
