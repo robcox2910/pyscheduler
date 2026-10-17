@@ -19,3 +19,4 @@ something goes wrong.
 - [Time Zones and DST (The Clocks Change, and the Alarm Still Rings Once)](concepts/time-zones-and-dst.md)
 - [Config Files (The Recipe Book)](concepts/config.md)
 - [Validation (The Teacher Who Checks Your Work Before the Test)](concepts/validation.md)
+- [Forecast (The Weather Report for Jobs)](concepts/forecast.md)
