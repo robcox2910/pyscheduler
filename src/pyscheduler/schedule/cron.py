@@ -15,6 +15,7 @@ applies. ``?`` is not supported.
 import calendar
 from dataclasses import dataclass
 from datetime import date, time
+from functools import lru_cache
 
 MACROS = {
     "@hourly": "0 * * * *",
@@ -35,6 +36,7 @@ DAY_NAMES = {name: i for i, name in enumerate(["sun", "mon", "tue", "wed", "thu"
 SUNDAY_ALT = 7
 DAYS_IN_WEEK = 7
 MAX_NTH = 5
+TIMES_CACHE_SIZE = 256
 
 MINUTE = "minute"
 HOUR = "hour"
@@ -194,8 +196,8 @@ class CronExpr:
         return frozenset(plain), frozenset(nth), frozenset(last)
 
     def times(self) -> tuple[time, ...]:
-        """Return every hour and minute combination, sorted."""
-        return tuple(time(h, m) for h in sorted(self.hours) for m in sorted(self.minutes))
+        """Return every hour and minute combination, sorted (computed once per dial set)."""
+        return _times(self.hours, self.minutes)
 
     def matches_day(self, d: date) -> bool:
         """Return whether ``d`` is allowed by the day, month and weekday rules."""
@@ -216,6 +218,12 @@ class CronExpr:
         if self.dow_restricted:
             return dow_ok
         return True
+
+
+@lru_cache(maxsize=TIMES_CACHE_SIZE)
+def _times(hours: frozenset[int], minutes: frozenset[int]) -> tuple[time, ...]:
+    """Return every hour and minute combination, sorted."""
+    return tuple(time(h, m) for h in sorted(hours) for m in sorted(minutes))
 
 
 def _single_dow(token: str) -> int:

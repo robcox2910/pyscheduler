@@ -50,6 +50,11 @@ With `run_date: previous_business_day`, Monday's run is about Friday's
 work, just like homework handed in on Monday is the work set on Friday.
 
 If two schedules land on the same instant, the job fires only once.
+This holds even across days: if last night's 22:00-02:00 window and
+today's 01:00 alarm both want 01:00, `firings_between` and `next_firing`
+ring once, with the **earlier** day's run date. `firings_on` shows one
+landing day at a time, so it can list an instant that the previous day's
+window also produced. Use the stream for the deduplicated list.
 
 ## Try It
 

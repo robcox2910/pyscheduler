@@ -2,6 +2,7 @@
 
 import itertools
 import random
+import time as clock
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -29,6 +30,10 @@ CHAIN = 200
 SEEDS = range(1, 21)
 WEEK_START = date(2026, 10, 19)
 DAYS_IN_WEEK = 7
+LORD_HOWE = ZoneInfo("Australia/Lord_Howe")
+LORD_HOWE_FALL_BACK_COUNT = 11
+PERF_CALLS = 1000
+PERF_BUDGET_SECONDS = 1.0
 HALF = 0.5
 
 
@@ -72,6 +77,20 @@ class TestResolveLocal:
         jump = _utc(2026, 9, 6, 4)
         assert resolve_local(date(2026, 9, 6), time(0), santiago) == jump
         assert resolve_local(date(2026, 9, 6), time(0, 30, 0, 500), santiago) == jump
+
+    def test_lord_howe_half_hour_dst(self) -> None:
+        """Lord Howe moves its clocks by 30 minutes, and both cases still hold."""
+        gap = resolve_local(date(2026, 10, 4), time(2, 15), LORD_HOWE)
+        assert gap == _utc(2026, 10, 3, 15, 30)
+        fold = resolve_local(date(2027, 4, 4), time(1, 45), LORD_HOWE)
+        assert fold == _utc(2027, 4, 3, 14, 45)
+        every = _Job((EverySchedule(timedelta(minutes=15), time(1), time(3)),), LORD_HOWE)
+        got = firings_on(every, date(2027, 4, 4), ALL_DAYS)
+        assert len(got) == LORD_HOWE_FALL_BACK_COUNT
+        assert (got[0].scheduled_at, got[-1].scheduled_at) == (
+            _utc(2027, 4, 3, 14),
+            _utc(2027, 4, 3, 16, 30),
+        )
 
     def test_result_is_utc(self) -> None:
         """The result is aware and in UTC."""
@@ -179,6 +198,32 @@ class TestFiringsBetween:
         )
         assert got == [Firing(_utc(2026, 10, 20), date(2026, 10, 19))]
 
+    def test_crossing_window_on_non_business_opening_day(self) -> None:
+        """A window opened on Sunday is dropped even though Monday is a business day."""
+        job = _Job((EverySchedule(timedelta(hours=1), time(22), time(2)),))
+        sunday_evening, monday_night = _utc(2026, 10, 25, 21), _utc(2026, 10, 26, 3)
+        assert list(firings_between(job, UK_BUSINESS, sunday_evening, monday_night)) == []
+        got = next_firing(job, UK_BUSINESS, sunday_evening)
+        assert got == Firing(_utc(2026, 10, 26, 22), date(2026, 10, 26))
+
+    @pytest.mark.parametrize(
+        ("start", "end", "name"),
+        [
+            (datetime(2026, 10, 19), _utc(2026, 10, 20), "start"),  # noqa: DTZ001
+            (_utc(2026, 10, 19), datetime(2026, 10, 20), "end"),  # noqa: DTZ001
+        ],
+    )
+    def test_rejects_naive(self, start: datetime, end: datetime, name: str) -> None:
+        """Naive datetimes are rejected straight away, not on first use."""
+        with pytest.raises(ValueError, match=f"{name} must be timezone-aware"):
+            firings_between(_cron("0 * * * *"), ALL_DAYS, start, end)
+
+    def test_unhashable_schedule_still_works(self) -> None:
+        """A schedule that cannot be cached is computed directly."""
+        job = _Job((_Unhashable(),))
+        got = list(firings_between(job, ALL_DAYS, _utc(2026, 10, 19), _utc(2026, 10, 20, 12)))
+        assert [f.scheduled_at for f in got] == [_utc(2026, 10, 19, 12), _utc(2026, 10, 20, 12)]
+
     def test_is_lazy(self) -> None:
         """A huge span yields its first firing without computing the rest."""
         job = _cron("* * * * *")
@@ -189,6 +234,18 @@ class TestFiringsBetween:
         """A backwards span yields nothing."""
         job = _cron("0 * * * *")
         assert list(firings_between(job, ALL_DAYS, _utc(2026, 10, 19), _utc(2026, 10, 18))) == []
+
+
+@dataclass
+class _Unhashable:
+    """A mutable (so unhashable) schedule that fires at noon UTC."""
+
+    crosses_midnight: bool = False
+
+    def instants(self, day: date, tz: ZoneInfo, calendar: BusinessCalendar) -> list[datetime]:
+        """Return noon on ``day``."""
+        del tz, calendar
+        return [datetime.combine(day, time(12), tzinfo=UTC)]
 
 
 def _random_job(rng: random.Random) -> _Job:
@@ -244,6 +301,22 @@ class TestNextFiring:
         job = _cron("0 9 * * *")
         got = list(firings_between(job, ALL_DAYS, _utc(1, 1, 1), _utc(1, 1, 2, 9)))
         assert [f.run_date for f in got] == [date(1, 1, 1), date(1, 1, 2)]
+
+    def test_rejects_naive_after(self) -> None:
+        """next_firing names the naive argument."""
+        with pytest.raises(ValueError, match="after must be timezone-aware"):
+            next_firing(_cron("0 * * * *"), ALL_DAYS, datetime(2026, 10, 19))  # noqa: DTZ001
+
+    def test_chained_calls_are_fast(self) -> None:
+        """A thousand chained calls on an every-minute cron stay well under a second."""
+        job = _cron("* * * * *", LONDON)
+        after = _utc(2026, 10, 24, 23)
+        began = clock.perf_counter()
+        for _ in range(PERF_CALLS):
+            f = next_firing(job, ALL_DAYS, after)
+            assert f is not None
+            after = f.scheduled_at
+        assert clock.perf_counter() - began < PERF_BUDGET_SECONDS
 
     def test_next_simple(self) -> None:
         """The next firing is strictly after the given instant."""

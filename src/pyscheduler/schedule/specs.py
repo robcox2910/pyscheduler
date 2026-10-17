@@ -31,6 +31,11 @@ class Schedule(Protocol):
         """
         ...
 
+    @property
+    def crosses_midnight(self) -> bool:
+        """Return whether firings may land after the landing day's own midnight."""
+        ...
+
 
 def _check_range(name: str, values: frozenset[int] | None, low: int, high: int) -> None:
     """Raise ``ValueError`` if any filter value falls outside ``low``-``high``."""
@@ -57,6 +62,11 @@ class _Filtered:
         """Validate the filters."""
         _check_range("days", self.days, 0, DAYS_IN_WEEK - 1)
         _check_range("months", self.months, 1, MONTHS_IN_YEAR)
+
+    @property
+    def crosses_midnight(self) -> bool:
+        """Return whether firings may land after the landing day ends (no, by default)."""
+        return False
 
     def _lands(self, day: date) -> bool:
         """Return whether ``day`` passes the weekday and month filters."""
@@ -119,12 +129,17 @@ class EverySchedule(_Filtered):
             msg = f"step must be positive, got {self.step}"
             raise ValueError(msg)
 
+    @property
+    def crosses_midnight(self) -> bool:
+        """Return whether the window closes on the day after it opens."""
+        return self.start > self.end
+
     def instants(self, day: date, tz: ZoneInfo, calendar: BusinessCalendar) -> list[datetime]:
         """Return the instants of the window opened on ``day``."""
         del calendar
         if not self._lands(day):
             return []
-        end_day = day if self.start <= self.end else day + timedelta(days=1)
+        end_day = day + timedelta(days=1) if self.crosses_midnight else day
         current = resolve_local(day, self.start, tz)
         last = resolve_local(end_day, self.end, tz)
         out: list[datetime] = []
