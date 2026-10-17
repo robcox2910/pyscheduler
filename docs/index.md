@@ -13,3 +13,4 @@ something goes wrong.
 ## Concepts
 
 - [YAML (A Recipe Card With Indents)](concepts/yaml.md)
+- [Templates and Values (Form Letters and Labels)](concepts/templates.md)
