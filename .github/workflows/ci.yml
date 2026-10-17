@@ -1,0 +1,14 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: robcox2910/robcox2910.github.io/.github/workflows/python-ci.yml@v1

@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+htmlcov/
+.coverage
+.pyright/
+.DS_Store
+src/pyscheduler/_version.py
+site/
+.superpowers/

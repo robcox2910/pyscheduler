@@ -1,0 +1,16 @@
+name: Deploy Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  docs:
+    uses: robcox2910/robcox2910.github.io/.github/workflows/docs.yml@v1
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    with:
+      coverage-report: false

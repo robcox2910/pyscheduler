@@ -1,0 +1,43 @@
+site_name: PyScheduler
+site_url: https://robcox2910.github.io/pyscheduler/
+repo_url: https://github.com/robcox2910/pyscheduler
+repo_name: robcox2910/pyscheduler
+
+# theme:start
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep-purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep-purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.expand
+    - toc.integrate
+    - search.highlight
+# theme:end
+
+exclude_docs: |
+  superpowers/
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - tables
+
+nav:
+  - Home: index.md
