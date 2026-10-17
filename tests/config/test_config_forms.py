@@ -17,7 +17,8 @@ from pyscheduler.schedule.specs import (
 
 type WriteYaml = Callable[[str, str], Path]
 
-LINE_TWO = 2
+TWO_SCHEDULES = 2
+TWO_PROBLEMS = 2
 LINE_FIVE = 5
 LINE_SIX = 6
 LINE_SEVEN = 7
@@ -63,7 +64,7 @@ class TestScheduleForms:
     def test_list(self, write_yaml: WriteYaml) -> None:
         """A list holds several schedules, and may include ``manual``."""
         job = self._schedules(write_yaml, '["@daily", {at: "09:00"}, manual]')
-        assert len(job.schedules) == LINE_TWO
+        assert len(job.schedules) == TWO_SCHEDULES
         assert job.manual
 
     def test_every(self, write_yaml: WriteYaml) -> None:
@@ -141,6 +142,6 @@ class TestDependencies:
         """A dependency mapping needs ``job`` and a known ``on``."""
         body = "command: x\ndepends_on: [{on: done}, {job: a, on: maybe}]"
         problems = _errors(write_yaml("s.yaml", _job("j", body)))
-        assert len(problems) == LINE_TWO
+        assert len(problems) == TWO_PROBLEMS
         assert "job" in problems[0].message
         assert "maybe" in problems[1].message

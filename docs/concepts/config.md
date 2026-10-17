@@ -58,7 +58,10 @@ for problem in problems:
 
 `defaults:` is laid under every job like a background sheet: wherever a job
 writes a key, the job's value shows; elsewhere the default shows through.
-Nested settings such as `retries` merge key by key.
+Nested mappings merge key by key too: `retries`, `env` and `pools` one
+level deep, and `alerts` at every level. So defaults of `env: {A: "1"}`
+and a job's `env: {B: "2"}` give the job both `A` and `B`. Lists such as
+`tags` are replaced whole, not joined.
 
 `include: ["jobs/*.yaml"]` pulls in more files (relative to the file that
 includes them, in sorted order). A job name used twice is a problem that

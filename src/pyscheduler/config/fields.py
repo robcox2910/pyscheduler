@@ -26,7 +26,7 @@ from pyscheduler.yamlish import Map, Node, Scalar, Seq
 
 _INT = re.compile(r"[-+]?\d+", re.ASCII)
 _FLOAT = re.compile(r"[-+]?(\d+(\.\d*)?|\.\d+)", re.ASCII)
-_HHMM = re.compile(r"\d{2}:\d{2}", re.ASCII)
+MAX_INT_CHARS = 20
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
@@ -138,6 +138,9 @@ def read_int(r: Reader, node: Node, what: str, *, minimum: int | None = None) ->
     if _INT.fullmatch(text) is None:
         r.add(node.line, f"{what} must be an integer, got {text!r}")
         return None
+    if len(text) > MAX_INT_CHARS:
+        r.add(node.line, f"{what} is too large ({len(text)} characters)")
+        return None
     value = int(text)
     if minimum is not None and value < minimum:
         r.add(node.line, f"{what} must be at least {minimum}, got {value}")
@@ -186,8 +189,8 @@ def read_must_start_by(r: Reader, node: Node, what: str) -> MustStartBy | None:
     """Return a clock time (``HH:MM``) or a duration after the scheduled time."""
 
     def convert(text: str) -> MustStartBy:
-        """Parse a time if it looks like one, else a duration."""
-        return parse_time(text) if _HHMM.fullmatch(text) else parse_duration(text)
+        """Parse a time if it has a colon, else a duration."""
+        return parse_time(text) if ":" in text else parse_duration(text)
 
     return _convert(r, node, what, convert)
 

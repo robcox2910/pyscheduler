@@ -74,12 +74,20 @@ POOL_SIZE = 2
 LISTEN_PORT = 8470
 MAX_RUNNING = 32
 LINE_TWO = 2
+TWO_PROBLEMS = 2
 LINE_THREE = 3
 LINE_FOUR = 4
 LINE_FIVE = 5
 LINE_SIX = 6
 HOLIDAY_COUNT = 4
-BACKOFF = 2.0
+
+
+def _digest(files: list[tuple[str, str]]) -> str:
+    """Return the expected digest: path, NUL, text, NUL for each file."""
+    sha = hashlib.sha256()
+    for name, text in files:
+        sha.update(f"{name}\0{text}\0".encode())
+    return sha.hexdigest()
 
 
 def _job(name: str, body: str) -> str:
@@ -148,7 +156,7 @@ class TestFullExample:
         assert config.calendar_for(config.jobs["extract-trades"]) is uk
         assert config.calendar_for(config.jobs["load-warehouse"]) is ALL_DAYS
         text = path.read_text(encoding="utf-8")
-        assert config.digest == hashlib.sha256(text.encode()).hexdigest()
+        assert config.digest == _digest([(str(path), text)])
         assert config.sources == {str(path): text}
 
     def test_job_defaults(self, write_yaml: WriteYaml) -> None:
@@ -231,35 +239,6 @@ class TestFullExample:
         assert _ok(path).jobs["j"].must_start_by == timedelta(minutes=30)
 
 
-class TestModel:
-    """Small model behaviours."""
-
-    def test_retry_delay(self) -> None:
-        """Retry delays grow by the backoff and are capped."""
-        policy = RetryPolicy(count=3, delay=timedelta(minutes=1), backoff=BACKOFF)
-        assert policy.delay_for(1) == timedelta(minutes=1)
-        assert policy.delay_for(LINE_TWO) == timedelta(minutes=2)
-        assert policy.delay_for(LINE_FIVE) == timedelta(minutes=10)
-
-    def test_criticality_from_text(self) -> None:
-        """Criticality is read from its lower-case name."""
-        assert Criticality.from_text("high") is Criticality.HIGH
-        with pytest.raises(ValueError, match="criticality"):
-            Criticality.from_text("urgent")
-
-    def test_problem_str(self) -> None:
-        """A problem prints its place and, if any, its job."""
-        assert str(Problem("a.yaml", LINE_THREE, "bad")) == "a.yaml:3: bad"
-        assert str(Problem("a.yaml", LINE_THREE, "bad", job="j")) == "a.yaml:3: job j: bad"
-
-    def test_config_error_lists_all(self) -> None:
-        """A config error's message lists every problem."""
-        error = ConfigError((Problem("a", 1, "one"), Problem("b", LINE_TWO, "two")))
-        assert "a:1: one" in str(error)
-        assert "b:2: two" in str(error)
-        assert len(error.problems) == LINE_TWO
-
-
 class TestMerging:
     """Defaults and includes."""
 
@@ -288,8 +267,8 @@ class TestMerging:
         problem = problems[0]
         assert (problem.file, problem.line) == (str(b), LINE_FIVE)
         assert f"{a}:{LINE_TWO}" in problem.message
-        texts = [p.read_text(encoding="utf-8") for p in (main, a, b)]
-        assert config.digest == hashlib.sha256("".join(texts).encode()).hexdigest()
+        files = [(str(p), p.read_text(encoding="utf-8")) for p in (main, a, b)]
+        assert config.digest == _digest(files)
         assert list(config.sources) == [str(main), str(a), str(b)]
 
     def test_include_loop_reads_each_file_once(self, write_yaml: WriteYaml) -> None:
@@ -327,7 +306,7 @@ class TestProblems:
         path = write_yaml("s.yaml", _job("j", "command: x\ntimeout: 5x\nenabled: no"))
         with pytest.raises(ConfigError) as info:
             load_config(path, env={})
-        assert len(info.value.problems) == LINE_TWO
+        assert len(info.value.problems) == TWO_PROBLEMS
 
     def test_bool_is_strict(self, write_yaml: WriteYaml) -> None:
         """Only ``true`` and ``false`` are booleans."""

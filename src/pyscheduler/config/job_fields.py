@@ -7,7 +7,7 @@ form: wherever the job wrote something it shows; elsewhere the default
 shows through. Finally the gaps are filled with the built-in defaults.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields, replace
 from datetime import timedelta
 from enum import StrEnum
@@ -255,11 +255,35 @@ def _overlay[T: (JobFields, RetryFields)](base: T, top: T) -> T:
     return replace(base, **given)
 
 
+def _deep_merge(base: Mapping[str, object], top: Mapping[str, object]) -> dict[str, object]:
+    """Merge ``top`` over ``base`` key by key, recursing into nested mappings."""
+    out = dict(base)
+    for key, value in top.items():
+        below = out.get(key)
+        if isinstance(below, dict) and isinstance(value, dict):
+            out[key] = _deep_merge(
+                cast("dict[str, object]", below), cast("dict[str, object]", value)
+            )
+        else:
+            out[key] = value
+    return out
+
+
 def merge_fields(defaults: JobFields, job: JobFields) -> JobFields:
-    """Lay ``job`` over ``defaults``; ``retries`` merges key by key."""
+    """Lay ``job`` over ``defaults``; nested mappings merge key by key.
+
+    ``retries``, ``env`` and ``pools`` merge one level deep; ``alerts``
+    merges at every level. Lists (such as ``tags``) are replaced whole.
+    """
     merged = _overlay(defaults, job)
     if defaults.retries is not None and job.retries is not None:
         merged.retries = _overlay(defaults.retries, job.retries)
+    if defaults.env is not None and job.env is not None:
+        merged.env = {**defaults.env, **job.env}
+    if defaults.pools is not None and job.pools is not None:
+        merged.pools = {**defaults.pools, **job.pools}
+    if defaults.alerts is not None and job.alerts is not None:
+        merged.alerts = _deep_merge(defaults.alerts, job.alerts)
     return merged
 
 

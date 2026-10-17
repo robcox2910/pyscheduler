@@ -8,6 +8,7 @@ once instead of fixing them one reload at a time.
 
 import hashlib
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -25,7 +26,6 @@ from pyscheduler.config.fields import (
     read_map,
     read_seq,
     read_str,
-    read_str_list,
     read_weekday,
     read_zone,
 )
@@ -42,6 +42,7 @@ SCHEDULER_KEYS = (
 )  # fmt: skip
 CALENDAR_KEYS = ("weekdays", "holidays", "extra_days", "include")
 GLOB_CHARS = frozenset("*?[")
+_PORT = re.compile(r"\d{1,5}", re.ASCII)
 MAX_PORT = 65535
 DEFAULT_NAME = "pysched"
 DEFAULT_MAX_RUNNING = 32
@@ -76,7 +77,7 @@ class _Loader:
     def __init__(self, main: Path, env: Mapping[str, str]) -> None:
         """Prepare to load ``main``."""
         self.main = main
-        self.r = Reader(str(main), env)
+        self.r = Reader(os.path.normpath(main), env)
         self.docs: list[_Doc] = []
         self.sources: dict[str, str] = {}
         self.seen: set[Path] = set()
@@ -85,7 +86,7 @@ class _Loader:
 
     def read_file(self, path: Path, r: Reader, line: int) -> None:
         """Parse ``path`` and, depth first, the files it includes."""
-        name = str(path)
+        name = os.path.normpath(path)
         key = path.resolve()
         if key in self.seen:
             return
@@ -95,12 +96,18 @@ class _Loader:
         except OSError as exc:
             r.add(line, f"cannot read config file {name}: {exc.strerror or exc}")
             return
+        except UnicodeDecodeError as exc:
+            r.add(line, f"cannot read config file {name}: not valid UTF-8 ({exc.reason})")
+            return
         self.sources[name] = text
         here = r.for_file(name)
         try:
             root = parse(text, name)
         except YamlError as exc:
             here.add(exc.line, exc.message)
+            return
+        except RecursionError:
+            here.add(1, "nesting too deep")
             return
         if not isinstance(root, Map):
             here.add(root.line, "the top level of a config file must be a mapping")
@@ -132,7 +139,7 @@ class _Loader:
         out: list[tuple[Reader, Map]] = []
         for doc in self.docs:
             if key in doc.root.items:
-                r = self.r.for_file(str(doc.path))
+                r = self.r.for_file(os.path.normpath(doc.path))
                 mapping = read_map(r, doc.root.items[key], key)
                 if mapping is not None:
                     out.append((r, mapping))
@@ -140,10 +147,10 @@ class _Loader:
 
     def main_section(self, key: str) -> tuple[Reader, Map] | None:
         """Return the reader and mapping for ``key`` in the main file only."""
-        found = self.readers(key)
-        if found and found[0][0].file == str(self.main):
-            return found[0]
-        return None
+        if not self.docs or self.docs[0].path != self.main or key not in self.docs[0].root.items:
+            return None
+        mapping = read_map(self.r, self.docs[0].root.items[key], key)
+        return None if mapping is None else (self.r, mapping)
 
     # --- sections ------------------------------------------------------
 
@@ -157,10 +164,12 @@ class _Loader:
     def calendars(self) -> tuple[dict[str, BusinessCalendar], dict[str, _RawCalendar]]:
         """Read every calendar, then merge each one's included holidays."""
         raw: dict[str, _RawCalendar] = {}
+        seen: dict[str, SourceRef] = {}
         for r, section in self.readers("calendars"):
             for name, node in section.items.items():
                 line = section.key_lines[name]
-                if _named(r, name, line, _source(raw.get(name)), "calendar"):
+                if _named(r, name, line, seen.get(name), "calendar"):
+                    seen[name] = SourceRef(r.file, line)
                     cal = _calendar(r, name, node, line)
                     if cal is not None:
                         raw[name] = cal
@@ -196,12 +205,14 @@ class _Loader:
         if found is not None:
             defaults, _ = read_job_fields(found[0], found[1], "defaults")
         jobs: dict[str, JobDef] = {}
+        seen: dict[str, SourceRef] = {}
         for r, section in self.readers("jobs"):
             for name, node in section.items.items():
                 line = section.key_lines[name]
                 jr = r.for_job(name)
-                if not _named(jr, name, line, _source(jobs.get(name)), "job"):
+                if not _named(jr, name, line, seen.get(name), "job"):
                     continue
+                seen[name] = SourceRef(r.file, line)
                 mapping = read_map(jr, node, f"job {name}")
                 if mapping is None:
                     continue
@@ -228,11 +239,6 @@ def _named(r: Reader, name: str, line: int, first: SourceRef | None, kind: str) 
     return False
 
 
-def _source(thing: _RawCalendar | JobDef | None) -> SourceRef | None:
-    """Return where ``thing`` was defined, if it exists."""
-    return None if thing is None else thing.source
-
-
 def _matches(base: Path, pattern: str) -> list[Path]:
     """Return the files an include pattern names, relative to ``base``, sorted."""
     path = Path(pattern)
@@ -250,7 +256,7 @@ def _listen(r: Reader, node: Node) -> tuple[str, int] | None:
     if text is None:
         return None
     host, sep, port = text.rpartition(":")
-    if not sep or not host or not port.isdigit() or int(port) > MAX_PORT:
+    if not sep or not host or _PORT.fullmatch(port) is None or int(port) > MAX_PORT:
         r.add(node.line, f"listen must be host:port with a port 0-{MAX_PORT}, got {text!r}")
         return None
     return host, int(port)
@@ -313,11 +319,24 @@ def _calendar(r: Reader, name: str, node: Node, line: int) -> _RawCalendar | Non
 
     includes: list[tuple[str, int]] = []
     if "include" in items:
-        nodes = read_seq(r, items["include"], "include") or []
-        names = read_str_list(r, items["include"], "include") or ()
-        includes = [(n, item.line) for n, item in zip(names, nodes, strict=False)]
+        for item in read_seq(r, items["include"], "include") or []:
+            other = read_str(r, item, "include")
+            if other is not None:
+                includes.append((other, item.line))
     cal = BusinessCalendar(name, weekdays, dates("holidays"), dates("extra_days"))
     return _RawCalendar(cal, tuple(includes), SourceRef(r.file, line))
+
+
+def _digest(sources: Mapping[str, str]) -> str:
+    """Return a sha256 over each source's path and text, in load order.
+
+    Each path and text ends with a NUL byte, so moving text from one file
+    to the next (or renaming a file) changes the digest.
+    """
+    sha = hashlib.sha256()
+    for name, text in sources.items():
+        sha.update(name.encode("utf-8") + b"\0" + text.encode("utf-8") + b"\0")
+    return sha.hexdigest()
 
 
 def build_config(
@@ -347,7 +366,7 @@ def build_config(
     jobs = loader.jobs(settings.timezone)
     order = {name: i for i, name in enumerate(loader.sources)}
     problems = sorted(loader.r.problems, key=lambda p: (order.get(p.file, -1), p.line))
-    digest = hashlib.sha256("".join(loader.sources.values()).encode("utf-8")).hexdigest()
+    digest = _digest(loader.sources)
     config = Config(
         settings=settings,
         calendars=calendars,
