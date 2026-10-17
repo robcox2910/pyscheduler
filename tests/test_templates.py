@@ -39,6 +39,11 @@ class TestRender:
         with pytest.raises(ValueError, match="template"):
             render("{job:{attempt}}", {"job": "j", "attempt": 1})
 
+    def test_render_bad_format_spec(self) -> None:
+        """A spec the value cannot take raises ValueError."""
+        with pytest.raises(ValueError, match="template"):
+            render("{x:d}", {"x": None})
+
 
 class TestPlaceholders:
     """Placeholder names can be listed without rendering."""
@@ -58,6 +63,8 @@ class TestPlaceholders:
         """Malformed templates raise ValueError."""
         with pytest.raises(ValueError, match="template"):
             placeholders_in("{job")
+        with pytest.raises(ValueError, match="nested"):
+            placeholders_in("{a:{b}}")
 
 
 class TestExpandEnv:

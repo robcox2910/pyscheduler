@@ -25,6 +25,12 @@ class TestParseDuration:
             with pytest.raises(ValueError, match="duration"):
                 parse_duration(bad)
 
+    def test_parse_duration_overflow(self) -> None:
+        """Huge numbers raise ValueError, not OverflowError."""
+        for huge in ["99999999999d", "1d99999999999999999999s"]:
+            with pytest.raises(ValueError, match="too large"):
+                parse_duration(huge)
+
 
 class TestParseTime:
     """Times are HH:MM."""

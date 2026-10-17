@@ -29,7 +29,11 @@ def parse_duration(text: str) -> timedelta:
         msg = f"invalid duration {text!r}: use units like 90s, 15m, 1h30m or 1d"
         raise ValueError(msg)
     days, hours, minutes, seconds = (int(part or 0) for part in match.groups())
-    result = timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+    try:
+        result = timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+    except OverflowError as exc:
+        msg = f"invalid duration {text!r}: too large"
+        raise ValueError(msg) from exc
     if result <= timedelta(0):
         msg = f"invalid duration {text!r}: must be greater than zero"
         raise ValueError(msg)

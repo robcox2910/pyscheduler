@@ -16,27 +16,33 @@ _ENV = re.compile(r"\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _FORMATTER = Formatter()
 
 
-def _fields(template: str) -> list[tuple[str, str | None, str]]:
-    """Return ``(name, conversion, spec)`` for each field in the template."""
+def _parse(template: str) -> list[tuple[str, str | None, str | None, str | None]]:
+    """Parse a template into ``(literal, name, spec, conversion)`` tuples.
+
+    Raises:
+        ValueError: If the template is malformed or has nested fields in a spec.
+
+    """
     try:
-        return [
-            (name, conversion, spec or "")
-            for _, name, spec, conversion in _FORMATTER.parse(template)
-            if name is not None
-        ]
+        parsed = list(_FORMATTER.parse(template))
     except ValueError as exc:
         msg = f"invalid template {template!r}: {exc}"
         raise ValueError(msg) from exc
+    for _, name, spec, _ in parsed:
+        if name is not None and spec and "{" in spec:
+            msg = f"invalid template {template!r}: nested fields are not supported"
+            raise ValueError(msg)
+    return parsed
 
 
 def placeholders_in(template: str) -> set[str]:
-    """Return the names used as ``{name}`` or ``{name:fmt}``; ``{{`` and ``}}`` are literal."""
-    names: set[str] = set()
-    for name, _, spec in _fields(template):
-        names.add(name)
-        if "{" in spec:
-            names |= placeholders_in(spec)
-    return names
+    """Return the names used as ``{name}`` or ``{name:fmt}``; ``{{`` and ``}}`` are literal.
+
+    Raises:
+        ValueError: If the template is malformed.
+
+    """
+    return {name for _, name, _, _ in _parse(template) if name is not None}
 
 
 def _format_value(value: object, spec: str) -> str:
@@ -44,10 +50,8 @@ def _format_value(value: object, spec: str) -> str:
     if isinstance(value, date):
         if spec:
             return value.strftime(spec)
-        if isinstance(value, datetime):
-            if value.utcoffset() == timedelta(0) and value.tzinfo is not None:
-                return value.astimezone(UTC).replace(tzinfo=None).isoformat() + "Z"
-            return value.isoformat()
+        if isinstance(value, datetime) and value.utcoffset() == timedelta(0):
+            return value.astimezone(UTC).replace(tzinfo=None).isoformat() + "Z"
         return value.isoformat()
     return format(value, spec)
 
@@ -64,22 +68,18 @@ def render(template: str, values: Mapping[str, object]) -> str:
 
     """
     parts: list[str] = []
-    try:
-        parsed = list(_FORMATTER.parse(template))
-    except ValueError as exc:
-        msg = f"invalid template {template!r}: {exc}"
-        raise ValueError(msg) from exc
-    for literal, name, spec, conversion in parsed:
+    for literal, name, spec, conversion in _parse(template):
         parts.append(literal)
         if name is None:
             continue
-        if spec and "{" in spec:
-            msg = f"invalid template {template!r}: nested fields are not supported"
-            raise ValueError(msg)
         value = values[name]
         if conversion:
             value = _FORMATTER.convert_field(value, conversion)
-        parts.append(_format_value(value, spec or ""))
+        try:
+            parts.append(_format_value(value, spec or ""))
+        except TypeError as exc:
+            msg = f"invalid template {template!r}: {exc}"
+            raise ValueError(msg) from exc
     return "".join(parts)
 
 
