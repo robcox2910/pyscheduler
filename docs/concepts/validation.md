@@ -119,4 +119,6 @@ Warnings end up on `config.warnings`:
 
 If the loader already found a mistake in a job (a bad cron string, say),
 validation leaves that job alone, so you don't get a second, confusing
-"this job has no schedule" message for the same typo.
+"this job has no schedule" message for the same typo. The same goes for a
+job name used twice: until you rename one of them, that job's whole-config
+checks are skipped, so fix the duplicate and validate again.

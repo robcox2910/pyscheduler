@@ -384,12 +384,21 @@ def build_config(
     return config, problems
 
 
-def load_config(path: Path, *, env: Mapping[str, str] | None = None) -> Config:
+def load_config(
+    path: Path, *, env: Mapping[str, str] | None = None, today: date | None = None
+) -> Config:
     """Load ``path`` into a ``Config``, checking each field and then the whole.
 
     The semantic checks of ``validate_config`` run even when fields had
     errors, so every problem is reported at once. Jobs with field errors
     are left out of those checks, so one mistake is not reported twice.
+    That includes a job whose name is used twice: its semantic checks are
+    skipped until the duplicate is fixed.
+
+    Args:
+        path: The main config file.
+        env: Variables for ``${NAME}`` expansion; ``None`` means ``os.environ``.
+        today: Where the validation horizons start; default today in UTC.
 
     Raises:
         ConfigError: If there is any error (warnings do not stop the load).
@@ -399,7 +408,7 @@ def load_config(path: Path, *, env: Mapping[str, str] | None = None) -> Config:
     broken = frozenset(p.job for p in problems if p.job is not None and p.severity == "error")
     order = {name: i for i, name in enumerate(config.sources)}
     problems = sorted(
-        [*problems, *validate_config(config, broken_jobs=broken)],
+        [*problems, *validate_config(config, today=today, broken_jobs=broken)],
         key=lambda p: (order.get(p.file, -1), p.line),
     )
     errors = tuple(p for p in problems if p.severity == "error")

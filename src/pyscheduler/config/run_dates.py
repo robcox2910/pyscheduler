@@ -103,32 +103,61 @@ class RunDateIndex:
         A scheduled job's come from its firings. A dependency-only job gets
         a run whenever an upstream does, with the offset applied in reverse.
         A disabled job gets none; a manual-only job is unknowable.
+
+        Chains of dependency-only jobs are walked with an explicit stack, so
+        a long chain cannot overflow Python's recursion limit. An upstream
+        met again while it is still being worked out (a loop through
+        run-date offsets) counts as unknowable.
         """
-        if job.name in self._run_dates:
-            return self._run_dates[job.name]
-        self._run_dates[job.name] = None  # guards against offset cycles
-        result: RunDates = None
+        jobs = self.config.jobs
+        stack = [job.name]
+        started: set[str] = set()
+        while stack:
+            name = stack[-1]
+            if name in self._run_dates:
+                stack.pop()
+                continue
+            current = jobs[name]
+            if not current.enabled or not current.dependency_only:
+                self._run_dates[name] = self._own_run_dates(current)
+                stack.pop()
+                continue
+            if name not in started:
+                started.add(name)
+                pending = [
+                    d.job
+                    for d in current.depends_on
+                    if d.job in jobs and d.job not in self._run_dates and d.job not in started
+                ]
+                if pending:
+                    stack.extend(pending)
+                    continue
+            stack.pop()
+            self._run_dates[name] = self._derived_run_dates(current)
+        return self._run_dates[job.name]
+
+    def _own_run_dates(self, job: JobDef) -> RunDates:
+        """Return a job's run dates when they do not come from upstreams."""
         if not job.enabled:
-            result = frozenset()
-        elif job.schedules:
+            return frozenset()
+        if job.schedules:
             pairs = self.landings(job)
-            result = None if pairs is None else frozenset(r for _, r in pairs)
-        elif job.dependency_only:
-            result = self._derived_run_dates(job)
-        self._run_dates[job.name] = result
-        return result
+            return None if pairs is None else frozenset(r for _, r in pairs)
+        return None  # manual only: anyone may trigger it on any day
 
     def _derived_run_dates(self, job: JobDef) -> RunDates:
-        """Return a dependency-only job's run dates, from its upstreams'."""
+        """Return a dependency-only job's run dates, from its upstreams' (already known)."""
         cal = self.calendar(job)
         if cal is None:
             return None
         dates: set[date] = set()
         for dep in job.depends_on:
-            up = self.config.jobs.get(dep.job)
-            if up is None or not -MAX_CHECKED_OFFSET <= dep.run_date_offset <= 0:
+            if (
+                dep.job not in self.config.jobs
+                or not -MAX_CHECKED_OFFSET <= dep.run_date_offset <= 0
+            ):
                 return None
-            theirs = self.run_dates(up)
+            theirs = self._run_dates.get(dep.job)
             if theirs is None:
                 return None
             try:
@@ -136,3 +165,33 @@ class RunDateIndex:
             except ValueError:
                 return None
         return frozenset(dates)
+
+    def root_without(self, job: JobDef, run_date: date) -> tuple[JobDef, date]:
+        """Return the job at the top of a dependency-only chain that lacks ``run_date``.
+
+        ``job`` has no run for ``run_date``. While it is an enabled
+        dependency-only job, step to its first upstream that also lacks the
+        matching run date, and return the first job that is scheduled,
+        disabled or a dead end, with the run date it lacks.
+        """
+        seen: set[str] = set()
+        while job.enabled and job.dependency_only and job.name not in seen:
+            seen.add(job.name)
+            cal = self.calendar(job)
+            step = None
+            for dep in job.depends_on:
+                up = self.config.jobs.get(dep.job)
+                theirs = self._run_dates.get(dep.job)
+                if up is None or theirs is None or cal is None:
+                    continue
+                try:
+                    wanted = cal.shift(run_date, dep.run_date_offset)
+                except ValueError:
+                    continue
+                if wanted not in theirs:
+                    step = (up, wanted)
+                    break
+            if step is None:
+                break
+            job, run_date = step
+        return job, run_date

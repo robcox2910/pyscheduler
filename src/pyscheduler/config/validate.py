@@ -49,7 +49,10 @@ def find_cycles(graph: Mapping[str, Sequence[str]]) -> list[tuple[str, ...]]:
     """Return the cycles found by a depth-first walk of ``graph``.
 
     Each cycle is written as a closed path that starts and ends at its
-    smallest name, such as ``("a", "b", "a")``, and is listed once. Edges
+    smallest name, such as ``("a", "b", "a")``, and is listed once. One
+    cycle is found per back edge of the walk, so every tangle of jobs that
+    wait on each other gets at least one cycle reported, but not every
+    elementary cycle through it is listed (that could be very many). Edges
     to names that are not keys of ``graph`` are ignored. The walk is
     iterative, so long chains cannot overflow the stack.
     """
@@ -319,6 +322,19 @@ class _Checker:
 
     # --- would wait forever ---------------------------------------------
 
+    def wait_message(self, run_date: date, up: JobDef, target: date) -> str:
+        """Describe a run date ``up`` will never have, naming the job at the root."""
+        root, root_date = self.index.root_without(up, target)
+        message = (
+            f"would wait forever: its run for {run_date} needs a run of {up.name!r} for {target}"
+        )
+        if root is up:
+            return message + f", which {_never_message(root)} and no way to get one"
+        return message + (
+            f", which only gets runs from upstream; {root.name!r} needs a run for "
+            f"{root_date} but {_never_message(root)}"
+        )
+
     def check_wait_forever(self, job: JobDef) -> None:
         """Warn when a scheduled job has run dates an upstream can never match."""
         cal = self.calendar(job)
@@ -349,13 +365,14 @@ class _Checker:
                 except ValueError:
                     break
                 if target >= lowest and target not in theirs:
-                    message = (
-                        f"would wait forever: its run for {run_date} needs {up.name!r}'s run "
-                        f"for {target}, but {up.name!r} has no firing for that run date and "
-                        "no way to get a run"
-                    )
+                    message = self.wait_message(run_date, up, target)
                     self.add(dep.source, message, job.name, "warning")
                     break
+
+
+def _never_message(root: JobDef) -> str:
+    """Say why ``root`` will not have the run."""
+    return "is disabled" if not root.enabled else "has no firing for it"
 
 
 def validate_config(
