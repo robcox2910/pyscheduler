@@ -21,14 +21,16 @@ PID_WAIT_SECONDS = 5.0
 RUN_TIMEOUT_SECONDS = 8.0
 
 
-def run_minder(tmp_path: Path, argv: list[str], *, stderr: bool = True) -> int:
+def run_minder(
+    tmp_path: Path, argv: list[str], *, stderr: bool = True, cwd: Path | None = None
+) -> int:
     """Run the minder as a real subprocess and return its exit code."""
-    cmd = [sys.executable, "-m", "pyscheduler.minder", "--status", str(tmp_path / "s.json")]
+    cmd = [sys.executable, "-I", "-m", "pyscheduler.minder", "--status", str(tmp_path / "s.json")]
     cmd += ["--stdout", str(tmp_path / "logs" / "a.out")]
     if stderr:
         cmd += ["--stderr", str(tmp_path / "logs" / "a.err")]
     cmd += ["--", *argv]
-    return subprocess.run(cmd, check=False, timeout=RUN_TIMEOUT_SECONDS).returncode  # noqa: S603
+    return subprocess.run(cmd, check=False, timeout=RUN_TIMEOUT_SECONDS, cwd=cwd).returncode  # noqa: S603
 
 
 def read_json(path: Path) -> dict[str, object]:
@@ -44,6 +46,19 @@ def wait_for(path: Path) -> None:
         if time.monotonic() > deadline:
             pytest.fail(f"{path} never appeared")
         time.sleep(0.01)
+
+
+class GoneChild:
+    """A stand-in child whose process has already disappeared."""
+
+    def __init__(self) -> None:
+        """Start with no signals sent."""
+        self.sent: list[int] = []
+
+    def send_signal(self, sig: int) -> None:
+        """Record the signal, then fail as a vanished process would."""
+        self.sent.append(sig)
+        raise ProcessLookupError
 
 
 class TestMinderProcess:
@@ -93,7 +108,14 @@ class TestMinderProcess:
 
     def test_sigterm_forwarded(self, tmp_path: Path) -> None:
         """SIGTERM to the minder reaches the child, and the minder still writes the status."""
-        cmd = [sys.executable, "-m", "pyscheduler.minder", "--status", str(tmp_path / "s.json")]
+        cmd = [
+            sys.executable,
+            "-I",
+            "-m",
+            "pyscheduler.minder",
+            "--status",
+            str(tmp_path / "s.json"),
+        ]
         cmd += ["--stdout", str(tmp_path / "a.out"), "--"]
         ready = tmp_path / "ready"
         cmd += ["sh", "-c", f'trap "exit 7" TERM; touch "{ready}"; sleep 5 & wait']
@@ -110,7 +132,14 @@ class TestMinderProcess:
 
     def test_group_sigterm(self, tmp_path: Path) -> None:
         """SIGTERM to the whole process group still leaves a status behind."""
-        cmd = [sys.executable, "-m", "pyscheduler.minder", "--status", str(tmp_path / "s.json")]
+        cmd = [
+            sys.executable,
+            "-I",
+            "-m",
+            "pyscheduler.minder",
+            "--status",
+            str(tmp_path / "s.json"),
+        ]
         ready = tmp_path / "ready"
         cmd += ["--stdout", str(tmp_path / "a.out"), "--"]
         cmd += ["sh", "-c", f'trap "exit 7" TERM; touch "{ready}"; sleep 5 & wait']
@@ -123,6 +152,33 @@ class TestMinderProcess:
             proc.kill()
         assert code == EXIT_SEVEN
         assert read_json(tmp_path / "s.json")["exit_code"] == EXIT_SEVEN
+
+    def test_shadowing_module_in_cwd(self, tmp_path: Path) -> None:
+        """A json.py in the job's cwd cannot break the minder (it runs with -I)."""
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "json.py").write_text("raise SystemExit('shadowed')\n")
+        code = run_minder(tmp_path, ["sh", "-c", "exit 3"], cwd=work)
+        assert code == EXIT_THREE
+        assert read_json(tmp_path / "s.json")["exit_code"] == EXIT_THREE
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+    def test_unwritable_log_dir(self, tmp_path: Path) -> None:
+        """A log that cannot be opened gives a start_error note and exit 127."""
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        try:
+            cmd = [sys.executable, "-I", "-m", "pyscheduler.minder"]
+            cmd += ["--status", str(tmp_path / "s.json"), "--stdout", str(locked / "a.out")]
+            cmd += ["--", "true"]
+            code = subprocess.run(cmd, check=False, timeout=RUN_TIMEOUT_SECONDS).returncode  # noqa: S603
+        finally:
+            locked.chmod(0o700)
+        assert code == START_ERROR_EXIT
+        status = read_json(tmp_path / "s.json")
+        assert str(status["start_error"]).startswith("cannot open log: ")
+        assert status["exit_code"] is None
 
     def test_signal_death(self, tmp_path: Path) -> None:
         """A child killed by a signal gives signal n, no exit code, and exit 128 + n."""
@@ -153,6 +209,26 @@ class TestMinderInProcess:
         code = main(["--status", str(status), "--stdout", str(tmp_path / "o"), "--", str(tmp_path)])
         assert code == START_ERROR_EXIT
         assert read_json(status)["start_error"]
+
+    def test_main_log_open_error(self, tmp_path: Path) -> None:
+        """main() writes a cannot-open-log note and returns 127."""
+        blocker = tmp_path / "file"
+        blocker.write_text("")
+        status = tmp_path / "s.json"
+        argv = ["--status", str(status), "--stdout", str(blocker / "a.out"), "--", "true"]
+        assert main(argv) == START_ERROR_EXIT
+        assert str(read_json(status)["start_error"]).startswith("cannot open log: ")
+
+    def test_main_keeps_ignoring_signals_without_restore(self, tmp_path: Path) -> None:
+        """With restore_signals false, SIGTERM is ignored after the note is written."""
+        before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+        argv = ["--status", str(tmp_path / "s.json"), "--stdout", str(tmp_path / "o")]
+        try:
+            assert main([*argv, "--", "true"], restore_signals=False) == 0
+            assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+        finally:
+            for sig, handler in before.items():
+                signal.signal(sig, handler)
 
     def test_main_signal_death(self, tmp_path: Path) -> None:
         """main() returns 128 + n for a child killed by signal n."""
@@ -189,10 +265,11 @@ class TestForwarder:
         assert forwarder.pending == []
 
     def test_gone_child_is_ignored(self) -> None:
-        """Forwarding to a child that has already been reaped does not raise."""
+        """A child that has gone (send_signal raises) is ignored, and nothing is queued."""
         forwarder = _Forwarder()
         forwarder.send(signal.SIGTERM)  # no child yet: nothing happens
-        child = subprocess.Popen(["true"])  # noqa: S607
-        child.wait()
+        child = GoneChild()
         forwarder.adopt(child)
         forwarder.handle(signal.SIGTERM, None)
+        assert child.sent == [signal.SIGTERM]
+        assert forwarder.pending == []

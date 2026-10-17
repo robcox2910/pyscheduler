@@ -16,7 +16,7 @@ went.
 The **minder** is PyScheduler's babysitter. Every job attempt runs as:
 
 ```text
-python -m pyscheduler.minder --status run.json --stdout run.out [--stderr run.err] -- ARGV...
+python -I -m pyscheduler.minder --status run.json --stdout run.out [--stderr run.err] -- ARGV...
 ```
 
 It:
@@ -30,6 +30,12 @@ It:
 
 Without `--stderr`, the child's stderr goes into the stdout file too.
 
+The `-I` (isolated mode) matters. Normally Python looks in the current
+folder first, so a job folder holding its own `json.py` would replace the
+real `json` module and break the minder before it wrote anything. With
+`-I` the minder only sees its own installed code; the job itself still
+gets the full environment.
+
 ## The Note
 
 ```json
@@ -39,6 +45,19 @@ Without `--stderr`, the child's stderr goes into the stdout file too.
 
 - A child killed by a signal has `"exit_code": null` and, say, `"signal": 9`.
 - A program that is not there has a `start_error` such as `No such file or directory`.
+- A log file that cannot be opened gives `"start_error": "cannot open log: ..."`, and the minder exits 127.
+
+## Things a Babysitter Cannot Do
+
+- A signal that arrives in the first few milliseconds, before Python has
+  even started the minder, kills it with no note and no `.pid` file; the
+  scheduler then goes by the minder's own wait status, and recovery treats
+  "no `.pid`, no status" as "never started".
+- When the scheduler sends SIGTERM to the whole process group, the child
+  gets TERM twice: once from the group signal and once forwarded by the
+  minder.
+- Nobody can catch SIGKILL, so a minder killed that way leaves no note;
+  recovery handles that case.
 
 ## Never Half a Note
 
@@ -57,7 +76,7 @@ from pathlib import Path
 
 folder = Path(tempfile.mkdtemp())
 status = folder / "run.json"
-minder = [sys.executable, "-m", "pyscheduler.minder", "--status", str(status)]
+minder = [sys.executable, "-I", "-m", "pyscheduler.minder", "--status", str(status)]
 minder += ["--stdout", str(folder / "run.out")]
 job = ["sh", "-c", "echo hi; exit 3"]
 code = subprocess.run([*minder, "--", *job], check=False).returncode
