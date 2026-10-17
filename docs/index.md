@@ -9,3 +9,7 @@ bell rings on time whether or not anyone is looking at a clock.
 A **job scheduler** is a timetable for computer jobs. It knows *what* to
 run, *when* to run it, *what must finish first*, and *who to tell* when
 something goes wrong.
+
+## Concepts
+
+- [YAML (A Recipe Card With Indents)](concepts/yaml.md)
