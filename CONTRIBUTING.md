@@ -111,6 +111,7 @@ Every public function, method, class, and module needs a docstring:
 def put(self, body: str) -> Message:
     """Create a message and add it to the queue."""
 
+
 def reject(self, msg: Message) -> None:
     """Reject an in-flight message, requeuing or dead-lettering it.
 
