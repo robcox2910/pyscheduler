@@ -20,3 +20,4 @@ something goes wrong.
 - [Config Files (The Recipe Book)](concepts/config.md)
 - [Validation (The Teacher Who Checks Your Work Before the Test)](concepts/validation.md)
 - [Forecast (The Weather Report for Jobs)](concepts/forecast.md)
+- [The Minder (A Babysitter Who Writes a Note When the Job's Done)](concepts/the-minder.md)
