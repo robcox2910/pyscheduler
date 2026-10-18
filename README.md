@@ -66,7 +66,8 @@ A smoke alarm is no use if nobody hears it. Phase 2 adds the ears:
 
 - **Alerts**: the scheduler raises an alert when a run `failed`, is
   `retrying`, `blocked`, `lost`, ran `too_short` or `too_long`, or
-  `never_started` by its `must_start_by`. A job sets `min_runtime`,
+  `never_started` by its `must_start_by`; when a file watcher gives up
+  (`watcher_timeout`); and when a config reload fails (`reload_failed`). A job sets `min_runtime`,
   `max_runtime` and `must_start_by`, and its own `alerts:` to switch kinds
   on or off.
 - **Routing**: every alert has a topic, `alert.<kind>.<criticality>.<job>`.
@@ -100,7 +101,7 @@ cat examples/logs/alerts.log
 ```
 
 `pysched alerts` lists what was raised and which deliveries were sent,
-and `pysched replay <alert-id>` sends one again. Concept pages:
+and `pysched replay <alert-id>` sends an alert's dead deliveries again. Concept pages:
 [Alerts](docs/concepts/alerts.md), [Routing Alerts](docs/concepts/routing-alerts.md),
 [Notifiers](docs/concepts/notifiers.md) and [File Watchers](docs/concepts/file-watchers.md).
 

@@ -9,7 +9,7 @@
 #   rm examples/inbox/trades.csv                          # tidy up afterwards
 #   pysched alerts                                        # what was raised, and where it went
 #   cat examples/logs/alerts.log                          # the log notifier's file
-#   pysched replay <alert-id>                             # send one alert again
+#   pysched replay <alert-id>                             # send an alert's dead deliveries again
 #
 # Routes (first column is the topic pattern, alert.<kind>.<criticality>.<job>):
 #

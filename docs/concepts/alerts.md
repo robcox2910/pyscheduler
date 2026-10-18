@@ -27,9 +27,11 @@ have happened by now. When something needs a human it raises an
 | `reload_failed` | A config reload had errors, so nothing changed (no job; criticality high). |
 | `watcher_timeout` | A file watcher gave up waiting for its file. |
 
-The first four are smoke alarms: they ring when the engine reports the
-change. `too_short` is checked when the attempt ends. `too_long` and
-`never_started` are the teacher's register: timers.
+The first four, and `watcher_timeout`, are smoke alarms: they ring when
+the engine reports the change. `too_short` is checked when the attempt
+ends. `too_long` and `never_started` are the teacher's register: timers.
+`failed` follows the run, whoever ended it: an operator's own
+`mark_failed` raises a `failed` alert too.
 
 ## The Three Clocks a Job Can Set
 
@@ -76,7 +78,9 @@ ring at the restart either.
 The timers always follow the config **in force when they ring**. If a
 reload moves a job's `must_start_by` or `max_runtime`, the timer moves
 with it (earlier or later); if the reload removes the setting, or the
-whole job, the timer is called off.
+whole job, the timer is called off. A reload that *adds* a `max_runtime`
+only times attempts that start after it: attempts already running are
+not timed.
 
 Here is the rule for a clock time, worked out for the job above:
 

@@ -11,8 +11,11 @@ can open it.
 
 A **file watcher** job is that friend at the letterbox. It runs no
 command. It looks for a file every `poll`, and it only trusts a file once
-its size and modified time have stayed the same for `min_age`: a file
-still being copied keeps changing, so it is not ready yet.
+its size, modified time and inode (which file it really is) have stayed
+the same for `min_age`: a file still being copied keeps changing, so it
+is not ready yet, and a file swapped for another starts its wait again.
+`min_age` may not be longer than `give_up_after` (the validator says so),
+or the watcher could never succeed.
 
 ```yaml
 jobs:
@@ -34,7 +37,10 @@ jobs:
 one, so `/data/in/trades_*.csv` matches every trades file. It is a template
 too, so `{run_date:%Y%m%d}`, `{job}`, `{run_id}` and the other blanks work
 (not `{attempt}` or `{files}`: there is no attempt number or file yet when
-the pattern is filled in). Folders are never matched, only files.
+the pattern is filled in). Folders are never matched, only files. A
+relative pattern (`inbox/*.csv`) is looked up from the folder the
+scheduler was started in, unlike `state_dir` and `log_dir`, which are
+next to the config file: write an absolute path to be sure.
 
 When a look finds at least one match that has been still for `min_age`,
 the watcher succeeds. Its **files** are every match that was still at that
@@ -74,7 +80,14 @@ stop every real job from running. So a watcher takes **no global slot** and
 cannot use pools. Instead, the looks at the disk share a small limit of
 their own, `scheduler.watch_limit` (default 8): at most that many watchers
 are checking files at the same moment, and the rest wait their turn for a
-few milliseconds.
+few milliseconds. A reload that changes `watch_limit` takes effect as
+the watchers already waiting finish: they keep sharing the old limit,
+and every watcher that starts after the reload shares the new one.
+
+A reload that removes a watcher's job, disables it, or turns it into a
+command job stops a waiting watcher at once (it has no work to lose):
+its run ends `cancelled`, with the reason `removed by reload` or
+`disabled`.
 
 ## Restarts
 
@@ -83,6 +96,13 @@ stops. When it starts again, a watcher that was waiting simply **resumes**
 looking, and its give-up deadline still counts from when the attempt first
 started: a 1-minute watcher stopped after 40 seconds gives up 20 seconds
 after the restart, not a minute later.
+
+Nobody was watching while the scheduler was down, so the first look after
+a restart trusts each file's modified time: a file that has not changed
+since well before now counts as having been still all that time. Even
+when the deadline passed during the downtime, a file that had been still
+for `min_age` *by the deadline* makes the watch succeed; the watcher only
+gives up if no file was ready in time.
 
 ## What a Watcher Does Not Take
 
