@@ -201,7 +201,7 @@ class _Loader:
                 has_command = (
                     fields.command is not None or "command" in mapping.items.keys() | suggested
                 )
-                check_kind_keys(jr, line, own.type, mapping, has_command=has_command)
+                check_kind_keys(jr, line, own.type, mapping, suggested, has_command=has_command)
                 jobs[name] = build_job(jr, name, fields, SourceRef(r.file, line), zone)
         return jobs
 

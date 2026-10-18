@@ -38,7 +38,9 @@ def read_type(r: Reader, node: Node, what: str) -> JobKind | None:
 def read_min_age(r: Reader, node: Node, what: str) -> timedelta | None:
     """Read ``min_age``: a duration, where ``0s`` means "stable on first sight"."""
     text = read_str(r, node, what)
-    if text is not None and _ZERO.fullmatch(text):
+    if text is None:
+        return None
+    if _ZERO.fullmatch(text):
         return timedelta(0)
     return read_duration(r, node, what)
 
@@ -61,19 +63,25 @@ def build_watch(
 
 
 def check_kind_keys(
-    r: Reader, line: int, kind: JobKind | None, mapping: Map, *, has_command: bool
+    r: Reader,
+    line: int,
+    kind: JobKind | None,
+    mapping: Map,
+    suggested: set[str],
+    *,
+    has_command: bool,
 ) -> None:
     """Note keys a job's kind forbids, and required keys it lacks.
 
     Only keys the job itself writes are judged: a ``defaults:`` section may
     hold a ``timeout`` for the command jobs, and watchers simply ignore it.
-    ``kind`` is ``None`` when ``type`` was written wrongly (already noted).
+    ``suggested`` holds misspelt keys already noted. ``kind`` is ``None`` when ``type`` was written wrongly (already noted).
     """
     items = mapping.items
     if "type" in items and kind is None:
         return
     if kind is JobKind.FILE_WATCHER:
-        if "watch" not in items:
+        if "watch" not in items and "watch" not in suggested:
             r.add(line, "missing required key 'watch'")
         for key in NOT_FOR_WATCHERS:
             if key in items:

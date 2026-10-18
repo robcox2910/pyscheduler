@@ -32,7 +32,6 @@ from pyscheduler.schedule.specs import (
     EverySchedule,
     Schedule,
 )
-from pyscheduler.values import format_duration
 
 __all__ = [
     "attempt_json",
@@ -316,9 +315,9 @@ def definition_json(config: Config, job: JobDef, *, show_alerts: bool) -> JsonOb
                 if watch is None
                 else {
                     "watch": watch.pattern,
-                    "min_age": format_duration(watch.min_age),
-                    "poll": format_duration(watch.poll),
-                    "give_up_after": format_duration(watch.give_up_after),
+                    "min_age_seconds": _seconds(watch.min_age),
+                    "poll_seconds": _seconds(watch.poll),
+                    "give_up_after_seconds": _seconds(watch.give_up_after),
                 }
             ),
             "command": command,

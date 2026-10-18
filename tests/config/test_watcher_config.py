@@ -165,18 +165,31 @@ class TestDefinitionJson:
     """How a watcher shows in the API."""
 
     def test_definition_json(self, tmp_path: Path) -> None:
-        """Show type and watch keys as duration text for watchers only."""
+        """Show type and watch keys as seconds for watchers only."""
         from pyscheduler.api.serialize import definition_json  # noqa: PLC0415
 
         config = _load(tmp_path, WATCHER)
         watcher = definition_json(config, config.jobs["trades-file"], show_alerts=False)
         assert watcher["type"] == "file_watcher"
         assert watcher["watch"] == "/data/in/trades_{run_date:%Y%m%d}.csv"
-        assert (watcher["min_age"], watcher["poll"], watcher["give_up_after"]) == (
-            "30s",
-            "10s",
-            "4h",
-        )
+        assert watcher["min_age_seconds"] == MIN_AGE.total_seconds()
+        assert watcher["poll_seconds"] == POLL.total_seconds()
+        assert watcher["give_up_after_seconds"] == GIVE_UP.total_seconds()
         command = definition_json(config, config.jobs["load"], show_alerts=False)
         assert command["type"] == "command"
         assert "watch" not in command
+
+
+class TestSingleErrors:
+    """Each mistake is reported once."""
+
+    def test_non_scalar_min_age(self, tmp_path: Path) -> None:
+        """Report a list min_age once."""
+        found = _messages(tmp_path, _watcher("    watch: /x\n    min_age: [1]\n"))
+        assert len([m for m in found if "min_age" in m]) == 1
+
+    def test_misspelt_watch(self, tmp_path: Path) -> None:
+        """Suggest the right key without also complaining it is missing."""
+        found = _messages(tmp_path, _watcher("    wach: /x\n"))
+        assert any("did you mean 'watch'" in m for m in found)
+        assert not any("missing required key" in m for m in found)
