@@ -58,10 +58,20 @@ jobs:
     by 03:00 on Monday.
 
 The deadline only counts for a run's first life, and only if the run was
-made *before* the deadline. So a backfill of last month, a catch-up after
-a long nap, or a rerun never sets off a flood of "you are late" alerts. If
-the scheduler is down when a deadline passes, the alert comes as soon as
-it starts again.
+made *before* the deadline. The teacher also only phones home about a
+register she is still waiting on: a run the monitor hears about after
+its deadline has gone (a rerun of a run that was skipped before it ever
+started, a `rerun --downstream`, a reload that adds `must_start_by` to
+runs already waiting) is not marked late. So a backfill of last month, a
+catch-up after a long nap, or a rerun never sets off a flood of "you are
+late" alerts.
+
+If the scheduler is down when a deadline passes, the alert comes as soon
+as it starts again. "Down" means after the last thing the scheduler wrote
+down before it stopped: its last firing tick, the newest change to a run,
+or the last config it loaded, whichever is latest. A deadline that went
+by while the scheduler was still up, and did not ring then, does not
+ring at the restart either.
 
 The timers always follow the config **in force when they ring**. If a
 reload moves a job's `must_start_by` or `max_runtime`, the timer moves

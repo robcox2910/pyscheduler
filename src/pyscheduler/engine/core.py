@@ -95,6 +95,7 @@ class Engine(Recovery):
         self._watch_size = config.settings.watch_limit
         self.watch_limit = Semaphore(self._watch_size)
         self._files = {}
+        self.last_active = None
         self.watch_reloads(self._resize_watch_limit)
 
     async def start(self) -> None:
@@ -112,7 +113,13 @@ class Engine(Recovery):
         await self.writer.start()
         await self.recover()
         now = self.clock.now()
-        first = await pynet.loop.run_in_thread(self.store.get_engine, LAST_TICK) is None
+        tick, record = await pynet.loop.run_in_thread(
+            lambda: (self.store.get_engine(LAST_TICK), self.store.latest_config())
+        )
+        first = tick is None
+        marks = [self.last_active, record and record.loaded_at]
+        marks.append(None if tick is None else datetime.fromisoformat(tick))
+        self.last_active = max((mark for mark in marks if mark is not None), default=None)
         await self.catch_up(now)
         self._firings_after = None if first else now
         self._firing_task = pynet.loop.spawn(self._fire_loop(), name="engine-firings")

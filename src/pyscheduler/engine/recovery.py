@@ -78,6 +78,14 @@ class _Found:
 class Recovery(ConfigReload, AttemptRunner, Retention):
     """Give the engine recovery, catch-up and retention (see the module docstring)."""
 
+    last_active: datetime | None
+    """The latest moment the store shows this scheduler at work before this start.
+
+    The newest of: the last firing tick, the newest change to a run read
+    at recovery, and the newest config record. ``None`` on a first start.
+    Anything due after it and before now fell while the scheduler was down.
+    """
+
     # -- recovery ----------------------------------------------------------
 
     async def recover(self) -> None:
@@ -99,6 +107,7 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
         for run in [*finals, *open_runs]:
             self.book.put(run)
             self.book.publish(run)
+        self.last_active = max((run.updated_at for run in [*finals, *open_runs]), default=None)
         found_ids = [run.run_id for run in finals if run.state is RunState.SUCCEEDED]
         self._files = await pynet.loop.run_in_thread(store.run_files, found_ids)
         old_days: dict[str, set[date]] = {}

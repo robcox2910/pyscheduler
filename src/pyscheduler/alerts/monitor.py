@@ -92,8 +92,9 @@ class AlertMonitor:
         The ids are those raised since midnight UTC of the engine's memory
         start, plus every alert of an open run (an open run can be older
         than that window). Deadlines are armed for the open runs and
-        running attempts already in memory; one that passed while the
-        scheduler was down rings at once.
+        running attempts already in memory. A start deadline already past
+        rings at once only if it passed while the scheduler was down
+        (after the engine's ``last_active``).
         """
         if self._stopped:
             return
@@ -108,7 +109,7 @@ class AlertMonitor:
             heard()
         runs = self.engine.book.open_runs()
         for run in runs:
-            self._watch_start(run)
+            self._watch_start(run, restarting=True)
         running = [run.run_id for run in runs if run.state is RunState.RUNNING]
         latest = await pynet.loop.run_in_thread(store.latest_attempts, running)
         for attempt in latest.values():
@@ -206,11 +207,15 @@ class AlertMonitor:
         for _, attempt, _ in list(self._slow_timers.values()):
             self._watch_runtime(attempt)
 
-    def _watch_start(self, run: Run) -> None:
+    def _watch_start(self, run: Run, *, restarting: bool = False) -> None:
         """Keep ``run``'s ``must_start_by`` timer in step with its state and the config.
 
         The timer is armed while the run waits for its first attempt, set
         again if the deadline moved, and called off once there is none.
+        A run heard live is newly armed only for a deadline still ahead
+        (a rerun, or a reload adding ``must_start_by``, never rings for a
+        deadline long gone). At a restart a past deadline rings at once
+        only if it fell while the scheduler was down.
         """
         deadline = self._start_deadline(run)
         armed = self._late_timers.get(run.run_id)
@@ -222,6 +227,10 @@ class AlertMonitor:
         alert_id = alert_id_for(run.run_id, AlertKind.NEVER_STARTED, 0)
         if deadline is None or self._quiet() or alert_id in self._seen:
             return
+        if deadline <= self.engine.clock.now() and armed is None:  # a moved timer still rings
+            last = self.engine.last_active
+            if not restarting or last is None or deadline <= last:
+                return
         rings = self._safe(lambda: self._not_started(run.run_id))
         self._late_timers[run.run_id] = (deadline, self.engine.clock.call_at(deadline, rings))
 
