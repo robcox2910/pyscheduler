@@ -56,3 +56,27 @@ function disarm(button) {
   button.dataset.armed = "";
   button.textContent = button.dataset.label || button.textContent;
 }
+
+let liveSource = null;
+
+/**
+ * Call `handler(data)` for each live-feed event of type `kind` ("run",
+ * "attempt", "reload"). The first call opens one shared EventSource on
+ * `/events`, resuming after the id the page was drawn at (`data-live-after`
+ * on `<body>`), so nothing that happened while the page loaded is missed.
+ * On a reconnect the browser sends Last-Event-ID itself. A `reset` (the
+ * feed cannot fill the gap) reloads the page. Returns false when the page
+ * has no live feed.
+ */
+export function onLive(kind, handler) {
+  const after = document.body.dataset.liveAfter;
+  if (!after) {
+    return false;
+  }
+  if (liveSource === null) {
+    liveSource = new EventSource(`/events?after=${encodeURIComponent(after)}`);
+    liveSource.addEventListener("reset", () => window.location.reload());
+  }
+  liveSource.addEventListener(kind, (event) => handler(JSON.parse(event.data)));
+  return true;
+}

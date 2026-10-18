@@ -18,6 +18,12 @@ The engine feeds the desk through its listener hooks (``attach``):
 
 Every bulletin is published on the event loop after the change is
 durable, so a page never hears of a change the store does not hold yet.
+
+A browser's first connection cannot send ``Last-Event-ID``, so every page
+carries the newest id at the moment it was drawn (``data-live-after`` on
+``<body>``) and connects to ``/events?after=<id>``: the news that came out
+while the page was on its way is replayed too. On a reconnect the browser
+sends ``Last-Event-ID``, which wins over ``after``.
 """
 
 import json
@@ -27,14 +33,14 @@ from collections.abc import AsyncIterator, Callable, Mapping
 
 from pynet.loop import Queue
 from pynet.messaging import JsonValue
-from pyweb.app import App
-from pyweb.messages import HttpRequest
+from pyweb.app import App, CallNext
+from pyweb.messages import HttpRequest, Outcome
 from pyweb.sse import EventStream, ServerEvent
 
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Attempt, Run
 
-__all__ = ["KEEPALIVE", "LIVE_BUFFER", "LIVE_PATH", "LiveFeed", "add_live"]
+__all__ = ["EMPTY", "KEEPALIVE", "LIVE_BUFFER", "LIVE_PATH", "LIVE_STATE", "LiveFeed", "add_live"]
 
 LIVE_BUFFER = 1000
 """How many recent events are kept for browsers that reconnect."""
@@ -47,8 +53,15 @@ LIVE_PATH = "/events"
 BOOT_BYTES = 4
 """Random bytes in a boot id (eight hex digits)."""
 
+LIVE_STATE = "pyscheduler.live_after"
+"""``request.state`` key holding the newest event id when the request came in (for pages)."""
+
+MAX_DIGITS = 20
+"""The longest event number accepted back; anything longer is garbage (``reset``)."""
+
 RESET = "reset"
 EMPTY = "{}"
+"""The data of events that carry no data (``reset``, ``end``)."""
 
 
 class _Listener:
@@ -128,7 +141,8 @@ class LiveFeed:
         if last_event_id is None:
             return []
         boot, _, digits = last_event_id.rpartition("-")
-        if boot != self.boot or not (digits.isascii() and digits.isdigit()):
+        number_ok = digits.isascii() and digits.isdigit() and len(digits) <= MAX_DIGITS
+        if boot != self.boot or not number_ok:
             return [(self._count, self._reset(self._count))]
         heard = int(digits)
         oldest = self._buffer[0][0] if self._buffer else self._count + 1
@@ -209,11 +223,22 @@ class LiveFeed:
 
 
 def add_live(app: App, live: LiveFeed) -> None:
-    """Add ``GET /events``: the live feed, resuming after the browser's ``Last-Event-ID``."""
+    """Add ``GET /events?after=``, and note the newest id on each request for the pages.
+
+    The feed resumes after the ``Last-Event-ID`` header (a reconnect) or,
+    without it, after the ``after`` query (a page's first connect).
+    """
+
+    @app.middleware
+    async def note_newest(request: HttpRequest, call_next: CallNext) -> Outcome:
+        """Remember the newest id before the page reads anything (so nothing is skipped)."""
+        request.state[LIVE_STATE] = live.last_id
+        return await call_next(request)
 
     @app.get(LIVE_PATH)
     async def events(request: HttpRequest) -> EventStream:
         """Stream the feed (the access layer has checked the caller)."""
-        return live.stream(request.last_event_id)
+        last = request.last_event_id
+        return live.stream(request.query.get("after") if last is None else last)
 
-    del events
+    del note_newest, events

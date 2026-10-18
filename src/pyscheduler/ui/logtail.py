@@ -20,6 +20,7 @@ The file is read on a helper thread every ``LOG_POLL`` seconds, at most
 """
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -37,6 +38,8 @@ from pyscheduler.ui.live import EMPTY, KEEPALIVE, LIVE_PATH
 
 __all__ = ["LOG_CHUNK", "LOG_POLL", "add_log_tail", "read_from"]
 
+logger = logging.getLogger("pyscheduler.ui")
+
 LOG_POLL = 1.0
 """Seconds between looks at the log file."""
 
@@ -49,6 +52,10 @@ def read_from(path: Path, offset: int, limit: int) -> tuple[bytes, int, bool]:
 
     A file shorter than ``offset`` was rotated: it is read from 0 instead
     and the flag is true. A missing file reads as nothing new.
+
+    Raises:
+        OSError: If the file is there but cannot be read (say, no permission).
+
     """
     try:
         handle = path.open("rb")
@@ -68,6 +75,10 @@ def _first_look(path: Path, count: int) -> tuple[list[str], int]:
 
     An unfinished last line is left for the polls, so it is sent whole.
     (A last line longer than ``LOG_CHUNK`` is sent as it stands.)
+
+    Raises:
+        OSError: If the file is there but cannot be read.
+
     """
     try:
         size = path.stat().st_size
@@ -104,6 +115,19 @@ def _lines(lines: list[str]) -> ServerEvent:
     return ServerEvent(json.dumps(lines), event="lines")
 
 
+_END = ServerEvent(EMPTY, event="end")
+
+
+def _unreadable(path: Path, error: OSError) -> ServerEvent:
+    """Log (on the server only) why ``path`` cannot be read; return the ``end`` that stops the tail.
+
+    Ending the stream (rather than failing it) keeps the browser from
+    reconnecting over and over to a file it can never read.
+    """
+    logger.warning("log tail stopped: cannot read %s: %s", path, error.strerror or error)
+    return _END
+
+
 async def _tail(engine: Engine, attempt: Attempt, path: Path) -> AsyncIterator[ServerEvent]:
     """Yield the tail of ``path``, then its new lines, then ``end`` once ``attempt`` is over."""
     run_id, number = attempt.run_id, attempt.attempt
@@ -125,14 +149,22 @@ async def _tail(engine: Engine, attempt: Attempt, path: Path) -> AsyncIterator[S
             over = any(r.attempt == number and r.ended_at is not None for r in rows)
             return lines, offset, over
 
-        lines, offset, over = await run_in_thread(look)
+        try:
+            lines, offset, over = await run_in_thread(look)
+        except OSError as exc:
+            yield _unreadable(path, exc)
+            return
         ended[0] = ended[0] or over
         yield _lines(lines)
         rest = b""
         while True:
             await sleep(LOG_POLL)
             final = ended[0]  # noted before this read, so the read sees all it wrote
-            data, offset, shrank = await run_in_thread(read_from, path, offset, LOG_CHUNK)
+            try:
+                data, offset, shrank = await run_in_thread(read_from, path, offset, LOG_CHUNK)
+            except OSError as exc:
+                yield _unreadable(path, exc)
+                return
             if shrank:
                 rest = b""
                 yield ServerEvent(EMPTY, event="reset")
@@ -141,7 +173,7 @@ async def _tail(engine: Engine, attempt: Attempt, path: Path) -> AsyncIterator[S
             if lines:
                 yield _lines(lines)
             if last:
-                yield ServerEvent(EMPTY, event="end")
+                yield _END
                 return
     finally:
         unwatch()

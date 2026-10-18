@@ -192,6 +192,50 @@ class TestLogTail:
 
         h.run(body)
 
+    def test_log_tail_unreadable_file(
+        self, api: MakeApi, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A log that is there but cannot be read ends the stream with ``end`` and one warning."""
+        monkeypatch.setattr(logtail, "LOG_POLL", QUICK_POLL)
+        h = api(tokens=False)
+
+        async def body() -> None:
+            """Make the log path a folder, then tail it; then break it after the first look."""
+            path = await _started(h)
+            path.mkdir()
+            events = await h.client.stream(f"/events/log/{ADHOC}", count=10, headers=DEV)
+            assert [(e.event, e.data) for e in events] == [("end", "{}")]
+            path.rmdir()
+            stream = await open_stream(h, f"/events/log/{ADHOC}", DEV)
+            assert _lines(await next_event(stream)) == []
+            path.mkdir()  # now each poll fails to open it
+            assert (await next_event(stream)).event == "end"
+            with pytest.raises(StopAsyncIteration):
+                await next_event(stream)
+
+        h.run(body)
+        warnings = [r for r in caplog.records if "log tail stopped" in r.getMessage()]
+        assert len(warnings) == len(("first look", "poll"))
+
+    def test_viewer_streams_a_log(self, api: MakeApi) -> None:
+        """A logged-in viewer receives the first ``lines`` of a running attempt's log."""
+        h = api(tokens=False, users=users_yaml(vic="viewer"))
+
+        async def body() -> None:
+            """Start ``adhoc`` from the engine, write its log, and tail it as ``vic``."""
+            h.launcher.plan("adhoc", FakeResult(duration=LONG))
+            await h.engine.trigger("adhoc", actor="test")
+            await h.engine.settle()
+            (attempt,) = await pynet.loop.run_in_thread(h.store.attempts_for, ADHOC)
+            path = Path(attempt.stdout_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("hello\n", encoding="utf-8")
+            log_in(h, "vic")
+            (event,) = await h.client.stream(f"/events/log/{ADHOC}", count=1)
+            assert _lines(event) == ["hello"]
+
+        h.run(body)
+
     def test_log_tail_errors(self, api: MakeApi) -> None:
         """Bad queries, unknown runs, no attempt yet and merged stderr answer as the API does."""
         h = api(

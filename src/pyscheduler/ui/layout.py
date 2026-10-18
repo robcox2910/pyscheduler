@@ -18,6 +18,7 @@ from pyscheduler.api.access import CSRF_STATE
 from pyscheduler.api.auth import Role, allows
 from pyscheduler.api.support import actor_of, role_of
 from pyscheduler.ui.html import Safe, h
+from pyscheduler.ui.live import LIVE_STATE
 
 __all__ = ["NAV", "SECURITY_HEADERS", "TEMPLATES", "page", "secure", "sign_out_form"]
 
@@ -88,7 +89,9 @@ def page(request: HttpRequest, *, title: str, body: Safe, active: str) -> HttpRe
         body: The page's own HTML (built with ``ui.html``).
         active: The menu key of this page (``board``, ``graph``, ...).
 
-    The caller must have passed the access layer (see ``role_of``).
+    The caller must have passed the access layer (see ``role_of``). When
+    the live feed is on, ``<body>`` carries ``data-live-after``: the newest
+    event id when the request came in, where app.js resumes ``/events``.
 
     """
     role = role_of(request)
@@ -100,8 +103,16 @@ def page(request: HttpRequest, *, title: str, body: Safe, active: str) -> HttpRe
         h("span", None, f"{actor_of(request)} ({role})"),
         sign_out_form(token) if token else None,
     )
+    after = request.state.get(LIVE_STATE)
     shell = html_template(
         PAGE_TEMPLATE,
-        {"csrf": token, "title": title, "nav": _nav(role, active), "who": who, "body": body},
+        {
+            "csrf": token,
+            "live_after": after if isinstance(after, str) else "",
+            "title": title,
+            "nav": _nav(role, active),
+            "who": who,
+            "body": body,
+        },
     )
     return secure(html(shell))

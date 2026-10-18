@@ -3,11 +3,13 @@
 import json
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 
 import pynet.loop
+import pytest
 from api_helpers import BOOT, DEV, MakeApi, users_yaml
 from pyweb.sse import ServerEvent
-from ui_helpers import next_event, open_stream
+from ui_helpers import SHELL_PATH, add_shell, find, next_event, open_stream
 
 from pyscheduler.ui.live import KEEPALIVE, LIVE_BUFFER, LiveFeed
 
@@ -19,7 +21,19 @@ PUBLISHED = 8
 BOOT_HEX = 8
 ADHOC = "adhoc.2026-10-19.1"
 TWO_MINUTES = timedelta(minutes=2)
-STALE = (f"{BOOT}-2", "other-5", "garbage", f"{BOOT}-x", f"{BOOT}-\u00b2", "-", f"{BOOT}-99")
+HUGE_DIGITS = 4301
+"""More digits than ``int()`` converts by default (it would raise ``ValueError``)."""
+STALE = (
+    f"{BOOT}-2",
+    "other-5",
+    "garbage",
+    f"{BOOT}-x",
+    f"{BOOT}-\u00b2",
+    "-",
+    f"{BOOT}-99",
+    f"{BOOT}-" + "1" * HUGE_DIGITS,
+    f"{BOOT}-" + "0" * 21,
+)
 """Ids a buffer of 4..8 cannot resume from: too old, another boot, garbage, the future."""
 OK = 200
 
@@ -169,6 +183,44 @@ class TestEventsRoute:
                 "/events", count=2, headers={**DEV, "Last-Event-ID": f"{BOOT}-{seen - 2}"}
             )
             assert later == events[-2:]
+
+        h.run(body)
+
+    def test_after_query_replays_missed_events(self, api: MakeApi) -> None:
+        """``?after=`` (a page's first connect) replays; a ``Last-Event-ID`` header wins over it."""
+        h = api(tokens=False, live=True)
+
+        async def body() -> None:
+            """Note the newest id, publish two events, then connect both ways."""
+            assert h.live is not None
+            drawn = h.live.last_id
+            h.live.publish("run", {"n": 1})
+            heard = h.live.last_id
+            h.live.publish("run", {"n": 2})
+            url = f"/events?after={quote(drawn)}"
+            missed = await h.client.stream(url, count=2, headers=DEV)
+            assert _numbers(missed) == [1, 2]
+            (newer,) = await h.client.stream(url, count=1, headers={**DEV, "Last-Event-ID": heard})
+            assert _numbers([newer]) == [2]
+            (reset,) = await h.client.stream("/events?after=junk", count=1, headers=DEV)
+            assert reset.event == "reset"
+
+        h.run(body)
+
+    @pytest.mark.parametrize("live", [True, False])
+    def test_page_carries_live_after(self, api: MakeApi, *, live: bool) -> None:
+        """A page's ``<body>`` carries the newest id when the feed is on, and is empty without it."""
+        h = api(tokens=False, live=live)
+        add_shell(h)
+
+        async def body() -> None:
+            """Publish one event (when live), then draw the probe page."""
+            if h.live is not None:
+                h.live.publish("run", {"n": 1})
+            page = await h.client.get(SHELL_PATH, headers={**DEV, "Accept": "text/html"})
+            (tag,) = find(page.text, "body")
+            expected = f"{BOOT}-1" if live else ""
+            assert tag[1].get("data-live-after") == expected
 
         h.run(body)
 
