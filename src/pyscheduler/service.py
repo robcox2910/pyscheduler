@@ -191,9 +191,11 @@ class _Service:
     async def shut_down(self) -> None:
         """Close the server, let reloads end, stop the alerts and the engine, then restore signals.
 
-        The alert monitor stops first and then the dispatcher, both before
-        the engine: once the engine's writer is closed, a monitor still
-        raising alerts would fail the engine stop.
+        The dispatcher stops first: alerts raised after that stay
+        ``pending`` in the store and are sent at the next start. The
+        monitor keeps listening while the engine winds down (a run can
+        still fail then) and is stopped by ``Engine.stop`` just before
+        the writer closes.
 
         The signal handlers go last, so a second Ctrl-C while closing is
         a no-op rather than a ``KeyboardInterrupt``.
@@ -218,13 +220,9 @@ class _Service:
                         self.signals.restore()
 
     async def _stop_alerts(self) -> None:
-        """Stop the alert monitor, then the dispatcher (each is safe if never started)."""
-        try:
-            if self.monitor is not None:
-                await self.monitor.stop()
-        finally:
-            if self.dispatcher is not None:
-                await self.dispatcher.stop()
+        """Stop the dispatcher (safe if never started); the monitor stops with the engine."""
+        if self.dispatcher is not None:
+            await self.dispatcher.stop()
 
 
 async def serve(
@@ -246,9 +244,10 @@ async def serve(
     the main thread.
 
     Shutting down closes the server (letting requests finish for
-    ``CLOSE_GRACE`` seconds), stops the alerts, then stops the engine
-    without killing running attempts: their minders carry on and are
-    adopted on the next start.
+    ``CLOSE_GRACE`` seconds), stops the alert dispatcher, then stops the
+    engine without killing running attempts: their minders carry on and
+    are adopted on the next start. The alert monitor stops with the
+    engine, just before its writer closes.
 
     Raises:
         ConfigError: If the config has errors (nothing has been opened).

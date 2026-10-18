@@ -128,7 +128,8 @@ class Engine(Recovery):
         that was mid-launch can still be left running; recovery finds it
         on the next start. ``stop`` never raises because of a task's
         error (those are logged), always closes the writer and the store,
-        and does nothing when called again.
+        and does nothing when called again. Just before the writer closes
+        it awaits the ``before_close`` listeners.
         """
         if self._stopped:
             return
@@ -140,14 +141,21 @@ class Engine(Recovery):
             await drain_launches()  # after this, no minder is forked any more
         finally:
             try:
-                await self.writer.close()
-            except Exception:  # noqa: BLE001 -- logged; stop must finish
-                logger.exception("closing the store writer failed")
+                await self._notify_closing()  # the last chance to save (the alert monitor)
             finally:
-                try:
-                    await pynet.loop.run_in_thread(self.store.close)
-                except Exception:  # noqa: BLE001 -- logged; stop must finish
-                    logger.exception("closing the store failed")
+                await self._close_store()
+
+    async def _close_store(self) -> None:
+        """Close the writer (committing what is pending), then the store; log any error."""
+        try:
+            await self.writer.close()
+        except Exception:  # noqa: BLE001 -- logged; stop must finish
+            logger.exception("closing the store writer failed")
+        finally:
+            try:
+                await pynet.loop.run_in_thread(self.store.close)
+            except Exception:  # noqa: BLE001 -- logged; stop must finish
+                logger.exception("closing the store failed")
 
     async def prune(self, now: datetime) -> int:
         """Prune as ``Retention.prune`` does, then forget the files of runs no longer in memory."""

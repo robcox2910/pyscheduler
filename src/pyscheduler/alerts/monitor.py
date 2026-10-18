@@ -81,6 +81,7 @@ class AlertMonitor:
             engine.subscribe(self._on_run),
             engine.watch_attempts(self._on_attempt),
             engine.watch_reloads(self._on_reload),
+            engine.before_close(self.stop),  # keep listening while the engine winds down
         ]
 
     # -- lifecycle -------------------------------------------------------
@@ -118,7 +119,9 @@ class AlertMonitor:
     async def stop(self) -> None:
         """Stop listening, call off every timer, and wait for alerts being raised.
 
-        It is safe before ``start`` (what was heard early is dropped) and twice.
+        ``Engine.stop`` calls it just before its writer closes, so runs
+        that end while the engine winds down still get their alerts. It
+        is safe before ``start`` (what was heard early is dropped) and twice.
         """
         self._stopped = True
         self._early.clear()

@@ -124,6 +124,18 @@ cannot write the alert, the engine stops (as for any lost write); if
 anything else goes wrong inside the monitor, it is logged and the jobs
 carry on.
 
+## When the Scheduler Stops
+
+A graceful stop (Ctrl-C, SIGTERM) puts the postman away first, but keeps
+the smoke alarm switched on until the very end. A run can still fail
+while the scheduler winds down; its alert is written to the store with
+its deliveries `pending`, and the dispatcher sends it as soon as the
+scheduler starts again.
+
+A crash is different: the power goes out, nobody gets to tidy up. A run's
+new state and the alert about it are two separate writes, so if the crash
+comes between the two, that one alert is never raised.
+
 ## A Job's Own `alerts:`
 
 Each job may switch kinds on or off and add its own notifiers:

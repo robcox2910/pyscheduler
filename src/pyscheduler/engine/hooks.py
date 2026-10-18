@@ -11,10 +11,15 @@ notice short or lost ones.
 
 Reload listeners are called once a reload's new config is in force (and
 durable), so anything timed from the old config can be set again.
+
+Closing listeners are awaited by ``Engine.stop`` once its attempts have
+wound down but before the store writer closes: the last moment anything
+can still be written. The alert monitor stops there, so a run that ends
+while the scheduler stops still gets its alert stored.
 """
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 
 from pyscheduler.engine.model import Attempt, Run
 
@@ -29,6 +34,7 @@ class AttemptHooks:
         self._subscribers: list[Callable[[Run], None]] = []
         self._attempt_listeners: list[Callable[[Attempt], None]] = []
         self._reload_listeners: list[Callable[[], None]] = []
+        self._closing_listeners: list[Callable[[], Awaitable[None]]] = []
 
     def subscribe(self, callback: Callable[[Run], None]) -> Callable[[], None]:
         """Call ``callback`` with each run once its change is durable; return an unsubscribe."""
@@ -72,6 +78,30 @@ class AttemptHooks:
                 self._reload_listeners.remove(callback)
 
         return unsubscribe
+
+    def before_close(self, callback: Callable[[], Awaitable[None]]) -> Callable[[], None]:
+        """Await ``callback`` in ``Engine.stop`` just before the writer closes; return an unsubscribe.
+
+        By then the engine starts nothing more and its attempts have wound
+        down, but the writer still saves. A listener that raises is logged
+        and skipped.
+        """
+        self._closing_listeners.append(callback)
+
+        def unsubscribe() -> None:
+            """Stop awaiting ``callback`` (a second call does nothing)."""
+            if callback in self._closing_listeners:
+                self._closing_listeners.remove(callback)
+
+        return unsubscribe
+
+    async def _notify_closing(self) -> None:
+        """Await every closing listener in turn; one that raises is logged and skipped."""
+        for callback in list(self._closing_listeners):
+            try:
+                await callback()
+            except Exception:
+                logger.exception("closing listener failed")
 
     def _notify(self, run: Run) -> None:
         """Tell every subscriber about ``run``; one that raises is logged and skipped."""
