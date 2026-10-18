@@ -22,3 +22,5 @@ something goes wrong.
 - [Forecast (The Weather Report for Jobs)](concepts/forecast.md)
 - [The Minder (A Babysitter Who Writes a Note When the Job's Done)](concepts/the-minder.md)
 - [Clocks and Launchers (A Practice Clock and a Starting Whistle)](concepts/clocks-and-launchers.md)
+- [Runs and States (The Traffic Lights of a Run)](concepts/runs-and-states.md)
+- [Group Commit (One Trip to the Post Box for Many Letters)](concepts/group-commit.md)
