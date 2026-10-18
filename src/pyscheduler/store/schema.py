@@ -1,10 +1,9 @@
 """Lay out the store's tables, and turn records into rows and back.
 
-PyDB has no NULL yet: every column of every row must hold a value of its
-type. So a value that may be missing (an attempt's ``ended_at`` while it
-is still running, a run's ``held_from`` when it is not held) is kept in a
-TEXT column, where empty text means "not known yet". A missing time is
-written as ISO text, the same way PyDB writes its own TIMESTAMPs.
+A value that may be missing (an attempt's ``ended_at`` while it is still
+running, a run's ``held_from`` when it is not held) is stored as PyDB's
+NULL, Python's ``None``: "we don't know yet". Every other column is
+NOT NULL, so a half-filled row is refused instead of saved.
 
 A ``Batch`` is a parcel of changes for one commit. The writer merges
 many parcels into one before it goes to the post box.
@@ -17,7 +16,7 @@ from typing import cast
 
 from pydb.record import Value
 from pydb.schema import Column, Schema
-from pydb.types import DataType, from_iso, to_iso
+from pydb.types import DataType
 
 from pyscheduler.engine.model import Attempt, Event, Outcome, Run, RunState, Trigger
 
@@ -38,13 +37,13 @@ TABLES: dict[str, Schema] = {
             Column("run_date", DataType.DATE, not_null=True),
             Column("scheduled_at", DataType.TIMESTAMP, not_null=True),
             Column("state", T, not_null=True),
-            Column("reason", T),
-            Column("attempt", INT),
-            Column("rerun", INT),
-            Column("trigger", T),
-            Column("config_version", INT),
-            Column("created_at", DataType.TIMESTAMP),
-            Column("updated_at", DataType.TIMESTAMP),
+            Column("reason", T, not_null=True),
+            Column("attempt", INT, not_null=True),
+            Column("rerun", INT, not_null=True),
+            Column("trigger", T, not_null=True),
+            Column("config_version", INT, not_null=True),
+            Column("created_at", DataType.TIMESTAMP, not_null=True),
+            Column("updated_at", DataType.TIMESTAMP, not_null=True),
             Column("held_from", T),
         ]
     ),
@@ -52,34 +51,34 @@ TABLES: dict[str, Schema] = {
         [
             Column("run_id", T, not_null=True),
             Column("attempt", INT, not_null=True),
-            Column("started_at", DataType.TIMESTAMP),
-            Column("ended_at", T),
-            Column("exit_code", T),
-            Column("signal", T),
+            Column("started_at", DataType.TIMESTAMP, not_null=True),
+            Column("ended_at", DataType.TIMESTAMP),
+            Column("exit_code", INT),
+            Column("signal", INT),
             Column("outcome", T),
-            Column("pid", T),
-            Column("stdout_path", T),
-            Column("stderr_path", T),
-            Column("status_path", T),
-            Column("reason", T),
+            Column("pid", INT),
+            Column("stdout_path", T, not_null=True),
+            Column("stderr_path", T, not_null=True),
+            Column("status_path", T, not_null=True),
+            Column("reason", T, not_null=True),
         ]
     ),
     EVENTS: Schema(
         [
             Column("at", DataType.TIMESTAMP, not_null=True),
-            Column("actor", T),
+            Column("actor", T, not_null=True),
             Column("run_id", T),
             Column("action", T, not_null=True),
-            Column("detail", T),
+            Column("detail", T, not_null=True),
         ]
     ),
-    ENGINE: Schema([Column("key", T, primary_key=True), Column("value", T)]),
+    ENGINE: Schema([Column("key", T, primary_key=True), Column("value", T, not_null=True)]),
     CONFIGS: Schema(
         [
             Column("version", INT, primary_key=True),
-            Column("loaded_at", DataType.TIMESTAMP),
-            Column("digest", T),
-            Column("sources_json", T),
+            Column("loaded_at", DataType.TIMESTAMP, not_null=True),
+            Column("digest", T, not_null=True),
+            Column("sources_json", T, not_null=True),
         ]
     ),
 }
@@ -159,25 +158,6 @@ class Batch:
         self.engine.update(other.engine)
 
 
-def _opt_text(value: str | int | datetime | None) -> str:
-    """Write an optional value as text, ``None`` becoming empty text."""
-    if value is None:
-        return ""
-    if isinstance(value, datetime):
-        return to_iso(value)
-    return str(value)
-
-
-def _opt_int(text: Value) -> int | None:
-    """Read an optional whole number written by ``_opt_text``."""
-    return int(cast(str, text)) if text else None
-
-
-def _opt_time(text: Value) -> datetime | None:
-    """Read an optional instant written by ``_opt_text``."""
-    return cast(datetime, from_iso(cast(str, text), DataType.TIMESTAMP)) if text else None
-
-
 def run_to_row(run: Run) -> Row:
     """Return the ``runs`` row for a run."""
     return {
@@ -193,13 +173,13 @@ def run_to_row(run: Run) -> Row:
         "config_version": run.config_version,
         "created_at": run.created_at,
         "updated_at": run.updated_at,
-        "held_from": _opt_text(run.held_from),
+        "held_from": run.held_from,
     }
 
 
 def run_from_row(row: Mapping[str, Value]) -> Run:
     """Return the run a ``runs`` row holds."""
-    held = cast(str, row["held_from"])
+    held = row["held_from"]
     return Run(
         run_id=cast(str, row["run_id"]),
         job=cast(str, row["job"]),
@@ -213,7 +193,7 @@ def run_from_row(row: Mapping[str, Value]) -> Run:
         config_version=cast(int, row["config_version"]),
         created_at=cast(datetime, row["created_at"]),
         updated_at=cast(datetime, row["updated_at"]),
-        held_from=RunState(held) if held else None,
+        held_from=None if held is None else RunState(held),
     )
 
 
@@ -223,11 +203,11 @@ def attempt_to_row(attempt: Attempt) -> Row:
         "run_id": attempt.run_id,
         "attempt": attempt.attempt,
         "started_at": attempt.started_at,
-        "ended_at": _opt_text(attempt.ended_at),
-        "exit_code": _opt_text(attempt.exit_code),
-        "signal": _opt_text(attempt.signal),
-        "outcome": _opt_text(attempt.outcome),
-        "pid": _opt_text(attempt.pid),
+        "ended_at": attempt.ended_at,
+        "exit_code": attempt.exit_code,
+        "signal": attempt.signal,
+        "outcome": attempt.outcome,
+        "pid": attempt.pid,
         "stdout_path": attempt.stdout_path,
         "stderr_path": attempt.stderr_path,
         "status_path": attempt.status_path,
@@ -237,16 +217,16 @@ def attempt_to_row(attempt: Attempt) -> Row:
 
 def attempt_from_row(row: Mapping[str, Value]) -> Attempt:
     """Return the attempt an ``attempts`` row holds."""
-    outcome = cast(str, row["outcome"])
+    outcome = row["outcome"]
     return Attempt(
         run_id=cast(str, row["run_id"]),
         attempt=cast(int, row["attempt"]),
         started_at=cast(datetime, row["started_at"]),
-        ended_at=_opt_time(row["ended_at"]),
-        exit_code=_opt_int(row["exit_code"]),
-        signal=_opt_int(row["signal"]),
-        outcome=Outcome(outcome) if outcome else None,
-        pid=_opt_int(row["pid"]),
+        ended_at=cast(datetime | None, row["ended_at"]),
+        exit_code=cast(int | None, row["exit_code"]),
+        signal=cast(int | None, row["signal"]),
+        outcome=None if outcome is None else Outcome(outcome),
+        pid=cast(int | None, row["pid"]),
         stdout_path=cast(str, row["stdout_path"]),
         stderr_path=cast(str, row["stderr_path"]),
         status_path=cast(str, row["status_path"]),
@@ -259,7 +239,7 @@ def event_to_row(event: Event) -> Row:
     return {
         "at": event.at,
         "actor": event.actor,
-        "run_id": _opt_text(event.run_id),
+        "run_id": event.run_id,
         "action": event.action,
         "detail": event.detail,
     }
@@ -267,11 +247,10 @@ def event_to_row(event: Event) -> Row:
 
 def event_from_row(row: Mapping[str, Value]) -> Event:
     """Return the event an ``events`` row holds."""
-    run_id = cast(str, row["run_id"])
     return Event(
         at=cast(datetime, row["at"]),
         actor=cast(str, row["actor"]),
-        run_id=run_id or None,
+        run_id=cast(str | None, row["run_id"]),
         action=cast(str, row["action"]),
         detail=cast(str, row["detail"]),
     )

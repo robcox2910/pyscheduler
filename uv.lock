@@ -665,8 +665,8 @@ source = { git = "https://github.com/robcox2910/pycrypt?tag=v0.1.0#c834608a8ebeb
 
 [[package]]
 name = "pydb"
-version = "0.3.0"
-source = { git = "https://github.com/robcox2910/pydb?tag=v0.3.0#85adca382cc6b2528e79beec412e553a5728fcc1" }
+version = "0.4.0"
+source = { git = "https://github.com/robcox2910/pydb?tag=v0.4.0#97aab3550080a5ef52d0d89b3a0661887b5e64c3" }
 
 [[package]]
 name = "pygments"
@@ -739,7 +739,7 @@ requires-dist = [
     { name = "commitizen", marker = "extra == 'dev'", specifier = ">=4.4.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.1" },
-    { name = "pydb", git = "https://github.com/robcox2910/pydb?tag=v0.3.0" },
+    { name = "pydb", git = "https://github.com/robcox2910/pydb?tag=v0.4.0" },
     { name = "pymq", git = "https://github.com/robcox2910/pymq?tag=v0.2.0" },
     { name = "pynet", git = "https://github.com/robcox2910/pynet?tag=v0.1.0" },
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.400" },

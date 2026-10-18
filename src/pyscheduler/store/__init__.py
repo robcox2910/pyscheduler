@@ -5,7 +5,7 @@ everyone's pages to it, many at a time.
 """
 
 from pyscheduler.store.schema import Batch, ConfigRecord
-from pyscheduler.store.store import Store
+from pyscheduler.store.store import Store, StoreSchemaError
 from pyscheduler.store.writer import StoreWriter
 
-__all__ = ["Batch", "ConfigRecord", "Store", "StoreWriter"]
+__all__ = ["Batch", "ConfigRecord", "Store", "StoreSchemaError", "StoreWriter"]

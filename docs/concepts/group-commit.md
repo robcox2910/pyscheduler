@@ -78,6 +78,9 @@ The address books change only after a commit succeeds, so a failed trip
 leaves them exactly right. Questions such as "the runs of this job" use
 PyDB indexes.
 
-PyDB has no "empty" (NULL) value yet, so a value that might be missing,
-such as an attempt's end time while it is still running, is kept as text,
-where empty text means "not known yet".
+A value that might be missing, such as an attempt's end time while it is
+still running, is stored as PyDB's NULL (Python's `None`): "not known
+yet". The very first note a new store writes is `schema_version`, the
+shape of its tables. If you point PyScheduler at a folder written with an
+older shape, it stops with "state dir was created by an older pyscheduler
+schema; delete it" instead of misreading your history.

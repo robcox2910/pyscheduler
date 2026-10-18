@@ -48,6 +48,19 @@ from pyscheduler.store.schema import (
     run_to_row,
 )
 
+SCHEMA_VERSION_KEY = "schema_version"
+"""The engine note that records which table layout the store was written with."""
+
+SCHEMA_VERSION = "2"
+"""The table layout this code writes: 2 is the first with real NULLs."""
+
+OLD_SCHEMA_MESSAGE = "state dir was created by an older pyscheduler schema; delete it"
+
+
+class StoreSchemaError(Exception):
+    """Raise when a state folder was written with a different table layout."""
+
+
 OPEN_STATES = tuple(state for state in RunState if state not in FINAL_STATES)
 """The states a run can be in before it is final, in lifecycle order."""
 
@@ -112,11 +125,25 @@ class Store:
 
     @classmethod
     def open(cls, state_dir: Path, *, sync: bool = True) -> Self:
-        """Open (or create) the store in ``state_dir``, making missing tables and indexes."""
+        """Open (or create) the store in ``state_dir``, making missing tables and indexes.
+
+        Raises:
+            StoreSchemaError: If the folder holds a store written with another
+                table layout (its ``schema_version`` engine note is missing or
+                different).
+
+        """
         state_dir.mkdir(parents=True, exist_ok=True)
         db = Database(state_dir / "db", journal=True, sync=sync)
         try:
             existing = set(db.table_names())
+            _check_schema_version(db, existing)
+            if ENGINE not in existing:
+                db.create_table(ENGINE, TABLES[ENGINE])
+            engine = db.get_table(ENGINE)
+            if engine.row_count == 0:  # stamp first, so a half-made store is still known
+                engine.insert({"key": SCHEMA_VERSION_KEY, "value": SCHEMA_VERSION})
+            existing.add(ENGINE)
             for name, schema in TABLES.items():
                 if name not in existing:
                     db.create_table(name, schema)
@@ -261,8 +288,6 @@ class Store:
 
     def events_for(self, run_id: str) -> list[Event]:
         """Return a run's events in the order they were written."""
-        if not run_id:  # empty text is how scheduler-wide events are stored
-            return []
         with self._db.lock:
             records = self._by_index(self._events, "events_run_id", run_id)
             return [event_from_row(r.data) for r in sorted(records, key=lambda r: r.record_id)]
@@ -311,6 +336,28 @@ class Store:
         """Return runs records with a run date from ``low`` to ``high``, inclusive."""
         index = self._runs.indexes["runs_run_date"]
         return [self._runs.get(record_id) for record_id in index.find_range(low, high)]
+
+
+def _check_schema_version(db: Database, existing: set[str]) -> None:
+    """Refuse a database whose tables were written by a different schema.
+
+    The version note is the very first thing a new store writes, so a
+    folder with no tables, or with only an empty ``engine`` table (a first
+    open that stopped half-way), is new. Anything else must carry the
+    note with this code's version.
+    """
+    if not existing:
+        return
+    found: str | None = None
+    if ENGINE in existing:
+        engine = db.get_table(ENGINE)
+        if existing == {ENGINE} and engine.row_count == 0:
+            return
+        rows = engine.select(lambda r: r["key"] == SCHEMA_VERSION_KEY)
+        found = cast(str, rows[0]["value"]) if rows else None
+    if found != SCHEMA_VERSION:
+        msg = f"{OLD_SCHEMA_MESSAGE} (found schema {found!r}, need {SCHEMA_VERSION!r})"
+        raise StoreSchemaError(msg)
 
 
 def _upsert[K](table: Table, ids: _Staged[K], key: K, row: dict[str, Value]) -> None:

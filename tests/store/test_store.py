@@ -5,11 +5,16 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydb.database import Database
 from pydb.errors import PyDBError
+from pydb.schema import Column, Schema
+from pydb.types import DataType
 from store_helpers import DAY, T0, make_attempt, make_run
 
 from pyscheduler.engine.model import Event, Outcome, RunState
-from pyscheduler.store import Batch, ConfigRecord, Store
+from pyscheduler.store import Batch, ConfigRecord, Store, StoreSchemaError
+from pyscheduler.store.schema import TABLES
+from pyscheduler.store.store import SCHEMA_VERSION, SCHEMA_VERSION_KEY
 
 NEXT_DAY = DAY + timedelta(days=1)
 PREV_DAY = DAY - timedelta(days=1)
@@ -251,4 +256,58 @@ class TestStore:
         store.apply(Batch(runs=[make_run()]))
         store = reopen(store, tmp_path)
         assert len(store.query_runs()) == 1
+        store.close()
+
+
+class TestNullsAndSchemaVersion:
+    """Missing values are real NULLs, and old layouts are refused."""
+
+    def test_missing_values_are_null(self, store: Store) -> None:
+        """Store ``None`` as NULL in native columns, and skip NULL run ids."""
+        run = make_run()
+        running = make_attempt(run.run_id)
+        wide = Event(T0, "engine", None, "config_loaded", "{}")
+        store.apply(Batch(runs=[run], attempts=[running], events=[wide]))
+        db = store._db
+        attempt_row = db.get_table("attempts").select()[0]
+        assert attempt_row["ended_at"] is None
+        assert attempt_row["exit_code"] is None
+        assert attempt_row["outcome"] is None
+        assert db.get_table("runs").select()[0]["held_from"] is None
+        assert db.get_table("events").select()[0]["run_id"] is None
+        assert store.events_for(run.run_id) == []
+        assert store.attempts_for(run.run_id) == [running]
+        store.close()
+
+    def test_schema_version_recorded(self, store: Store) -> None:
+        """Write the schema version on first open."""
+        assert store.get_engine(SCHEMA_VERSION_KEY) == SCHEMA_VERSION
+        store.close()
+
+    def test_old_layout_refused(self, tmp_path: Path) -> None:
+        """Refuse a state folder whose tables have no schema version."""
+        db = Database(tmp_path / "state" / "db", journal=True, sync=False)
+        db.create_table("runs", Schema([Column("run_id", DataType.TEXT, primary_key=True)]))
+        db.get_table("runs").insert({"run_id": "a.2026-10-17.1"})
+        db.close()
+        with pytest.raises(StoreSchemaError, match="older pyscheduler schema; delete it"):
+            Store.open(tmp_path / "state", sync=False)
+        # The failed open let go of the folder, so it can be opened again.
+        Database(tmp_path / "state" / "db", journal=True, sync=False).close()
+
+    def test_wrong_version_refused(self, store: Store, tmp_path: Path) -> None:
+        """Refuse a store stamped with another schema version."""
+        store.apply(Batch(engine={SCHEMA_VERSION_KEY: "1"}))
+        store.close()
+        with pytest.raises(StoreSchemaError, match="found schema '1'"):
+            Store.open(tmp_path / "state", sync=False)
+
+    def test_half_made_store_is_adopted(self, tmp_path: Path) -> None:
+        """Adopt a folder whose first open stopped after making the empty engine table."""
+        db = Database(tmp_path / "state" / "db", journal=True, sync=False)
+        db.create_table("engine", TABLES["engine"])
+        db.close()
+        store = Store.open(tmp_path / "state", sync=False)
+        store.apply(Batch(runs=[make_run()]))
+        assert store.get_run(make_run().run_id) == make_run()
         store.close()
