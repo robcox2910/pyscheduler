@@ -52,14 +52,20 @@ _DEFAULT_RETRY = NotifyRetry()
 DEFAULT_NOTIFIER_TIMEOUT = timedelta(seconds=10)
 
 
-def notifier_types() -> frozenset[str]:
-    """Return every known notifier type: the built-ins plus plug-in entry points.
+def notifier_entry_points() -> dict[str, importlib.metadata.EntryPoint]:
+    """Return the plug-in notifier entry points by name (looked up on each call).
 
-    The entry points are looked up on each call, so a plug-in installed
-    (or, in tests, faked) later is seen by the next validation.
+    This is the one place that asks for the ``pyscheduler.notifiers`` group,
+    so a plug-in installed (or, in tests, faked) later is seen by the next
+    validation and the next build.
     """
     found = importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)
-    return NOTIFIER_TYPES | {entry.name for entry in found}
+    return {entry.name: entry for entry in found}
+
+
+def notifier_types() -> frozenset[str]:
+    """Return every known notifier type: the built-ins plus plug-in entry points."""
+    return NOTIFIER_TYPES | notifier_entry_points().keys()
 
 
 def _read_retries(r: Reader, node: Node, what: str) -> NotifyRetry:
@@ -233,6 +239,7 @@ def to_job_alerts(r: Reader, raw: Mapping[str, object] | None, line: int) -> Job
 
 __all__ = [
     "NOTIFIER_TYPES",
+    "notifier_entry_points",
     "notifier_types",
     "read_alert_sections",
     "read_notifiers",

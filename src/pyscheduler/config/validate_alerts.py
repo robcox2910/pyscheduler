@@ -22,7 +22,10 @@ class Checker(Protocol):
 
 
 def check_alerts(checker: Checker, config: Config) -> None:
-    """Note unknown notifier types and unknown notifier names in routes and jobs."""
+    """Note unknown notifier types, bad options and unknown notifier names in routes and jobs."""
+    # Imported here so the config package never loads the notifiers at import time.
+    from pyscheduler.notifiers.base import check_notifier  # noqa: PLC0415
+
     known = notifier_types()
     for notifier in config.notifiers.values():
         if notifier.type and notifier.type not in known:
@@ -32,6 +35,9 @@ def check_alerts(checker: Checker, config: Config) -> None:
                 f"unknown notifier type {notifier.type!r}: use one of {choices}",
                 None,
             )
+        elif notifier.type:
+            for message in check_notifier(notifier, config.settings):
+                checker.add(notifier.source, message, None)
     for route in config.routes:
         for name in route.notify:
             if name not in config.notifiers:

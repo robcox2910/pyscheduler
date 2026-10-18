@@ -73,3 +73,4 @@ with something you can run.
 19. [Forecast (The Weather Report for Jobs)](concepts/forecast.md): What will run tomorrow, worked out in advance.
 20. [The HTTP API (The Front Desk With Wristbands)](concepts/http-api.md): Talking to the scheduler over HTTP, with tokens.
 21. [The Service and the CLI (Opening the Shop and the Remote Control)](concepts/the-service-and-cli.md): `pysched serve` and the `pysched` commands.
+22. [Notifiers (The Ways to Reach Someone)](concepts/notifiers.md): Log lines, commands and messages that carry an alert to a person.

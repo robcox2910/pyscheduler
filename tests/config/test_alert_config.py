@@ -109,18 +109,18 @@ class TestReading:
 ERRORS = [
     ("notifiers:\n  n: {type: pager}\n", "unknown notifier type 'pager'"),
     ("notifiers:\n  n: {path: x}\n", "missing required key 'type'"),
-    ("notifiers:\n  bad name: {type: log}\n", "invalid name 'bad name'"),
-    ("notifiers:\n  n: {type: log, retries: {count: -1}}\n", "must be at least 0"),
+    ("notifiers:\n  bad name: {type: log, path: a.log}\n", "invalid name 'bad name'"),
+    ("notifiers:\n  n: {type: log, path: a.log, retries: {count: -1}}\n", "must be at least 0"),
     (
-        "notifiers:\n  n: {type: log}\nroutes:\n  - {match: 'alert.#', notify: [nobody]}\n",
+        "notifiers:\n  n: {type: log, path: a.log}\nroutes:\n  - {match: 'alert.#', notify: [nobody]}\n",
         "unknown notifier 'nobody'",
     ),
     (
-        "notifiers:\n  n: {type: log}\nroutes:\n  - {match: 'alert..x', notify: [n]}\n",
+        "notifiers:\n  n: {type: log, path: a.log}\nroutes:\n  - {match: 'alert..x', notify: [n]}\n",
         "invalid route pattern",
     ),
     (
-        "notifiers:\n  n: {type: log}\nroutes:\n  - {match: 'alert.#'}\n",
+        "notifiers:\n  n: {type: log, path: a.log}\nroutes:\n  - {match: 'alert.#'}\n",
         "missing required key 'notify'",
     ),
 ]
@@ -162,7 +162,7 @@ class TestErrors:
     def test_notifiers_only_in_main_file(self, tmp_path: Path) -> None:
         """Refuse ``notifiers:`` and ``routes:`` in an included file."""
         (tmp_path / "more.yaml").write_text(
-            "notifiers:\n  n: {type: log}\nroutes: []\n", encoding="utf-8"
+            "notifiers:\n  n: {type: log, path: a.log}\nroutes: []\n", encoding="utf-8"
         )
         messages = _messages(tmp_path, "include: [more.yaml]\n" + _with_job(""))
         assert "notifiers is only allowed in the main file" in messages
@@ -176,7 +176,7 @@ class TestWarningsAndSecrets:
     def test_route_pattern_warning(self, tmp_path: Path, match: str) -> None:
         """Load a route that can never match, with a warning."""
         text = _with_job(
-            f"notifiers:\n  n: {{type: log}}\nroutes:\n  - {{match: '{match}', notify: [n]}}\n"
+            f"notifiers:\n  n: {{type: log, path: a.log}}\nroutes:\n  - {{match: '{match}', notify: [n]}}\n"
         )
         config = _load(tmp_path, text)
         [warning] = config.warnings
