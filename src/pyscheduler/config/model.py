@@ -30,6 +30,7 @@ __all__ = [
     "Dependency",
     "JobAlerts",
     "JobDef",
+    "JobKind",
     "MustStartBy",
     "NotifierDef",
     "NotifyRetry",
@@ -40,6 +41,7 @@ __all__ = [
     "RunDateRule",
     "Settings",
     "SourceRef",
+    "WatchSpec",
 ]
 
 DEFAULT_RETRY_DELAY = timedelta(minutes=1)
@@ -113,6 +115,23 @@ class AlertKind(StrEnum):
 
 DEFAULT_OFF: frozenset[AlertKind] = frozenset({AlertKind.RETRYING})
 """The kinds that stay quiet unless a job turns them on."""
+
+
+class JobKind(StrEnum):
+    """What a job does: run a command, or wait for files to appear."""
+
+    COMMAND = "command"
+    FILE_WATCHER = "file_watcher"
+
+
+@dataclass(frozen=True)
+class WatchSpec:
+    """What a file watcher waits for: a pattern, how still it must be, and when to quit."""
+
+    pattern: str
+    min_age: timedelta
+    poll: timedelta
+    give_up_after: timedelta
 
 
 @dataclass(frozen=True)
@@ -243,6 +262,8 @@ class JobDef:
     owner: str
     enabled: bool
     source: SourceRef
+    kind: JobKind = JobKind.COMMAND
+    watch: WatchSpec | None = None
 
     @property
     def dependency_only(self) -> bool:
@@ -264,6 +285,7 @@ class Settings:
     kill_grace: timedelta
     retention: timedelta
     memory_days: int
+    watch_limit: int
 
 
 @dataclass(frozen=True)

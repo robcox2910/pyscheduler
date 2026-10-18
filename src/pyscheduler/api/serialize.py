@@ -32,6 +32,7 @@ from pyscheduler.schedule.specs import (
     EverySchedule,
     Schedule,
 )
+from pyscheduler.values import format_duration
 
 __all__ = [
     "attempt_json",
@@ -304,10 +305,22 @@ def definition_json(config: Config, job: JobDef, *, show_alerts: bool) -> JsonOb
     """
     command: JsonValue = job.command if isinstance(job.command, str) else list(job.command)
     retries = job.retries
+    watch = job.watch
     return _redacted(
         config,
         {
             "name": job.name,
+            "type": job.kind.value,
+            **(
+                {}
+                if watch is None
+                else {
+                    "watch": watch.pattern,
+                    "min_age": format_duration(watch.min_age),
+                    "poll": format_duration(watch.poll),
+                    "give_up_after": format_duration(watch.give_up_after),
+                }
+            ),
             "command": command,
             "cwd": job.cwd,
             "env": dict.fromkeys(sorted(job.env), HIDDEN),

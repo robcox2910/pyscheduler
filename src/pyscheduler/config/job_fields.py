@@ -40,6 +40,7 @@ from pyscheduler.config.model import (
     Dependency,
     DepOn,
     JobDef,
+    JobKind,
     MustStartBy,
     Overlap,
     RetryPolicy,
@@ -47,6 +48,12 @@ from pyscheduler.config.model import (
     SourceRef,
 )
 from pyscheduler.config.schedule_fields import read_schedule
+from pyscheduler.config.watch_fields import (
+    NOT_IN_DEFAULTS,
+    build_watch,
+    read_min_age,
+    read_type,
+)
 from pyscheduler.schedule.specs import Schedule
 from pyscheduler.yamlish import Map, Node, Scalar
 
@@ -54,7 +61,7 @@ JOB_KEYS = (
     "command", "cwd", "env", "schedule", "calendar", "timezone", "run_date", "depends_on",
     "retries", "timeout", "criticality", "pools", "overlap", "catch_up", "stdout", "stderr",
     "min_runtime", "max_runtime", "must_start_by", "alerts", "agent", "agent_tags", "tags",
-    "description", "owner", "enabled",
+    "description", "owner", "enabled", "type", "watch", "min_age", "poll", "give_up_after",
 )  # fmt: skip
 RETRY_KEYS = ("count", "delay", "backoff", "max_delay")
 DEPENDENCY_KEYS = ("job", "on", "run_date")
@@ -107,6 +114,11 @@ class JobFields:
     description: str | None = None
     owner: str | None = None
     enabled: bool | None = None
+    type: JobKind | None = None
+    watch: str | None = None
+    min_age: timedelta | None = None
+    poll: timedelta | None = None
+    give_up_after: timedelta | None = None
 
 
 def _read_command(r: Reader, node: Node) -> str | tuple[str, ...] | None:
@@ -228,9 +240,12 @@ _KEY_READERS: dict[str, KeyReader] = {
     "must_start_by": read_must_start_by,
     "alerts": _ignore_what(_read_alerts),
     "enabled": read_bool,
+    "type": read_type,
+    "min_age": read_min_age,
+    **dict.fromkeys(("poll", "give_up_after"), read_duration),
     **dict.fromkeys(("timeout", "min_runtime", "max_runtime"), read_duration),
     **dict.fromkeys(("agent_tags", "tags"), read_str_list),
-    **dict.fromkeys(("cwd", "stdout", "stderr"), read_template),  # rendered per attempt
+    **dict.fromkeys(("cwd", "stdout", "stderr", "watch"), read_template),  # rendered per attempt
     **dict.fromkeys(("calendar", "agent", "description", "owner"), read_str),
 }
 
@@ -245,7 +260,9 @@ def read_job_fields(r: Reader, node: Map, where: str) -> tuple[JobFields, set[st
     suggested = check_keys(r, node, JOB_KEYS, where)
     out = JobFields()
     for key, child in node.items.items():
-        if key in JOB_KEYS:
+        if where == "defaults" and key in NOT_IN_DEFAULTS:
+            r.add(node.key_lines[key], f"{key} is not allowed in defaults")
+        elif key in JOB_KEYS:
             setattr(out, key, _KEY_READERS[key](r, child, key))
     return out, suggested
 
@@ -308,12 +325,13 @@ def build_job(r: Reader, name: str, f: JobFields, source: SourceRef, zone: ZoneI
     ``r`` collects problems found in the merged ``alerts``.
     """
     schedules, manual = f.schedule or ((), False)
+    watcher = f.type is JobKind.FILE_WATCHER
     calendar = None if f.calendar in {None, NO_CALENDAR} else f.calendar
     return JobDef(
         name=name,
-        command=f.command or "",
-        cwd=f.cwd,
-        env=MappingProxyType(f.env or {}),
+        command=() if watcher else f.command or "",
+        cwd=None if watcher else f.cwd,
+        env=MappingProxyType({} if watcher else f.env or {}),
         schedules=schedules,
         manual=manual,
         calendar=calendar,
@@ -321,13 +339,13 @@ def build_job(r: Reader, name: str, f: JobFields, source: SourceRef, zone: ZoneI
         run_date_rule=f.run_date or RunDateRule.SAME_DAY,
         depends_on=f.depends_on or (),
         retries=_retry_policy(f.retries),
-        timeout=f.timeout,
+        timeout=None if watcher else f.timeout,
         criticality=Criticality.NORMAL if f.criticality is None else f.criticality,
-        pools=MappingProxyType(f.pools or {}),
+        pools=MappingProxyType({} if watcher or not f.pools else f.pools),
         overlap=f.overlap or Overlap.QUEUE,
         catch_up=f.catch_up or CatchUp.LATEST,
-        stdout=DEFAULT_STDOUT if f.stdout is None else f.stdout,
-        stderr=DEFAULT_STDERR if f.stderr is None else f.stderr,
+        stdout="" if watcher else DEFAULT_STDOUT if f.stdout is None else f.stdout,
+        stderr="" if watcher else DEFAULT_STDERR if f.stderr is None else f.stderr,
         min_runtime=f.min_runtime,
         max_runtime=f.max_runtime,
         must_start_by=f.must_start_by,
@@ -339,4 +357,6 @@ def build_job(r: Reader, name: str, f: JobFields, source: SourceRef, zone: ZoneI
         owner=f.owner or "",
         enabled=True if f.enabled is None else f.enabled,
         source=source,
+        kind=JobKind.FILE_WATCHER if watcher else JobKind.COMMAND,
+        watch=build_watch(f.watch, f.min_age, f.poll, f.give_up_after) if watcher else None,
     )

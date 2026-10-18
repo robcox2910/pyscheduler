@@ -11,7 +11,7 @@ carries on.
 """
 
 import difflib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 
@@ -25,9 +25,9 @@ from pyscheduler.config.run_dates import (
     RunDateIndex,
 )
 from pyscheduler.config.validate_alerts import check_alerts
+from pyscheduler.config.validate_templates import check_placeholders
 from pyscheduler.schedule.firings import next_firing
 from pyscheduler.schedule.specs import BusinessDaySchedule
-from pyscheduler.templates import PLACEHOLDERS, placeholders_in
 
 __all__ = ["find_cycles", "validate_config"]
 
@@ -79,21 +79,6 @@ def find_cycles(graph: Mapping[str, Sequence[str]]) -> list[tuple[str, ...]]:
                 path.append(child)
                 stack.append(iter(sorted(set(graph[child]))))
     return list(found)
-
-
-def _template_fields(job: JobDef) -> Iterator[tuple[str, str]]:
-    """Yield ``(where, text)`` for every templated value of ``job``."""
-    if isinstance(job.command, str):
-        yield "command", job.command
-    else:
-        for arg in job.command:
-            yield "command", arg
-    if job.cwd is not None:
-        yield "cwd", job.cwd
-    for key, value in job.env.items():
-        yield f"env {key}", value
-    yield "stdout", job.stdout
-    yield "stderr", job.stderr
 
 
 class _Checker:
@@ -178,7 +163,7 @@ class _Checker:
         if job.calendar is not None and job.calendar not in self.config.calendars:
             error(f"unknown calendar {job.calendar!r}")
         self.check_pools(job)
-        self.check_placeholders(job)
+        check_placeholders(self, self.config, job)
         low, high, timeout = job.min_runtime, job.max_runtime, job.timeout
         if low is not None and high is not None and low >= high:
             error("min_runtime must be less than max_runtime")
@@ -221,22 +206,6 @@ class _Checker:
                 self.add(job.source, f"unknown pool {pool!r}", job.name)
             elif slots > size:
                 self.add(job.source, f"needs {slots} slots but pool {pool!r} has {size}", job.name)
-
-    def check_placeholders(self, job: JobDef) -> None:
-        """Check every template for malformed or unknown placeholders."""
-        allowed = ", ".join(f"{{{n}}}" for n in sorted(PLACEHOLDERS))
-        reported: set[tuple[str, str]] = set()
-        for where, text in _template_fields(job):
-            try:
-                names = placeholders_in(text)
-            except ValueError as exc:
-                self.add(job.source, f"{where}: {exc}", job.name)
-                continue
-            for name in sorted(names - PLACEHOLDERS):
-                if (where, name) not in reported:
-                    reported.add((where, name))
-                    message = f"unknown placeholder {{{name}}} in {where}: use one of {allowed}"
-                    self.add(job.source, message, job.name)
 
     def check_schedules(self, job: JobDef) -> None:
         """Check business_day schedules and that the schedules fire at all."""

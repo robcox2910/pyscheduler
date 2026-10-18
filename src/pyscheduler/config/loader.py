@@ -8,10 +8,9 @@ once instead of fixing them one reload at a time.
 
 import hashlib
 import os
-import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -23,17 +22,17 @@ from pyscheduler.config.fields import (
     Reader,
     RecordingEnv,
     check_keys,
-    read_duration,
     read_int,
     read_map,
     read_seq,
     read_str,
-    read_zone,
 )
 from pyscheduler.config.job_fields import JobFields, build_job, merge_fields, read_job_fields
 from pyscheduler.config.model import Config, ConfigError, JobDef, Problem, Settings, SourceRef
 from pyscheduler.config.redaction import redactor
+from pyscheduler.config.settings_fields import read_settings
 from pyscheduler.config.validate import validate_config
+from pyscheduler.config.watch_fields import check_kind_keys
 from pyscheduler.values import check_name
 from pyscheduler.yamlish import Map, Node, YamlError, parse
 
@@ -41,21 +40,8 @@ MAIN_KEYS = (
     "scheduler", "include", "calendars", "pools", "defaults", "jobs", "notifiers", "routes",
 )  # fmt: skip
 INCLUDED_KEYS = ("include", "calendars", "pools", "jobs")
-SCHEDULER_KEYS = (
-    "name", "timezone", "state_dir", "log_dir", "max_running", "listen",
-    "api_tokens_file", "kill_grace", "retention", "memory_days",
-)  # fmt: skip
 RESERVED_JOB = "_scheduler"
 GLOB_CHARS = frozenset("*?[")
-_PORT = re.compile(r"\d{1,5}", re.ASCII)
-MAX_PORT = 65535
-DEFAULT_NAME = "pysched"
-DEFAULT_MAX_RUNNING = 32
-DEFAULT_LISTEN = ("127.0.0.1", 8470)
-DEFAULT_KILL_GRACE = timedelta(seconds=10)
-DEFAULT_RETENTION = timedelta(days=90)
-DEFAULT_MEMORY_DAYS = 7
-UTC_ZONE = ZoneInfo("UTC")
 
 
 @dataclass(frozen=True)
@@ -154,8 +140,8 @@ class _Loader:
         """Read the ``scheduler:`` section."""
         found = self.main_section("scheduler")
         if found is None:
-            return _settings(self.r, Map({}, {}, 1), self.main)
-        return _settings(*found, self.main)
+            return read_settings(self.r, Map({}, {}, 1), self.main)
+        return read_settings(*found, self.main)
 
     def calendars(self) -> tuple[dict[str, BusinessCalendar], dict[str, RawCalendar]]:
         """Read every calendar, then merge each one's included holidays."""
@@ -212,8 +198,10 @@ class _Loader:
                     continue
                 own, suggested = read_job_fields(jr, mapping, f"job {name}")
                 fields = merge_fields(defaults, own)
-                if fields.command is None and "command" not in mapping.items.keys() | suggested:
-                    jr.add(line, "missing required key 'command'")
+                has_command = (
+                    fields.command is not None or "command" in mapping.items.keys() | suggested
+                )
+                check_kind_keys(jr, line, own.type, mapping, has_command=has_command)
                 jobs[name] = build_job(jr, name, fields, SourceRef(r.file, line), zone)
         return jobs
 
@@ -244,56 +232,6 @@ def _matches(base: Path, pattern: str) -> list[Path]:
         return [path] if path.is_file() else []
     anchor = Path(path.anchor)
     return sorted(p for p in anchor.glob(str(path.relative_to(anchor))) if p.is_file())
-
-
-def _listen(r: Reader, node: Node) -> tuple[str, int] | None:
-    """Read ``listen: host:port``."""
-    text = read_str(r, node, "listen")
-    if text is None:
-        return None
-    host, sep, port = text.rpartition(":")
-    if not sep or not host or _PORT.fullmatch(port) is None or int(port) > MAX_PORT:
-        r.add(node.line, f"listen must be host:port with a port 0-{MAX_PORT}, got {text!r}")
-        return None
-    return host, int(port)
-
-
-def _settings(r: Reader, node: Map, main: Path) -> Settings:
-    """Read the scheduler settings, resolving paths next to the main file."""
-    check_keys(r, node, SCHEDULER_KEYS, "scheduler")
-    items = node.items
-    base = main.absolute().parent
-
-    def path(key: str) -> Path | None:
-        """Read a path setting, relative to the main file's folder."""
-        text = read_str(r, items[key], key) if key in items else None
-        return None if text is None else base / text
-
-    def count(key: str, default: int) -> int:
-        """Read a positive whole-number setting."""
-        value = read_int(r, items[key], key, minimum=1) if key in items else None
-        return default if value is None else value
-
-    name = read_str(r, items["name"], "name") if "name" in items else None
-    zone = read_zone(r, items["timezone"], "timezone") if "timezone" in items else None
-    listen = _listen(r, items["listen"]) if "listen" in items else None
-    return Settings(
-        name=name or DEFAULT_NAME,
-        timezone=zone or UTC_ZONE,
-        state_dir=path("state_dir") or base / "state",
-        log_dir=path("log_dir") or base / "logs",
-        max_running=count("max_running", DEFAULT_MAX_RUNNING),
-        listen=listen or DEFAULT_LISTEN,
-        api_tokens_file=path("api_tokens_file"),
-        kill_grace=_duration(r, items, "kill_grace") or DEFAULT_KILL_GRACE,
-        retention=_duration(r, items, "retention") or DEFAULT_RETENTION,
-        memory_days=count("memory_days", DEFAULT_MEMORY_DAYS),
-    )
-
-
-def _duration(r: Reader, items: Mapping[str, Node], key: str) -> timedelta | None:
-    """Read an optional duration setting."""
-    return read_duration(r, items[key], key) if key in items else None
 
 
 def _digest(sources: Mapping[str, str]) -> str:
