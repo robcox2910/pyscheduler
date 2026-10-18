@@ -13,6 +13,7 @@ SLACK_URL = "https://hooks.example/abc"
 SLACK_RETRIES = 3
 SLACK_TIMEOUT = timedelta(seconds=5)
 DEFAULT_TIMEOUT = timedelta(seconds=10)
+MIN_PROBLEMS = 2
 
 GOOD = """\
 notifiers:
@@ -142,6 +143,9 @@ class TestErrors:
             ("{notify: [nobody]}", "unknown notifier 'nobody'"),
             ("{loud: true}", "unknown key 'loud'"),
             ("{on: failed}", "alerts.on must be a list"),
+            ("{notify: [1]}", "alerts.notify items must be text"),
+            ("{notify: [{a: b}]}", "alerts.notify items must be text"),
+            ("{on: [[failed]]}", "alerts.on items must be text"),
         ],
     )
     def test_job_alert_errors(self, tmp_path: Path, alerts: str, expected: str) -> None:
@@ -191,6 +195,6 @@ class TestWarningsAndSecrets:
             ' retries: {count: "${SLACK_URL}"}}\n'
         )
         messages = _messages(tmp_path, text, {"SLACK_URL": SLACK_URL})
-        assert len(messages) >= 2  # noqa: PLR2004
+        assert len(messages) >= MIN_PROBLEMS
         assert not any(SLACK_URL in m for m in messages)
         assert any("${SLACK_URL}" in m for m in messages)

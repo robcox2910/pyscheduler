@@ -16,7 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pyscheduler.calendars import BusinessCalendar, merge_calendars
-from pyscheduler.config.alert_fields import read_notifiers, read_routes
+from pyscheduler.config.alert_fields import read_alert_sections
 from pyscheduler.config.calendar_fields import RawCalendar, reachable, read_calendar
 from pyscheduler.config.calendar_inheritance import resolve_calendars
 from pyscheduler.config.fields import (
@@ -31,16 +31,7 @@ from pyscheduler.config.fields import (
     read_zone,
 )
 from pyscheduler.config.job_fields import JobFields, build_job, merge_fields, read_job_fields
-from pyscheduler.config.model import (
-    Config,
-    ConfigError,
-    JobDef,
-    NotifierDef,
-    Problem,
-    Route,
-    Settings,
-    SourceRef,
-)
+from pyscheduler.config.model import Config, ConfigError, JobDef, Problem, Settings, SourceRef
 from pyscheduler.config.redaction import redactor
 from pyscheduler.config.validate import validate_config
 from pyscheduler.values import check_name
@@ -150,29 +141,12 @@ class _Loader:
                     out.append((r, mapping))
         return out
 
-    def main_node(self, key: str) -> Node | None:
-        """Return the node for ``key`` in the main file only."""
-        if not self.docs or self.docs[0].path != self.main:
-            return None
-        return self.docs[0].root.items.get(key)
-
     def main_section(self, key: str) -> tuple[Reader, Map] | None:
         """Return the reader and mapping for ``key`` in the main file only."""
-        node = self.main_node(key)
-        if node is None:
+        if not self.docs or self.docs[0].path != self.main or key not in self.docs[0].root.items:
             return None
-        mapping = read_map(self.r, node, key)
+        mapping = read_map(self.r, self.docs[0].root.items[key], key)
         return None if mapping is None else (self.r, mapping)
-
-    def notifiers(self) -> dict[str, NotifierDef]:
-        """Read the ``notifiers:`` section."""
-        found = self.main_section("notifiers")
-        return {} if found is None else read_notifiers(*found)
-
-    def routes(self) -> tuple[Route, ...]:
-        """Read the ``routes:`` list."""
-        node = self.main_node("routes")
-        return () if node is None else read_routes(self.r, node)
 
     # --- sections ------------------------------------------------------
 
@@ -360,8 +334,8 @@ def build_config(
     calendars, raw = loader.calendars()
     pools = loader.pools()
     jobs = loader.jobs(settings.timezone)
-    notifiers = loader.notifiers()
-    routes = loader.routes()
+    main = loader.docs[0].root.items if loader.docs and loader.docs[0].path == loader.main else {}
+    notifiers, routes = read_alert_sections(loader.r, main)
     order = {name: i for i, name in enumerate(loader.sources)}
     expansions = {value: name for name, value in loader.env.used.items()}
     problems = sorted(

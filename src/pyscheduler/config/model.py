@@ -180,7 +180,7 @@ class NotifierDef:
 
     name: str
     type: str
-    options: Mapping[str, object]
+    options: Mapping[str, object] = field(repr=False)
     retries: NotifyRetry
     timeout: timedelta
     source: SourceRef

@@ -330,14 +330,15 @@ class _Checker:
     def wait_message(self, run_date: date, up: JobDef, target: date) -> str:
         """Describe a run date ``up`` will never have, naming the job at the root."""
         root, root_date = self.index.root_without(up, target)
+        never = "is disabled" if not root.enabled else "has no firing for it"
         message = (
             f"would wait forever: its run for {run_date} needs a run of {up.name!r} for {target}"
         )
         if root is up:
-            return message + f", which {_never_message(root)} and no way to get one"
+            return message + f", which {never} and no way to get one"
         return message + (
             f", which only gets runs from upstream; {root.name!r} needs a run for "
-            f"{root_date} but {_never_message(root)}"
+            f"{root_date} but {never}"
         )
 
     def check_wait_forever(self, job: JobDef) -> None:
@@ -373,11 +374,6 @@ class _Checker:
                     message = self.wait_message(run_date, up, target)
                     self.add(dep.source, message, job.name, "warning")
                     break
-
-
-def _never_message(root: JobDef) -> str:
-    """Say why ``root`` will not have the run."""
-    return "is disabled" if not root.enabled else "has no firing for it"
 
 
 def validate_config(

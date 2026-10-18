@@ -174,6 +174,18 @@ def read_routes(r: Reader, node: Node) -> tuple[Route, ...]:
     return () if routes is None else tuple(routes)
 
 
+def read_alert_sections(
+    r: Reader, main: Mapping[str, Node]
+) -> tuple[dict[str, NotifierDef], tuple[Route, ...]]:
+    """Read ``notifiers:`` and ``routes:`` from the main file's top-level ``main`` items."""
+    notifiers: dict[str, NotifierDef] = {}
+    if "notifiers" in main:
+        section = read_map(r, main["notifiers"], "notifiers")
+        notifiers = {} if section is None else read_notifiers(r, section)
+    routes = read_routes(r, main["routes"]) if "routes" in main else ()
+    return notifiers, routes
+
+
 def _kinds(r: Reader, raw: object, what: str, line: int) -> frozenset[AlertKind]:
     """Turn a raw list of kind names into alert kinds, noting each bad one."""
     out: set[AlertKind] = set()
@@ -191,8 +203,13 @@ def _strings(r: Reader, raw: object, what: str, line: int) -> list[str]:
     if not isinstance(raw, list):
         r.add(line, f"{what} must be a list")
         return []
-    items = cast("list[object]", raw)
-    return [item for item in items if isinstance(item, str)]
+    out: list[str] = []
+    for item in cast("list[object]", raw):
+        if isinstance(item, str):
+            out.append(item)
+        else:
+            r.add(line, f"{what} items must be text")
+    return out
 
 
 def to_job_alerts(r: Reader, raw: Mapping[str, object] | None, line: int) -> JobAlerts:
@@ -217,6 +234,7 @@ def to_job_alerts(r: Reader, raw: Mapping[str, object] | None, line: int) -> Job
 __all__ = [
     "NOTIFIER_TYPES",
     "notifier_types",
+    "read_alert_sections",
     "read_notifiers",
     "read_routes",
     "to_job_alerts",
