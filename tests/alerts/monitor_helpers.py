@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import pynet.loop
-from alert_helpers import SCALE, RecordingNotifier, factory_for, make_harness
+from alert_helpers import SCALE, RecordingNotifier, factory_for, load_text, make_harness
 from engine_helpers import Harness
 
 from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.alerts.model import AlertRecord
 from pyscheduler.alerts.monitor import AlertMonitor
+from pyscheduler.config import Config
 from pyscheduler.config.model import AlertKind
 
 ROUTED = """\
@@ -29,6 +30,11 @@ type MonitorBody = Callable[[AlertMonitor], Coroutine[Any, Any, None]]
 def monitored(tmp_path: Path, jobs: str, env: Mapping[str, str] | None = None) -> Harness:
     """Build a harness whose config routes every alert to ``rec``, then ``jobs``."""
     return make_harness(tmp_path, ROUTED + textwrap.dedent(jobs), env)
+
+
+def reconfigured(tmp_path: Path, jobs: str) -> Config:
+    """Load a new config (for a reload) with the same routing and ``jobs``."""
+    return load_text(tmp_path, ROUTED + textwrap.dedent(jobs))
 
 
 def run_monitor(

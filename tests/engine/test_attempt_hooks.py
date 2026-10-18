@@ -1,5 +1,6 @@
 """Tests for the engine's attempt listeners (``watch_attempts``)."""
 
+from dataclasses import replace
 from datetime import timedelta
 
 from engine_helpers import START, MakeHarness
@@ -74,3 +75,32 @@ class TestWatchAttempts:
 
         h.run_engine(body)
         assert seen == []
+
+
+class TestWatchReloads:
+    """Reload listeners hear about each reload that changed the config."""
+
+    def test_reload_listener(self, harness: MakeHarness) -> None:
+        """Call the listener once per changing reload; skip one that raises; unsubscribe."""
+        h = harness(MANUAL)
+        calls: list[str] = []
+
+        def broken() -> None:
+            """Fail every time."""
+            msg = "listener bug"
+            raise RuntimeError(msg)
+
+        h.engine.watch_reloads(broken)
+        stop = h.engine.watch_reloads(lambda: calls.append(h.engine.config.digest))
+        changed = replace(h.config, digest="changed")
+
+        async def body() -> None:
+            """Reload the same config, a changed one, then unsubscribe and reload again."""
+            await h.engine.reload(h.config, actor="tester")
+            await h.engine.reload(changed, actor="tester")
+            stop()
+            stop()
+            await h.engine.reload(replace(h.config, digest="again"), actor="tester")
+
+        h.run_engine(body)
+        assert calls == ["changed"]

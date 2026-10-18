@@ -153,7 +153,8 @@ class ConfigReload(OperatorActions):
 
         A ``ConfigRecord`` with the next version and one ``reload`` event
         (no run id) are committed with the changes. A config with the
-        same digest as the current one changes nothing.
+        same digest as the current one changes nothing. Once the commit is
+        durable the reload listeners are told (``watch_reloads``).
 
         Raises:
             ActionError: 503 if the engine is stopping or the commit failed.
@@ -203,3 +204,4 @@ class ConfigReload(OperatorActions):
             await self._flush(configs=[record])
         except EngineFailedError as exc:
             raise ActionError(503, f"scheduler failed: {exc}") from exc
+        self._notify_reloaded()

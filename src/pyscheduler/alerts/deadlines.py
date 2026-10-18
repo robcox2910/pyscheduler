@@ -1,4 +1,4 @@
-"""When a run must have started, and what each alert about a run or attempt says.
+"""When a run must have started, and what each alert says.
 
 ``must_start_by`` is like a teacher taking the register: a clock time
 (``"03:00"``) means three o'clock on the day the run *fired*, in the job's
@@ -8,11 +8,14 @@ backfill of last month) is never marked late, or every backfill would
 ring every bell at once.
 """
 
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 
 from pynet.messaging import JsonValue
 
-from pyscheduler.config.model import JobDef
+from pyscheduler.alerts.model import SCHEDULER_WORD, AlertRecord
+from pyscheduler.api.serialize import problem_json
+from pyscheduler.config.model import AlertKind, Criticality, JobDef, Problem
 from pyscheduler.engine.model import Attempt, Run
 from pyscheduler.values import format_duration
 
@@ -102,3 +105,23 @@ def never_started(run: Run, deadline: datetime, job: JobDef) -> Wording:
         "state": run.state.value,
     }
     return f"{run.run_id} has not started by {local:%H:%M %Z}", detail
+
+
+def reload_failed(
+    now: datetime, problems: Sequence[Problem], expansions: Mapping[str, str]
+) -> AlertRecord:
+    """Return the ``reload_failed`` alert (no run, criticality high), its problems redacted."""
+    errors = sum(1 for p in problems if p.severity == "error")
+    detail: dict[str, JsonValue] = {"problems": [problem_json(p, expansions) for p in problems]}
+    return AlertRecord(
+        alert_id=f"{SCHEDULER_WORD}:{AlertKind.RELOAD_FAILED}:{now:%Y%m%dT%H%M%S%fZ}",
+        kind=AlertKind.RELOAD_FAILED,
+        run_id=None,
+        job=None,
+        run_date=None,
+        attempt=0,
+        criticality=Criticality.HIGH,
+        raised_at=now,
+        message=f"reload failed: {errors} error(s); nothing changed",
+        detail=detail,
+    )

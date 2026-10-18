@@ -22,20 +22,17 @@ from datetime import UTC, datetime, time, timedelta
 
 import pynet.loop
 from pynet.loop import Task
-from pynet.messaging import JsonValue
 
 from pyscheduler.alerts import deadlines
 from pyscheduler.alerts.deadlines import Wording
 from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.alerts.model import (
-    SCHEDULER_WORD,
     AlertRecord,
     DeliveryRecord,
     DeliveryStatus,
     alert_id_for,
 )
 from pyscheduler.alerts.routing import destinations
-from pyscheduler.api.serialize import problem_json
 from pyscheduler.config.model import AlertKind, Criticality, JobAlerts, JobDef, Problem
 from pyscheduler.config.redaction import redact_text
 from pyscheduler.engine.clock import Cancel
@@ -73,11 +70,17 @@ class AlertMonitor:
         self._stopped = False
         self._broken = False
         """Set once an alert could not be written: the engine has failed stop."""
-        self._late_timers: dict[str, Cancel] = {}
-        self._slow_timers: dict[tuple[str, int], Cancel] = {}
+        self._late_timers: dict[str, tuple[datetime, Cancel]] = {}
+        """Each waiting run's ``never_started`` timer, with the deadline it rings at."""
+        self._slow_timers: dict[tuple[str, int], tuple[datetime, Attempt, Cancel]] = {}
+        """Each running attempt's ``too_long`` timer, with when it rings and the attempt."""
         self._prune_timer: Cancel | None = None
         self._tasks: set[Task[None]] = set()
-        self._unhook = [engine.subscribe(self._on_run), engine.watch_attempts(self._on_attempt)]
+        self._unhook = [
+            engine.subscribe(self._on_run),
+            engine.watch_attempts(self._on_attempt),
+            engine.watch_reloads(self._on_reload),
+        ]
 
     # -- lifecycle -------------------------------------------------------
 
@@ -85,13 +88,18 @@ class AlertMonitor:
         """Remember recent alert ids, catch up on what was heard, and arm the deadlines.
 
         The ids are those raised since midnight UTC of the engine's memory
-        start. Deadlines are armed for the open runs and running attempts
-        already in memory; one that passed while the scheduler was down
-        rings at once.
+        start, plus every alert of an open run (an open run can be older
+        than that window). Deadlines are armed for the open runs and
+        running attempts already in memory; one that passed while the
+        scheduler was down rings at once.
         """
+        if self._stopped:
+            return
         midnight = datetime.combine(self.engine.memory_start(), time(), tzinfo=UTC)
         store = self.engine.store
         self._seen |= await pynet.loop.run_in_thread(store.alert_ids_since, midnight)
+        open_ids = [run.run_id for run in self.engine.book.open_runs()]
+        self._seen |= await pynet.loop.run_in_thread(store.alert_ids_of_runs, open_ids)
         self._started = True
         early, self._early = self._early, []
         for heard in early:
@@ -103,12 +111,16 @@ class AlertMonitor:
         latest = await pynet.loop.run_in_thread(store.latest_attempts, running)
         for attempt in latest.values():
             if attempt.ended_at is None:
-                self._watch_runtime(attempt)
+                self._watch_runtime(attempt)  # skipped if it ended while we read
         self._plan_prune()
 
     async def stop(self) -> None:
-        """Stop listening, call off every timer, and wait for alerts being raised."""
+        """Stop listening, call off every timer, and wait for alerts being raised.
+
+        It is safe before ``start`` (what was heard early is dropped) and twice.
+        """
         self._stopped = True
+        self._early.clear()
         for unhook in self._unhook:
             unhook()
         self._cancel_timers()
@@ -123,31 +135,21 @@ class AlertMonitor:
 
     def reload_failed(self, problems: Sequence[Problem]) -> None:
         """Raise a ``reload_failed`` alert (criticality high, no run) for ``problems``."""
+        if self._stopped:
+            return
         if not self._started:
             self._early.append(lambda: self.reload_failed(problems))
             return
         now = self.engine.clock.now()
-        errors = sum(1 for p in problems if p.severity == "error")
-        expansions = self.engine.config.expansions
-        detail: dict[str, JsonValue] = {"problems": [problem_json(p, expansions) for p in problems]}
-        alert = AlertRecord(
-            alert_id=f"{SCHEDULER_WORD}:{AlertKind.RELOAD_FAILED}:{now:%Y%m%dT%H%M%S%fZ}",
-            kind=AlertKind.RELOAD_FAILED,
-            run_id=None,
-            job=None,
-            run_date=None,
-            attempt=0,
-            criticality=Criticality.HIGH,
-            raised_at=now,
-            message=f"reload failed: {errors} error(s); nothing changed",
-            detail=detail,
-        )
+        alert = deadlines.reload_failed(now, problems, self.engine.config.expansions)
         self._raise(alert)
 
     # -- what the engine tells us ----------------------------------------
 
     def _on_run(self, run: Run) -> None:
         """Raise the alerts a run's new state calls for, and watch its start deadline."""
+        if self._stopped:
+            return
         if not self._started:
             self._early.append(lambda: self._on_run(run))
             return
@@ -161,15 +163,17 @@ class AlertMonitor:
 
     def _on_attempt(self, attempt: Attempt) -> None:
         """Time a started attempt; check how an ended one went."""
+        if self._stopped:
+            return
         if not self._started:
             self._early.append(lambda: self._on_attempt(attempt))
             return
         if attempt.ended_at is None:
             self._watch_runtime(attempt)
             return
-        timer = self._slow_timers.pop((attempt.run_id, attempt.attempt), None)
-        if timer is not None:
-            timer.cancel()
+        armed = self._slow_timers.pop((attempt.run_id, attempt.attempt), None)
+        if armed is not None:
+            armed[2].cancel()
         run_id, number = attempt.run_id, attempt.attempt
         if attempt.outcome is Outcome.LOST:
             self._raise_for(run_id, AlertKind.LOST, number, deadlines.lost(attempt))
@@ -183,49 +187,95 @@ class AlertMonitor:
 
     # -- deadlines -------------------------------------------------------
 
-    def _watch_start(self, run: Run) -> None:
-        """Arm ``run``'s ``must_start_by`` timer while it waits; call it off once it starts."""
-        if run.state not in NOT_STARTED or run.attempt != 0:
-            timer = self._late_timers.pop(run.run_id, None)
-            if timer is not None:
-                timer.cancel()
+    def _on_reload(self) -> None:
+        """Set every timer again from the new config (a deadline may move, or go)."""
+        if self._stopped or not self._started:
             return
-        alert_id = alert_id_for(run.run_id, AlertKind.NEVER_STARTED, 0)
-        if self._quiet() or run.run_id in self._late_timers or alert_id in self._seen:
-            return
-        job = self.engine.config.jobs.get(run.job)
-        deadline = None if job is None else deadlines.start_deadline(run, job)
-        if job is None or deadline is None:
-            return
-        rings = self._safe(lambda: self._not_started(run.run_id, deadline, job))
-        self._late_timers[run.run_id] = self.engine.clock.call_at(deadline, rings)
+        for run_id in list(self._late_timers):
+            run = self.engine.book.get(run_id)
+            if run is None:
+                self._late_timers.pop(run_id)[1].cancel()
+            else:
+                self._watch_start(run)
+        for _, attempt, _ in list(self._slow_timers.values()):
+            self._watch_runtime(attempt)
 
-    def _not_started(self, run_id: str, deadline: datetime, job: JobDef) -> None:
-        """Raise ``never_started`` if the run is still waiting for its first attempt."""
+    def _watch_start(self, run: Run) -> None:
+        """Keep ``run``'s ``must_start_by`` timer in step with its state and the config.
+
+        The timer is armed while the run waits for its first attempt, set
+        again if the deadline moved, and called off once there is none.
+        """
+        deadline = self._start_deadline(run)
+        armed = self._late_timers.get(run.run_id)
+        if armed is not None and armed[0] == deadline:
+            return
+        if armed is not None:
+            del self._late_timers[run.run_id]
+            armed[1].cancel()
+        alert_id = alert_id_for(run.run_id, AlertKind.NEVER_STARTED, 0)
+        if deadline is None or self._quiet() or alert_id in self._seen:
+            return
+        rings = self._safe(lambda: self._not_started(run.run_id))
+        self._late_timers[run.run_id] = (deadline, self.engine.clock.call_at(deadline, rings))
+
+    def _start_deadline(self, run: Run) -> datetime | None:
+        """Return ``run``'s start deadline under the current config, or ``None`` for none."""
+        if run.state not in NOT_STARTED or run.attempt != 0:
+            return None
+        job = self.engine.config.jobs.get(run.job)
+        return None if job is None else deadlines.start_deadline(run, job)
+
+    def _not_started(self, run_id: str) -> None:
+        """Raise ``never_started`` if the run still waits and its deadline (now) has passed."""
         self._late_timers.pop(run_id, None)
         run = self.engine.book.get(run_id)
-        if run is None or run.state not in NOT_STARTED or run.attempt != 0:
+        job = None if run is None else self.engine.config.jobs.get(run.job)
+        deadline = None if run is None else self._start_deadline(run)
+        if run is None or job is None or deadline is None:
+            return
+        if deadline > self.engine.clock.now():  # moved later by a reload
+            self._watch_start(run)
             return
         wording = deadlines.never_started(run, deadline, job)
         self._raise_for(run_id, AlertKind.NEVER_STARTED, 0, wording)
 
     def _watch_runtime(self, attempt: Attempt) -> None:
-        """Arm the ``max_runtime`` timer of a started attempt (once per attempt)."""
+        """Keep a running attempt's ``max_runtime`` timer in step with the config."""
         key = (attempt.run_id, attempt.attempt)
-        job = self._job_of(attempt.run_id)
-        if self._quiet() or key in self._slow_timers or job is None or job.max_runtime is None:
+        due = self._runtime_due(attempt)
+        armed = self._slow_timers.get(key)
+        if armed is not None and armed[0] == due:
             return
-        limit = job.max_runtime
-        rings = self._safe(lambda: self._overran(attempt, limit))
-        self._slow_timers[key] = self.engine.clock.call_at(attempt.started_at + limit, rings)
+        if armed is not None:
+            del self._slow_timers[key]
+            armed[2].cancel()
+        if due is None or self._quiet():
+            return
+        rings = self._safe(lambda: self._overran(attempt))
+        self._slow_timers[key] = (due, attempt, self.engine.clock.call_at(due, rings))
 
-    def _overran(self, attempt: Attempt, limit: timedelta) -> None:
-        """Raise ``too_long`` if the attempt is still the run's running one."""
-        self._slow_timers.pop((attempt.run_id, attempt.attempt), None)
+    def _runtime_due(self, attempt: Attempt) -> datetime | None:
+        """Return when ``attempt`` runs too long, or ``None`` (not running, or no limit)."""
         run = self.engine.book.get(attempt.run_id)
         if run is None or run.state is not RunState.RUNNING or run.attempt != attempt.attempt:
+            return None
+        job = self.engine.config.jobs.get(run.job)
+        if job is None or job.max_runtime is None:
+            return None
+        return attempt.started_at + job.max_runtime
+
+    def _overran(self, attempt: Attempt) -> None:
+        """Raise ``too_long`` if the attempt still runs past its (current) ``max_runtime``."""
+        self._slow_timers.pop((attempt.run_id, attempt.attempt), None)
+        due = self._runtime_due(attempt)
+        now = self.engine.clock.now()
+        if due is None:
             return
-        runtime = self.engine.clock.now() - attempt.started_at
+        if due > now:  # moved later by a reload
+            self._watch_runtime(attempt)
+            return
+        runtime, limit = now - attempt.started_at, due - attempt.started_at
         wording = deadlines.too_long(attempt, runtime, limit)
         self._raise_for(attempt.run_id, AlertKind.TOO_LONG, attempt.attempt, wording)
 
@@ -324,7 +374,9 @@ class AlertMonitor:
 
     def _cancel_timers(self) -> None:
         """Call off every deadline and the prune timer."""
-        for timer in [*self._late_timers.values(), *self._slow_timers.values()]:
+        for _, timer in self._late_timers.values():
+            timer.cancel()
+        for _, _, timer in self._slow_timers.values():
             timer.cancel()
         self._late_timers.clear()
         self._slow_timers.clear()

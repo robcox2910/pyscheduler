@@ -144,6 +144,14 @@ class AlertTables:
         """Return the ids of alerts raised at ``when`` or later."""
         return {cast(str, r["alert_id"]) for r in self._raised_between(when, LATEST)}
 
+    def alert_ids_of_runs(self, run_ids: Collection[str]) -> set[str]:
+        """Return the ids of every alert raised for a run in ``run_ids``."""
+        return {
+            cast(str, r["alert_id"])
+            for run_id in run_ids
+            for r in _by_index(self._alerts, "alerts_run_id", run_id)
+        }
+
     def runless_alert_ids_before(self, when: datetime, limit: int) -> list[str]:
         """Return up to ``limit`` ids of run-less alerts raised before ``when``, oldest first."""
         alerts = [alert_from_row(r.data) for r in self._raised_between(EARLIEST, when)]
@@ -236,6 +244,11 @@ class AlertReads:
         """Return the ids of alerts raised at ``when`` or later."""
         with self._db.lock:
             return self._alerts.alert_ids_since(when)
+
+    def alert_ids_of_runs(self, run_ids: Collection[str]) -> set[str]:
+        """Return the ids of every alert raised for a run in ``run_ids``."""
+        with self._db.lock:
+            return self._alerts.alert_ids_of_runs(run_ids)
 
     def runless_alert_ids_before(self, when: datetime, limit: int) -> list[str]:
         """Return up to ``limit`` ids of run-less alerts raised before ``when``, oldest first."""

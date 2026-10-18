@@ -63,6 +63,11 @@ a long nap, or a rerun never sets off a flood of "you are late" alerts. If
 the scheduler is down when a deadline passes, the alert comes as soon as
 it starts again.
 
+The timers always follow the config **in force when they ring**. If a
+reload moves a job's `must_start_by` or `max_runtime`, the timer moves
+with it (earlier or later); if the reload removes the setting, or the
+whole job, the timer is called off.
+
 Here is the rule for a clock time, worked out for the job above:
 
 ```python
@@ -106,8 +111,9 @@ load.2026-10-16.1:failed:2
 
 The monitor remembers the ids it has raised and skips a second alert with
 the same id. When it starts, it reads back the ids of the alerts raised
-since its memory window began, so a restart never repeats an alert. Once
-an hour it forgets the ids of runs that have left memory. A rerun that
+since its memory window began, and every alert of each run still open
+(however old), so a restart never repeats an alert for a run it can still
+see. Once an hour it forgets the ids of runs that have left memory. A rerun that
 fails again gets a new attempt number, so it is a new alert.
 
 Raising an alert always goes in the same order: check the job wants this
