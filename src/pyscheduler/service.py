@@ -1,0 +1,274 @@
+"""Run the scheduler as a service: config, store, engine and HTTP API on one loop.
+
+Opening a shop takes the same few steps every morning, in the same
+order: check the delivery note (the config), unlock the stockroom (the
+store), wake the staff (the engine), and only then turn the sign on the
+door to OPEN (the HTTP server). The door is unlocked early (the port is
+taken first, so a busy port is found before any job starts) but the sign
+says "starting" until the staff are ready. Closing is the reverse: turn the sign
+round, let the customers inside finish, then send the staff home. Jobs
+already running are not interrupted: their minders carry on, and the
+engine adopts them again on the next start.
+
+``serve`` does exactly that. Signals from the operating system steer it:
+
+- ``SIGTERM`` or ``SIGINT`` (Ctrl-C): close gracefully;
+- ``SIGHUP``: reload the config files and the tokens file (problems go
+  to the log).
+
+Example::
+
+    import pynet.loop
+    from pathlib import Path
+    from pyscheduler.service import serve
+
+    pynet.loop.run(serve(Path("scheduler.yaml"), ready=print))
+"""
+
+import ipaddress
+import json
+from collections.abc import Callable, Coroutine
+from pathlib import Path
+from typing import Any
+
+import pynet.loop
+from pynet.errors import PyNetError
+from pynet.loop import Event, Task
+from pyweb.aserver import AsyncServer
+
+from pyscheduler.api import TokenFileError, TokenHolder, TokenTable, build_app, config_actions
+from pyscheduler.config import Config, load_config
+from pyscheduler.engine.base import EngineFailedError
+from pyscheduler.engine.clock import SystemClock
+from pyscheduler.engine.core import Engine
+from pyscheduler.engine.launcher import MinderLauncher
+from pyscheduler.service_parts import (
+    RunLog,
+    SignalHooks,
+    StartingGate,
+    logger,
+    reload_for_signal,
+)
+from pyscheduler.store import Batch, ConfigRecord, Store
+
+__all__ = ["CLOSE_GRACE", "SchedulerFailedError", "ServiceError", "is_loopback", "serve"]
+
+CLOSE_GRACE = 5.0
+"""How many seconds in-flight API requests get to finish when the service closes."""
+
+
+class ServiceError(Exception):
+    """Raised when ``serve`` refuses to start (unsafe address, bad tokens file, busy port)."""
+
+
+class SchedulerFailedError(Exception):
+    """Raised by ``serve`` when the engine failed stop (a store commit failed)."""
+
+
+def is_loopback(host: str) -> bool:
+    """Return whether ``host`` only accepts connections from this machine.
+
+    ``localhost``, ``127.0.0.0/8`` and ``::1`` (with or without brackets)
+    count; every other name or address does not.
+    """
+    bare = host.strip().removeprefix("[").removesuffix("]")
+    if bare.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(bare).is_loopback
+    except ValueError:
+        return False
+
+
+def _tokens(config: Config) -> TokenTable | None:
+    """Return the token table, or ``None`` for development mode on a loopback address.
+
+    Raises:
+        ServiceError: If there is no tokens file and the address is not
+            loopback, or the tokens file cannot be read.
+
+    """
+    settings = config.settings
+    host, _ = settings.listen
+    if settings.api_tokens_file is None:
+        if not is_loopback(host):
+            msg = (
+                f"refusing to listen on {host} without api_tokens_file: development mode "
+                "(no tokens) is only allowed on a loopback address such as 127.0.0.1"
+            )
+            raise ServiceError(msg)
+        return None
+    try:
+        return TokenTable.load(settings.api_tokens_file)
+    except TokenFileError as exc:
+        raise ServiceError(str(exc)) from None
+
+
+async def _open_engine(config: Config) -> tuple[Engine, ConfigRecord | None]:
+    """Open the store and build (not start) the engine; return it and the record to save.
+
+    The version is the stored one when the digest is unchanged, else the
+    next one. The record is saved only after ``start``, so catch-up still
+    compares against the previous config's jobs.
+    """
+    store = await pynet.loop.run_in_thread(Store.open, config.settings.state_dir)
+    try:
+        latest = await pynet.loop.run_in_thread(store.latest_config)
+    except BaseException:
+        await pynet.loop.run_in_thread(store.close)
+        raise
+    changed = latest is None or latest.digest != config.digest
+    version = 1 if latest is None else latest.version + int(changed)
+    engine = Engine(
+        config, store, clock=SystemClock(), launcher=MinderLauncher(), config_version=version
+    )
+    engine.subscribe(RunLog())
+    if not changed:
+        return engine, None
+    sources = json.dumps(dict(config.sources), sort_keys=True)
+    return engine, ConfigRecord(version, engine.clock.now(), config.digest, sources)
+
+
+async def _start(engine: Engine, record: ConfigRecord | None) -> None:
+    """Start the engine, then save the config record.
+
+    Raises:
+        SchedulerFailedError: If recovery or catch-up failed, or the
+            record could not be saved.
+
+    """
+    try:
+        await engine.start()
+    except EngineFailedError as exc:
+        raise SchedulerFailedError(str(exc)) from exc
+    if record is None:
+        return
+    try:
+        await engine.writer.save(Batch(configs=[record]))
+    except Exception as exc:
+        logger.exception("recording config version %d failed", record.version)
+        msg = f"cannot record config version {record.version}: {exc}"
+        raise SchedulerFailedError(msg) from exc
+
+
+async def _until(aw: Coroutine[Any, Any, object], wake: Event) -> None:
+    """Await ``aw``, then set ``wake``."""
+    await aw
+    wake.set()
+
+
+class _Service:
+    """Hold what one ``serve`` call has opened, so shutting down can undo it."""
+
+    def __init__(self) -> None:
+        """Start with nothing open."""
+        self.wake = Event()
+        self.gate = StartingGate()
+        self.engine: Engine | None = None
+        self.server: AsyncServer | None = None
+        self.signals: SignalHooks | None = None
+        self.watchers: list[Task[None]] = []
+        self.reloads: set[Task[None]] = set()
+        self.reload_task: Callable[[], Coroutine[Any, Any, None]] | None = None
+
+    def on_reload(self) -> None:
+        """Start a reload for SIGHUP (ignored until the engine is up)."""
+        if not self.gate.open or self.reload_task is None:
+            logger.warning("SIGHUP ignored: the scheduler is still starting")
+            return
+        task = pynet.loop.spawn(self.reload_task(), name="sighup-reload")
+        self.reloads.add(task)
+        task.add_done_callback(lambda done: self.reloads.discard(done))
+
+    def watch(self, aw: Coroutine[Any, Any, object], name: str) -> None:
+        """Wake ``serve`` when ``aw`` finishes."""
+        self.watchers.append(pynet.loop.spawn(_until(aw, self.wake), name=name))
+
+    async def shut_down(self) -> None:
+        """Close the server, let reloads end, stop the engine, then restore the signals.
+
+        The signal handlers go last, so a second Ctrl-C while closing is
+        a no-op rather than a ``KeyboardInterrupt``.
+        """
+        for task in self.watchers:
+            task.cancel()
+        try:
+            if self.server is not None:
+                await self.server.close(CLOSE_GRACE)
+            if self.reloads:
+                await pynet.loop.gather(*self.reloads, return_exceptions=True)
+        finally:
+            try:
+                if self.engine is not None:
+                    await self.engine.stop()
+                    logger.info("scheduler stopped")
+            finally:
+                if self.signals is not None:
+                    self.signals.restore()
+
+
+async def serve(
+    config_path: Path,
+    *,
+    ready: Callable[[int], None] | None = None,
+    stop: Event | None = None,
+) -> None:
+    """Run the scheduler for the config at ``config_path`` until told to stop.
+
+    In order: load the config; check the tokens; hook the signals; open
+    the store; take the port (requests get 503 ``scheduler is starting``
+    for now); start the engine; record the config version (when its
+    digest is new); open the gate and call ``ready(port)``. It ends when
+    ``stop`` is set, on SIGTERM or SIGINT (also during start-up: it stops
+    once the engine is up), or when the engine fails. SIGHUP reloads the
+    config. Signals are only hooked on the main thread.
+
+    Shutting down closes the server (letting requests finish for
+    ``CLOSE_GRACE`` seconds) and stops the engine without killing running
+    attempts: their minders carry on and are adopted on the next start.
+
+    Raises:
+        ConfigError: If the config has errors (nothing has been opened).
+        ServiceError: If it refuses to start (see ``ServiceError``).
+        StoreSchemaError: If the state folder holds another store layout.
+        PyDBError: If the store cannot be opened (another scheduler has it).
+        OSError: If the state folder cannot be made.
+        SchedulerFailedError: If the engine failed stop.
+
+    """
+    config = await pynet.loop.run_in_thread(load_config, config_path)
+    tokens = TokenHolder(_tokens(config))
+    host, port = config.settings.listen
+    service = _Service()
+    service.signals = SignalHooks(service.wake.set, service.on_reload)
+    service.signals.install()
+    try:
+        engine, record = await _open_engine(config)
+        service.engine = engine
+        reload, validate = config_actions(engine, config_path, tokens=tokens)
+        service.reload_task = lambda: reload_for_signal(reload)
+        app = build_app(engine, tokens=tokens, reload=reload, validate=validate)
+        app.middleware(service.gate.middleware())
+        service.server = AsyncServer(app)
+        try:
+            await service.server.start(host.removeprefix("[").removesuffix("]"), port)
+        except (PyNetError, OSError) as exc:
+            cause = exc.__cause__ if isinstance(exc, PyNetError) and exc.__cause__ else exc
+            msg = f"cannot listen on {host}:{port}: {cause}"
+            raise ServiceError(msg) from None
+        await _start(engine, record)
+        if not service.wake.is_set():  # a stop signal while starting skips the rest
+            service.watch(engine.wait_failed(), "failed")
+            if stop is not None:
+                service.watch(stop.wait(), "stop")
+            service.gate.open = True
+            logger.info(
+                "scheduler %s listening on %s:%d", config.settings.name, host, service.server.port
+            )
+            if ready is not None:
+                ready(service.server.port)
+            await service.wake.wait()
+    finally:
+        await service.shut_down()
+    if engine.error is not None:
+        raise SchedulerFailedError(str(engine.error))

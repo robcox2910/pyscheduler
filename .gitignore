@@ -12,3 +12,5 @@ htmlcov/
 src/pyscheduler/_version.py
 site/
 .superpowers/
+examples/state/
+examples/logs/

@@ -30,7 +30,7 @@ dependencies = [
 pynet = { git = "https://github.com/robcox2910/pynet", tag = "v0.1.0" }
 pymq = { git = "https://github.com/robcox2910/pymq", tag = "v0.2.0" }
 pyweb = { git = "https://github.com/robcox2910/pyweb", tag = "v0.2.0" }
-pydb = { git = "https://github.com/robcox2910/pydb", tag = "v0.2.0" }
+pydb = { git = "https://github.com/robcox2910/pydb", tag = "v0.4.0" }
 
 [project.scripts]
 pysched = "pyscheduler.cli:main"
@@ -126,6 +126,9 @@ max-args = 9
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "SLF001"]
 "examples/**/*.py" = ["T201"]
+# The minder starts once per attempt and must import as little as it can:
+# plain os paths instead of pathlib, try/except instead of contextlib.
+"src/pyscheduler/minder.py" = ["PTH", "SIM105"]
 
 [tool.ruff.format]
 quote-style = "double"
