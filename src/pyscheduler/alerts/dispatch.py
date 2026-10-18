@@ -26,7 +26,16 @@ from pymq.broker import Broker, LeasedMessage
 from pynet.loop import Lock
 from pynet.messaging import JsonValue
 
-from pyscheduler.alerts.delivery import ATTEMPTS_HEADER, REMOVED_ERROR, Pigeonholes, queue_config
+from pyscheduler.alerts.delivery import (
+    ATTEMPTS_HEADER,
+    NOT_RUNNING,
+    REMOVED_ERROR,
+    AlertsStoppedError,
+    Pigeonholes,
+    max_tries,
+    queue_config,
+    retry_wait,
+)
 from pyscheduler.alerts.model import AlertRecord, DeliveryRecord, DeliveryStatus
 from pyscheduler.alerts.routing import alert_topic
 from pyscheduler.config.model import NotifierDef
@@ -108,9 +117,10 @@ class Dispatcher(Pigeonholes):
     async def settle(self) -> None:
         """Return once no send is under way and no copy waits (a test helper).
 
-        It also returns once the dispatcher has stopped on a store error.
+        It also returns once delivering has stopped (a store error, or the
+        engine failed).
         """
-        while self.error is None and self.broker is not None and self._busy():
+        while not self._halted() and self.broker is not None and self._busy():
             await pynet.loop.sleep(SETTLE_NAP_SECONDS)
 
     # -- posting ---------------------------------------------------------
@@ -136,8 +146,13 @@ class Dispatcher(Pigeonholes):
         Replays take turns, so two at once never post the same row twice:
         the second finds it ``pending`` and raises ``LookupError``.
 
+        A dead delivery whose notifier has since been removed stays dead.
+
         Raises:
-            LookupError: If the alert has no such dead delivery.
+            LookupError: If the alert has no such dead delivery (or only
+                ones whose notifier was removed).
+            AlertsStoppedError: If the dispatcher has stopped, or the
+                engine has failed.
             RuntimeError: If the dispatcher was not started.
             Exception: The store's error, if saving the rows failed (the
                 engine then fails stop, as for any lost write).
@@ -145,6 +160,8 @@ class Dispatcher(Pigeonholes):
         """
         self._require()
         async with self._replaying:
+            if self._halted():
+                raise AlertsStoppedError(NOT_RUNNING)
             return await self._replay(alert_id, notifier)
 
     async def _replay(self, alert_id: str, notifier: str | None) -> list[DeliveryRecord]:
@@ -160,13 +177,18 @@ class Dispatcher(Pigeonholes):
         if alert is None:
             message = f"no dead delivery for {alert_id}"
             raise LookupError(message)
+        removed = sorted(d.notifier for d in dead if d.notifier not in self.engine.config.notifiers)
+        dead = [d for d in dead if d.notifier not in removed]
+        if not dead:
+            message = f"cannot replay {alert_id}: notifier removed ({', '.join(removed)})"
+            raise LookupError(message)
         now = self.engine.clock.now()
         fresh = [
             replace(d, status=DeliveryStatus.PENDING, attempts=0, last_error="", updated_at=now)
             for d in dead
         ]
         if not await self._save(Batch(deliveries=fresh)):
-            raise self.error or RuntimeError("delivery stopped")
+            raise self.error or AlertsStoppedError(NOT_RUNNING)
         body = self._body(alert)
         for delivery in fresh:
             self._replays += 1  # a fresh message id: PyMQ remembers ids it has seen
@@ -194,6 +216,9 @@ class Dispatcher(Pigeonholes):
 
     async def _try_once(self, message: LeasedMessage) -> None:
         """Try one send, write the row, then ack or nack the copy."""
+        if self.engine.error is not None:  # the engine failed stop: deliver nothing more
+            self._cancel_consumers()
+            return
         envelope = message.envelope
         alert_id = envelope.headers["alert_id"]
         name = envelope.headers["notifier"]
@@ -210,14 +235,24 @@ class Dispatcher(Pigeonholes):
                 self._settle(message, ack=True)
             return
         error = redact_text(error, self.engine.config.expansions)
-        dead = attempts >= self._queues[message.queue].max_attempts
+        dead = attempts >= max_tries(definition)  # the current retries, not the queue's
         giving_up = ", giving up" if dead else ""
         logger.warning(
             "alert %s to %s failed (try %d%s): %s", alert_id, name, attempts, giving_up, error
         )
         status = DeliveryStatus.DEAD if dead else DeliveryStatus.PENDING
-        if await self._write(self._record(alert_id, name, status, attempts, error)):
-            self._settle(message, ack=False, requeue=not dead, error=error)
+        record = self._record(alert_id, name, status, attempts, error)
+        if not await self._write(record):
+            return
+        if not dead and attempts >= self._queues[message.queue].max_attempts:
+            # An old queue (retries raised by a reload) would bury it: move it on.
+            self._settle(message, ack=True)
+            self._replays += 1
+            delay = retry_wait(definition, attempts, self._scale)
+            body = cast("dict[str, JsonValue]", envelope.body)
+            self._post(record, body, f"{record.delivery_id}#{self._replays}", delay=delay)
+            return
+        self._settle(message, ack=False, requeue=not dead, error=error)
 
     async def _send(self, definition: NotifierDef, body: JsonValue) -> str | None:
         """Send once within the notifier's real timeout; return the error text, or ``None``.

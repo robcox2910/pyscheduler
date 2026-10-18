@@ -1,11 +1,13 @@
 """Tests for the dispatcher across restarts, replays, reloads and store trouble."""
 
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
 import pynet.loop
 import pytest
 from alert_helpers import (
+    ALWAYS,
     DISPATCH_CONFIG,
     SCALE,
     FlakyNotifier,
@@ -20,9 +22,12 @@ from alert_helpers import (
     stored,
 )
 from engine_helpers import START
+from pynet.messaging import JsonValue
 
+from pyscheduler.alerts.delivery import AlertsStoppedError
 from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.alerts.model import DeliveryStatus
+from pyscheduler.notifiers import NotifyError
 from pyscheduler.store.schema import Batch
 
 ONE_SEND = 1
@@ -30,6 +35,8 @@ TWO_SENDS = 2
 THREE_SENDS = 3
 POLL_SECONDS = 0.01
 SLOW_WRITE_SECONDS = 0.5
+PAST_RETRY_SECONDS = 1.5
+FOUR_SENDS = 4
 
 SLOW_RETRY = DISPATCH_CONFIG.replace("{count: 1, delay: 1s}", "{count: 1, delay: 100s}")
 """The dispatch config with the desk waiting one (scaled) second before its retry."""
@@ -191,6 +198,47 @@ class TestRestartAndReplay:
         assert desk.calls == THREE_SENDS
 
 
+class HeldFlakyNotifier(FlakyNotifier):
+    """Always fail; hold the first send until ``release`` is set."""
+
+    def __init__(self) -> None:
+        """Fail every time; start with the first send held."""
+        super().__init__(fails=ALWAYS)
+        self.release = pynet.loop.Event()
+
+    async def send(self, alert: Mapping[str, JsonValue]) -> None:
+        """Wait for the release on the first call, then fail."""
+        if self.calls == 0:
+            self.calls += 1
+            await self.release.wait()
+            raise NotifyError(self.error)
+        await super().send(alert)
+
+
+class TestReloadedRetries:
+    """A delivery already queued follows the notifier's retries in force at each try."""
+
+    def test_raised_retries_apply_to_a_queued_delivery(self, tmp_path: Path) -> None:
+        """Give a failing delivery the four tries a reload allows, not the old queue's two."""
+        harness = make_harness(tmp_path, DISPATCH_CONFIG)
+        desk = HeldFlakyNotifier()
+        alert = make_alert()
+
+        async def body(dispatcher: Dispatcher) -> None:
+            """Hold the first send, raise the desk's retries to 3, then let it fail on."""
+            await raise_alert(harness, dispatcher, alert)
+            while desk.calls == 0:
+                await pynet.loop.sleep(POLL_SECONDS)
+            more = DISPATCH_CONFIG.replace("{count: 1, delay: 1s}", "{count: 3, delay: 1s}")
+            await harness.engine.reload(load_text(tmp_path, more), actor="test")
+            desk.release.set()
+            row = (await stored(dispatcher, alert.alert_id))["desk"]
+            assert (row.status, row.attempts) == (DeliveryStatus.DEAD, FOUR_SENDS)
+
+        run_dispatcher(harness, {"pager": RecordingNotifier(), "desk": desk}, body)
+        assert desk.calls == FOUR_SENDS
+
+
 class TestStoreFailure:
     """A failed store write fails the engine stop; a slow one loses no lease."""
 
@@ -252,6 +300,27 @@ class TestStoreFailure:
             assert harness.engine.error is failure
 
         run_dispatcher(harness, {"pager": RecordingNotifier(), "desk": desk}, body)
+
+    def test_engine_failure_stops_delivering(self, tmp_path: Path) -> None:
+        """Send nothing more once the engine has failed stop for another reason."""
+        harness = make_harness(tmp_path, SLOW_RETRY)
+        desk = FlakyNotifier(fails=1)
+        alert = make_alert()
+
+        async def body(dispatcher: Dispatcher) -> None:
+            """Fail the first send, fail the engine, and wait past the retry."""
+            await raise_alert(harness, dispatcher, alert)
+            while desk.calls == 0:
+                await pynet.loop.sleep(POLL_SECONDS)
+            harness.engine.fail_stop(OSError("disk on fire"))
+            await pynet.loop.sleep(PAST_RETRY_SECONDS)
+            await dispatcher.settle()
+            assert desk.calls == ONE_SEND
+            with pytest.raises(AlertsStoppedError):
+                await dispatcher.replay(alert.alert_id)
+
+        run_dispatcher(harness, {"pager": RecordingNotifier(), "desk": desk}, body)
+        assert desk.calls == ONE_SEND
 
     def test_lease_is_kept_during_a_slow_write(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

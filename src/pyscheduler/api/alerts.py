@@ -15,6 +15,7 @@ from pynet.messaging import JsonValue
 from pyweb.app import App
 from pyweb.messages import HttpRequest
 
+from pyscheduler.alerts.delivery import NOT_RUNNING, AlertsStoppedError
 from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.alerts.model import AlertRecord, DeliveryRecord, DeliveryStatus
 from pyscheduler.alerts.routing import alert_json
@@ -109,7 +110,7 @@ def add_alert_routes(app: App, engine: Engine, dispatcher: Dispatcher | None) ->
     def running() -> Dispatcher:
         """Return the dispatcher, or raise 503 when alerts are not running."""
         if dispatcher is None:
-            raise ApiError(UNAVAILABLE, "alerts are not running")
+            raise ApiError(UNAVAILABLE, NOT_RUNNING)
         return dispatcher
 
     @app.get("/api/alerts")
@@ -155,5 +156,7 @@ def add_alert_routes(app: App, engine: Engine, dispatcher: Dispatcher | None) ->
             fresh = await posting.replay(alert_id, notifier)
         except LookupError as exc:
             raise ApiError(CONFLICT, str(exc)) from None
+        except AlertsStoppedError:
+            raise ApiError(UNAVAILABLE, NOT_RUNNING) from None
         rows = cast("list[JsonValue]", [delivery_json(d) for d in fresh])
         return {"deliveries": redact(rows, engine.config.expansions)}

@@ -37,6 +37,25 @@ ATTEMPTS_HEADER = "attempts"
 REMOVED_ERROR = "notifier removed"
 """The error of a delivery whose notifier is no longer configured."""
 
+NOT_RUNNING = "alerts are not running"
+"""The message of ``AlertsStoppedError``."""
+
+
+class AlertsStoppedError(RuntimeError):
+    """Raised by a replay once the dispatcher has stopped (or the engine has failed)."""
+
+
+def max_tries(definition: NotifierDef) -> int:
+    """Return how many sends a delivery to ``definition`` gets: its retries plus one."""
+    return definition.retries.count + 1
+
+
+def retry_wait(definition: NotifierDef, tries: int, time_scale: float = 1.0) -> float:
+    """Return the seconds to wait after ``tries`` failed sends: doubling, capped at ``max_delay``."""
+    retries = definition.retries
+    grown = retries.delay.total_seconds() * 2 ** max(tries - 1, 0)
+    return min(grown, max(retries.max_delay, retries.delay).total_seconds()) * time_scale
+
 
 def queue_config(definition: NotifierDef, time_scale: float = 1.0) -> QueueConfig:
     """Return the queue settings for a notifier: its lease, tries and back-off."""
@@ -44,7 +63,7 @@ def queue_config(definition: NotifierDef, time_scale: float = 1.0) -> QueueConfi
     delay = retries.delay.total_seconds() * time_scale
     return QueueConfig(
         ack_timeout=(definition.timeout.total_seconds() + ACK_GRACE_SECONDS) * time_scale,
-        max_attempts=retries.count + 1,
+        max_attempts=max_tries(definition),
         retry_delay=delay,
         max_retry_delay=max(retries.max_delay.total_seconds() * time_scale, delay),
     )
@@ -82,13 +101,21 @@ class Pigeonholes(ABC):
 
     # -- posting ---------------------------------------------------------
 
-    def _post(self, delivery: DeliveryRecord, body: dict[str, JsonValue], message_id: str) -> None:
-        """Put one delivery on its notifier's queue (or bury it if the notifier is gone)."""
-        if self.error is not None:
-            return
-        queue = self._queue_for(delivery.notifier)
-        if queue is None:
-            self._track(self._bury(delivery))
+    def _post(
+        self,
+        delivery: DeliveryRecord,
+        body: dict[str, JsonValue],
+        message_id: str,
+        *,
+        delay: float = 0.0,
+    ) -> None:
+        """Put one delivery on its notifier's queue (or bury it if the notifier is gone).
+
+        Once delivering has stopped (``stop``, a store error, or the engine
+        failed) nothing is posted: the row stays ``pending`` in the store
+        and the next start posts it.
+        """
+        if self._halted():
             return
         headers = {
             "alert_id": delivery.alert_id,
@@ -96,9 +123,14 @@ class Pigeonholes(ABC):
             ATTEMPTS_HEADER: str(delivery.attempts),
         }
         try:
-            self._require().put(queue, body, id=message_id, headers=headers)
+            queue = self._queue_for(delivery.notifier)
+            if queue is None:
+                self._track(self._bury(delivery))
+                return
+            self._require().put(queue, body, id=message_id, headers=headers, delay=delay)
         except BrokerError as exc:  # it stays pending in the store; the next start posts it
-            logger.error("cannot queue alert %s for %s: %s", delivery.alert_id, queue, exc)  # noqa: TRY400
+            name = delivery.notifier
+            logger.error("cannot queue alert %s for %s: %s", delivery.alert_id, name, exc)  # noqa: TRY400
 
     def _queue_for(self, name: str) -> str | None:
         """Return the notifier's current queue, declaring a fresh one when its settings changed."""
@@ -195,6 +227,10 @@ class Pigeonholes(ABC):
 
     # -- helpers ---------------------------------------------------------
 
+    def _halted(self) -> bool:
+        """Return whether delivering has stopped: ``stop``, a store error, or a failed engine."""
+        return self._stopped or self.error is not None or self.engine.error is not None
+
     def _body(self, alert: AlertRecord) -> dict[str, JsonValue]:
         """Return the JSON a notifier is sent for ``alert``."""
         return alert_json(alert, scheduler=self.engine.config.settings.name)
@@ -237,4 +273,13 @@ class Pigeonholes(ABC):
         return False
 
 
-__all__ = ["ATTEMPTS_HEADER", "REMOVED_ERROR", "Pigeonholes", "queue_config"]
+__all__ = [
+    "ATTEMPTS_HEADER",
+    "NOT_RUNNING",
+    "REMOVED_ERROR",
+    "AlertsStoppedError",
+    "Pigeonholes",
+    "max_tries",
+    "queue_config",
+    "retry_wait",
+]

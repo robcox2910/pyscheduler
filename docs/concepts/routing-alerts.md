@@ -146,6 +146,13 @@ error, so nobody is told twice by accident.
 
 If a reload removes a notifier while some of its deliveries are still
 waiting, those deliveries are marked `dead` with the error
-`notifier removed`. If a reload changes a notifier's retry settings, the
-dispatcher opens a fresh pigeonhole for it (`notify.<name>.1`, then `.2`
-and so on), because a PyMQ queue keeps the settings it was made with.
+`notifier removed`, and they cannot be replayed while that notifier is
+gone (a replay of one answers 409, and the delivery stays `dead`). A
+replay asked for after the scheduler has started stopping answers 503
+`alerts are not running`. If a reload changes a notifier's retry
+settings, the dispatcher opens a fresh pigeonhole for it
+(`notify.<name>.1`, then `.2` and so on), because a PyMQ queue keeps the
+settings it was made with. A copy still in an old pigeonhole follows the
+**new** `count` all the same: it is given up on after the new number of
+tries, and moved to the fresh pigeonhole if the old one would give up
+too soon.

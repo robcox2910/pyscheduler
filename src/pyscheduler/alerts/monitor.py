@@ -9,12 +9,13 @@ its ``max_runtime``, or a run that has not started by its
 ``must_start_by``. Those are timers, set when the run or attempt is first
 seen and called off when it starts or ends.
 
-Raising an alert is always the same: check the job wants this kind, skip
-an alert already raised (the same id), write the alert and one
-``pending`` delivery per notifier to the store, and only then hand it to
-the dispatcher. A failed alert never stops jobs: a timer's error is
-logged, not fail-stopped. The one exception is the store: if the alert
-cannot be written, the engine fails stop, as it would for any lost write.
+Raising an alert is always the same (see ``alerts.raising``): check the
+job wants this kind, skip an alert already raised (the same id), write
+the alert and one ``pending`` delivery per notifier to the store, and
+only then hand it to the dispatcher. A failed alert never stops jobs: a
+timer's error is logged, not fail-stopped. The one exception is the
+store: if the alert cannot be written, the engine fails stop, as it
+would for any lost write.
 """
 
 import logging
@@ -22,24 +23,15 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, time, timedelta
 
 import pynet.loop
-from pynet.loop import Task
 
 from pyscheduler.alerts import deadlines
-from pyscheduler.alerts.deadlines import Wording
 from pyscheduler.alerts.dispatch import Dispatcher
-from pyscheduler.alerts.model import (
-    AlertRecord,
-    DeliveryRecord,
-    DeliveryStatus,
-    alert_id_for,
-)
-from pyscheduler.alerts.routing import destinations
-from pyscheduler.config.model import AlertKind, Criticality, JobAlerts, JobDef, JobKind, Problem
-from pyscheduler.config.redaction import redact_text
+from pyscheduler.alerts.model import alert_id_for
+from pyscheduler.alerts.raising import AlertRaiser
+from pyscheduler.config.model import AlertKind, JobKind, Problem
 from pyscheduler.engine.clock import Cancel
 from pyscheduler.engine.core import Engine
-from pyscheduler.engine.model import Attempt, Outcome, Run, RunState, parse_run_id
-from pyscheduler.store.schema import Batch
+from pyscheduler.engine.model import Attempt, Outcome, Run, RunState
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +44,7 @@ PRUNE_EVERY = timedelta(hours=1)
 """How often the remembered alert ids are trimmed to the runs still in memory."""
 
 
-class AlertMonitor:
+class AlertMonitor(AlertRaiser):
     """Raise alerts from the engine's run and attempt changes, and from deadlines.
 
     Build it *before* ``engine.start()``, so it hears what recovery does;
@@ -62,21 +54,14 @@ class AlertMonitor:
 
     def __init__(self, engine: Engine, dispatcher: Dispatcher) -> None:
         """Listen to ``engine``'s runs and attempts; nothing is raised until ``start``."""
-        self.engine = engine
-        self.dispatcher = dispatcher
-        self._seen: set[str] = set()
-        """Ids of the alerts already raised: a second one with the same id is skipped."""
+        super().__init__(engine, dispatcher)
         self._early: list[Callable[[], None]] = []
         self._started = False
-        self._stopped = False
-        self._broken = False
-        """Set once an alert could not be written: the engine has failed stop."""
         self._late_timers: dict[str, tuple[datetime, Cancel]] = {}
         """Each waiting run's ``never_started`` timer, with the deadline it rings at."""
         self._slow_timers: dict[tuple[str, int], tuple[datetime, Attempt, Cancel]] = {}
         """Each running attempt's ``too_long`` timer, with when it rings and the attempt."""
         self._prune_timer: Cancel | None = None
-        self._tasks: set[Task[None]] = set()
         self._unhook = [
             engine.subscribe(self._on_run),
             engine.watch_attempts(self._on_attempt),
@@ -130,11 +115,6 @@ class AlertMonitor:
             unhook()
         self._cancel_timers()
         await self.settle()
-
-    async def settle(self) -> None:
-        """Wait until no alert is being raised (a test helper)."""
-        while self._tasks:
-            await pynet.loop.gather(*list(self._tasks), return_exceptions=True)
 
     # -- scheduler-wide alerts -------------------------------------------
 
@@ -302,78 +282,17 @@ class AlertMonitor:
         self._prune_timer = self.engine.clock.call_at(when, self._safe(self._prune))
 
     def _prune(self) -> None:
-        """Forget the ids of alerts whose run has left memory (and of run-less ones)."""
-        book = self.engine.book
-        self._seen = {i for i in self._seen if book.get(i.split(":", 1)[0]) is not None}
-        self._plan_prune()
+        """Forget the ids of alerts whose run has left memory (and of run-less ones).
 
-    # -- raising ---------------------------------------------------------
-
-    def _raise_for(self, run_id: str, kind: AlertKind, attempt: int, wording: Wording) -> None:
-        """Raise a ``kind`` alert about ``run_id`` if its job wants that kind."""
-        run = self.engine.book.get(run_id)
-        name, run_date, _ = parse_run_id(run_id) if run is None else (run.job, run.run_date, 0)
-        job = self.engine.config.jobs.get(name)
-        if not (job.alerts if job is not None else JobAlerts()).enabled(kind):
-            return
-        message, detail = wording
-        expansions = self.engine.config.expansions
-        alert = AlertRecord(
-            alert_id=alert_id_for(run_id, kind, attempt),
-            kind=kind,
-            run_id=run_id,
-            job=name,
-            run_date=run_date,
-            attempt=attempt,
-            criticality=job.criticality if job is not None else Criticality.NORMAL,
-            raised_at=self.engine.clock.now(),
-            message=redact_text(message, expansions),
-            detail={
-                k: redact_text(v, expansions) if isinstance(v, str) else v
-                for k, v in detail.items()
-            },
-        )
-        self._raise(alert)
-
-    def _raise(self, alert: AlertRecord) -> None:
-        """Write ``alert`` and its deliveries, then hand it to the dispatcher (in a task)."""
-        if self._quiet() or alert.alert_id in self._seen:
-            return
-        self._seen.add(alert.alert_id)
-        task = pynet.loop.spawn(self._commit(alert), name=f"alert-{alert.alert_id}")
-        self._tasks.add(task)
-        task.add_done_callback(lambda _: self._tasks.discard(task))
-
-    async def _commit(self, alert: AlertRecord) -> None:
-        """Store the alert with a ``pending`` delivery per notifier, then enqueue it."""
-        names = destinations(self.engine.config, alert)
-        deliveries = [
-            DeliveryRecord(alert.alert_id, name, DeliveryStatus.PENDING, 0, "", alert.raised_at)
-            for name in names
-        ]
+        The next trim is planned even if this one fails.
+        """
         try:
-            await self.engine.writer.save(Batch(alerts=[alert], deliveries=deliveries))
-        except Exception as exc:  # noqa: BLE001 -- a lost write fails the engine stop
-            self._broken = True
-            self._cancel_timers()
-            self.engine.fail_stop(exc)
-            return
-        try:
-            self.dispatcher.enqueue(alert, deliveries)
-        except Exception:
-            logger.exception("could not hand alert %s to the dispatcher", alert.alert_id)
+            book = self.engine.book
+            self._seen = {i for i in self._seen if book.get(i.split(":", 1)[0]) is not None}
+        finally:
+            self._plan_prune()
 
     # -- small helpers ---------------------------------------------------
-
-    def _job_of(self, run_id: str) -> JobDef | None:
-        """Return the configured job of ``run_id``, or ``None``."""
-        run = self.engine.book.get(run_id)
-        name = run.job if run is not None else parse_run_id(run_id)[0]
-        return self.engine.config.jobs.get(name)
-
-    def _quiet(self) -> bool:
-        """Return whether the monitor raises nothing more (stopped, or the engine failed)."""
-        return self._stopped or self._broken or self.engine.error is not None
 
     def _safe(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Wrap a timer callback so an error in it is logged, never fail-stopped."""

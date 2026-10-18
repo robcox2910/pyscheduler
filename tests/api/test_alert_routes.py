@@ -255,6 +255,44 @@ class TestDeadAndReplay:
 
         serve_alerts(h, body)
 
+    def test_replay_of_a_removed_notifier_stays_dead(self, api: MakeApi) -> None:
+        """A dead delivery whose notifier is gone is 409 and stays dead, never ``pending``."""
+        h = api(CONFIG, env={"HOOK_KEY": SECRET})
+        alert = make_alert()
+        seed(h, (alert, [delivery(alert, DeliveryStatus.DEAD, "boom", notifier="gone")]))
+
+        async def body(client: TestClient, dispatcher: Dispatcher) -> None:
+            """Replay it and read the row back."""
+            path = f"/api/alerts/{alert.alert_id}/replay"
+            answer = await client.post(path, headers=OPERATOR, json={})
+            assert answer.status == CONFLICT
+            assert body_of(answer) == {
+                "error": f"cannot replay {alert.alert_id}: notifier removed (gone)"
+            }
+            await dispatcher.settle()
+            listed = body_of(await client.get("/api/alerts", headers=VIEWER))["alerts"]
+            assert listed[0]["deliveries"][0]["status"] == "dead"
+
+        serve_alerts(h, body)
+
+    def test_replay_after_stop_is_503(self, api: MakeApi) -> None:
+        """A replay once the dispatcher has stopped answers 503 and changes nothing."""
+        h = api(CONFIG, env={"HOOK_KEY": SECRET})
+        alert = make_alert()
+        seed(h, (alert, [delivery(alert, DeliveryStatus.DEAD, "boom")]))
+
+        async def body(client: TestClient, dispatcher: Dispatcher) -> None:
+            """Stop the dispatcher, then replay."""
+            await dispatcher.stop()
+            path = f"/api/alerts/{alert.alert_id}/replay"
+            answer = await client.post(path, headers=OPERATOR, json={})
+            assert answer.status == UNAVAILABLE
+            assert body_of(answer) == {"error": "alerts are not running"}
+            listed = body_of(await client.get("/api/alerts", headers=VIEWER))["alerts"]
+            assert listed[0]["deliveries"][0]["status"] == "dead"
+
+        serve_alerts(h, body)
+
 
 class TestRunDetail:
     """``GET /api/runs/{id}`` includes the run's alerts."""
