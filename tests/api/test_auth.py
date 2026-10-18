@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from api_helpers import (
+    DEV,
     EXTRACT_RUN,
     FORBIDDEN,
     OK,
@@ -143,11 +144,11 @@ class TestMiddleware:
 
         async def body() -> None:
             """Read and act with no token at all."""
-            assert (await h.client.get("/api/jobs")).status == OK
-            response = await h.client.post("/api/jobs/adhoc/trigger")
+            assert (await h.client.get("/api/jobs", headers=DEV)).status == OK
+            response = await h.client.post("/api/jobs/adhoc/trigger", headers=DEV)
             assert response.status == OK
             run_id = body_of(response)["run"]["run_id"]
-            detail = body_of(await h.client.get(f"/api/runs/{run_id}"))
+            detail = body_of(await h.client.get(f"/api/runs/{run_id}", headers=DEV))
             assert any(event["actor"] == "dev" for event in detail["events"])
 
         h.run(body)

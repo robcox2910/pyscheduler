@@ -6,6 +6,7 @@ from pyscheduler.api.auth import (
     DEV_PRINCIPAL,
     Principal,
     TokenFileError,
+    TokenHolder,
     TokenTable,
     token_middleware,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "Principal",
     "Reload",
     "TokenFileError",
+    "TokenHolder",
     "TokenTable",
     "Validate",
     "build_app",

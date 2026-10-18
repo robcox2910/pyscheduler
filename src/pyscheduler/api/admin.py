@@ -3,7 +3,8 @@
 ``reload`` and ``validate`` are handed in as callables, so the API does
 not need to know where the config files live. ``config_actions`` makes
 the usual pair: both read the files on disk on a helper thread;
-``reload`` then swaps the new config into the engine, ``validate`` only
+``reload`` then swaps the new config into the engine (and re-reads the
+tokens file, so a revoked token stops working), ``validate`` only
 reports.
 """
 
@@ -15,7 +16,7 @@ from pynet.messaging import JsonValue
 from pyweb.app import App
 from pyweb.messages import HttpRequest, HttpResponse, json
 
-from pyscheduler.api.auth import HEALTH_PATH
+from pyscheduler.api.auth import HEALTH_PATH, TokenFileError, TokenHolder, TokenTable
 from pyscheduler.api.serialize import problem_json
 from pyscheduler.api.support import BAD_REQUEST, ApiError, actor_of, guarded
 from pyscheduler.config import Config, ConfigError, Problem, load_config
@@ -34,8 +35,28 @@ type Validate = Callable[[], Awaitable[list[Problem]]]
 UNAVAILABLE = 503
 
 
+def _reread_tokens(
+    config: Config, path: Path, holder: TokenHolder
+) -> tuple[TokenTable | None, list[Problem]]:
+    """Read the new config's tokens file; return the table or the problem with it."""
+    tokens_file = config.settings.api_tokens_file
+    if (tokens_file is None) != (holder.table is None):
+        message = "api_tokens_file: switching between development mode and tokens needs a restart"
+        return None, [Problem(str(path), 1, message)]
+    if tokens_file is None:
+        return None, []
+    try:
+        return TokenTable.load(tokens_file), []
+    except TokenFileError as exc:
+        return None, [Problem(str(path), 1, f"api_tokens_file: {exc}")]
+
+
 def config_actions(
-    engine: Engine, path: Path, *, env: Mapping[str, str] | None = None
+    engine: Engine,
+    path: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    tokens: TokenHolder | None = None,
 ) -> tuple[Reload, Validate]:
     """Return ``(reload, validate)`` callables for the config at ``path``.
 
@@ -44,6 +65,11 @@ def config_actions(
     leaves the engine alone if there are any; otherwise it hands the new
     config to ``engine.reload`` (which may raise ``ActionError``) and
     returns the warnings.
+
+    With ``tokens``, ``reload`` also re-reads the new config's
+    ``api_tokens_file`` and swaps it into the holder once the config is
+    in. A tokens file that cannot be read, or a change between
+    development mode and tokens, fails the whole reload.
     """
 
     async def load() -> tuple[Config | None, list[Problem]]:
@@ -57,10 +83,19 @@ def config_actions(
         return config, list(config.warnings)
 
     async def reload(actor: str) -> list[Problem]:
-        """Load the files and, if they are valid, swap them in."""
+        """Load the files (and the tokens) and, if they are valid, swap them in."""
         config, problems = await load()
-        if config is not None:
-            await engine.reload(config, actor=actor)
+        if config is None:
+            return problems
+        table = None
+        if tokens is not None:
+            loaded, holder = config, tokens
+            table, trouble = await run_in_thread(lambda: _reread_tokens(loaded, path, holder))
+            if trouble:
+                return trouble + problems
+        await engine.reload(config, actor=actor)
+        if tokens is not None:
+            tokens.table = table
         return problems
 
     async def validate() -> list[Problem]:

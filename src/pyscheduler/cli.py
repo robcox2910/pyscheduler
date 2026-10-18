@@ -75,7 +75,11 @@ def _connection(*, suppress: bool) -> argparse.ArgumentParser:
     parent = argparse.ArgumentParser(add_help=False)
     default = argparse.SUPPRESS if suppress else None
     parent.add_argument("--url", default=default, help="the scheduler API (env PYSCHED_URL)")
-    parent.add_argument("--token", default=default, help="a bearer token (env PYSCHED_TOKEN)")
+    parent.add_argument(
+        "--token",
+        default=default,
+        help="a bearer token (prefer env PYSCHED_TOKEN: --token shows in ps)",
+    )
     return parent
 
 

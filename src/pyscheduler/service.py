@@ -13,7 +13,8 @@ engine adopts them again on the next start.
 ``serve`` does exactly that. Signals from the operating system steer it:
 
 - ``SIGTERM`` or ``SIGINT`` (Ctrl-C): close gracefully;
-- ``SIGHUP``: reload the config files (problems go to the log).
+- ``SIGHUP``: reload the config files and the tokens file (problems go
+  to the log).
 
 Example::
 
@@ -35,7 +36,7 @@ from pynet.errors import PyNetError
 from pynet.loop import Event, Task
 from pyweb.aserver import AsyncServer
 
-from pyscheduler.api import TokenFileError, TokenTable, build_app, config_actions
+from pyscheduler.api import TokenFileError, TokenHolder, TokenTable, build_app, config_actions
 from pyscheduler.config import Config, load_config
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.clock import SystemClock
@@ -236,7 +237,7 @@ async def serve(
 
     """
     config = await pynet.loop.run_in_thread(load_config, config_path)
-    tokens = _tokens(config)
+    tokens = TokenHolder(_tokens(config))
     host, port = config.settings.listen
     service = _Service()
     service.signals = SignalHooks(service.wake.set, service.on_reload)
@@ -244,7 +245,7 @@ async def serve(
     try:
         engine, record = await _open_engine(config)
         service.engine = engine
-        reload, validate = config_actions(engine, config_path)
+        reload, validate = config_actions(engine, config_path, tokens=tokens)
         service.reload_task = lambda: reload_for_signal(reload)
         app = build_app(engine, tokens=tokens, reload=reload, validate=validate)
         app.middleware(service.gate.middleware())

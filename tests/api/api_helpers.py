@@ -29,7 +29,10 @@ MAX_STEPS = 10_000
 VIEWER_KEY = "viewer-secret"
 OPERATOR_KEY = "operator-secret"
 VIEWER = {"Authorization": f"Bearer {VIEWER_KEY}"}
-OPERATOR = {"Authorization": f"Bearer {OPERATOR_KEY}"}
+OPERATOR = {"Authorization": f"Bearer {OPERATOR_KEY}", "Content-Type": "application/json"}
+"""The operator's token, and the JSON type every POST must carry (ruling R24)."""
+DEV = {"Host": "127.0.0.1:8470", "Content-Type": "application/json"}
+"""What a development-mode caller sends: a loopback host and the JSON type."""
 
 OK = 200
 BAD_REQUEST = 400

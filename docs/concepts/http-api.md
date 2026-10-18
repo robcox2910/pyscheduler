@@ -40,17 +40,41 @@ of its token (64 lowercase hex digits), and its role:
   logbook says *who* pressed the button.
 - A malformed tokens file stops the server at start-up with a message
   naming the file and line.
+- `POST /api/reload` and `SIGHUP` read the tokens file again too, so a
+  token you delete from it stops working straight away, with no
+  restart. If the new tokens file is broken, the whole reload fails
+  (the old config and the old tokens stay) and the problem is reported.
+  A reload cannot switch between development mode and tokens: that
+  needs a restart.
+- The `pysched` command reads its token from `PYSCHED_TOKEN`. Prefer
+  that over `--token`: anything on a command line shows up in `ps` for
+  every user on the machine.
+
+**Every POST is JSON.** In every mode, a `POST` must carry
+`Content-Type: application/json` (a `; charset=utf-8` is fine), even
+when it has no body; anything else gets
+`415 {"error": "use Content-Type: application/json"}`. A web page on
+another site can make your browser send a plain form or a `text/plain`
+post, but not a JSON one without asking the server first, so this
+stops a page you happen to visit from pressing buttons. The `pysched`
+command always sends the header.
 
 **Development mode.** With no tokens file, everyone is `dev` with the
-operator role. That is only safe because the server then listens on
-the loopback address (`127.0.0.1`) only, so nobody else on the network
-can reach it.
+operator role. The server then refuses to listen anywhere but a
+loopback address such as `127.0.0.1`, so other machines cannot reach
+it. That is *not* the same as private: every program on *this* machine
+can, including your web browser while it shows some other site. So in
+development mode a request whose `Host` header is not `localhost`,
+`127.x.x.x` or `[::1]` (with an optional port) gets
+`403 {"error": "forbidden host"}`. That stops a page that points its
+own domain name at `127.0.0.1` (a trick called *DNS rebinding*) from
+reading or steering the scheduler. Use tokens on any machine you share.
 
 ## What You Can Ask
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/health` | `{"status": "ok"}`, or 503 `{"status": "failed"}` when the engine has failed stop |
+| `GET /api/health` | `{"status": "ok", "timezone": "Europe/London", "today": "2026-10-19"}` (the scheduler's time zone and today's date there), or 503 `{"status": "failed"}` when the engine has failed stop |
 | `GET /api/jobs` | every job: owner, tags, criticality, schedules as text, next firing |
 | `GET /api/jobs/{name}` | the same plus its `definition`, its next 5 firings and its 20 latest runs |
 | `GET /api/runs?run_date=&job=&state=&limit=` | runs, newest first (`limit` 1-1000, default 100) |
@@ -147,14 +171,15 @@ engine = Engine(
 )
 reload, validate = config_actions(engine, path)
 client = TestClient(build_app(engine, tokens=None, reload=reload, validate=validate))
+local = {"Host": "127.0.0.1:8470"}  # development mode answers loopback hosts only
 
 
 async def visit() -> None:
     await engine.start()
-    made = await client.post("/api/jobs/bake/trigger")  # development mode: no token
+    made = await client.post("/api/jobs/bake/trigger", json={}, headers=local)  # no token
     run_id = made.json()["run"]["run_id"]
     print(run_id)  # bake.2026-10-19.1
-    detail = (await client.get(f"/api/runs/{run_id}")).json()
+    detail = (await client.get(f"/api/runs/{run_id}", headers=local)).json()
     print([event["actor"] for event in detail["events"]])  # ['scheduler', 'dev', 'scheduler']
     await engine.stop()
 

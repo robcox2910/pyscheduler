@@ -21,7 +21,7 @@ The routes, exactly as the design lists them:
 from pyweb.app import App
 
 from pyscheduler.api.admin import Reload, Validate, add_admin_routes
-from pyscheduler.api.auth import TokenTable, token_middleware
+from pyscheduler.api.auth import TokenHolder, TokenTable, token_middleware
 from pyscheduler.api.jobs import add_job_routes
 from pyscheduler.api.runs import add_run_routes
 from pyscheduler.engine.core import Engine
@@ -30,15 +30,19 @@ __all__ = ["build_app"]
 
 
 def build_app(
-    engine: Engine, *, tokens: TokenTable | None, reload: Reload, validate: Validate
+    engine: Engine,
+    *,
+    tokens: TokenTable | TokenHolder | None,
+    reload: Reload,
+    validate: Validate,
 ) -> App:
     """Return the API app for ``engine``.
 
     Args:
         engine: The running engine the API reads from and acts on.
-        tokens: The bearer tokens, or ``None`` for development mode
-            (everyone is ``dev`` with the operator role; only safe on
-            loopback).
+        tokens: The bearer tokens (a ``TokenHolder`` lets a reload swap
+            them), or ``None`` for development mode (everyone is ``dev``
+            with the operator role; loopback hosts only).
         reload: Reload the config for an actor (see ``config_actions``).
         validate: Check the config files on disk (see ``config_actions``).
 

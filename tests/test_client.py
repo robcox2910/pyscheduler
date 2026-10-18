@@ -120,3 +120,40 @@ class TestSafeUrl:
             ApiClient("http://bob:pw@127.0.0.1:1", None).health()
         assert caught.value.status == UNREACHABLE
         assert caught.value.message == "cannot reach scheduler at http://127.0.0.1:1"
+
+
+class TestPostHeaders:
+    """Every POST says its body is JSON, even when there is no body (ruling R24)."""
+
+    def test_bodyless_post_sends_json_type(self) -> None:
+        """``reload`` (no body) sends ``Content-Type: application/json``."""
+        seen: list[str | None] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            """Record the Content-Type of each POST and answer ``{}``."""
+
+            def do_POST(self) -> None:
+                """Answer a POST."""
+                seen.append(self.headers.get("Content-Type"))
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                """Keep quiet."""
+                del format, args
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, args=(POLL_INTERVAL,), daemon=True).start()
+        try:
+            client = ApiClient(f"http://127.0.0.1:{server.server_address[1]}", None)
+            client.reload()
+            client.run_action("a.2026-10-19.1", "hold")
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert seen == ["application/json", "application/json"]

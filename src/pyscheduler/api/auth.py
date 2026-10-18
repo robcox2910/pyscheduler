@@ -16,12 +16,26 @@ viewer or operator; everything else needs an operator. ``/api/health``
 needs no token at all.
 
 With no tokens file the API is in **development mode**: every caller is
-``dev`` with the operator role. That is only safe because ``serve``
-binds the API to the loopback address when there are no tokens.
+``dev`` with the operator role. ``serve`` only allows that on a loopback
+address, but loopback is *not* private: every program on this machine,
+including a web browser visiting some other site, can send it requests.
+Two guards keep a web page from steering the scheduler:
+
+- every ``POST`` must carry ``Content-Type: application/json`` (in every
+  mode), which a plain cross-site form or ``fetch`` cannot send without
+  the browser asking the server first (and we never say yes);
+- in development mode the ``Host`` header must be a loopback name
+  (``localhost``, ``127.x.x.x`` or ``[::1]``, with an optional port), so
+  a page that re-points its own domain at ``127.0.0.1`` (DNS rebinding)
+  is refused too.
+
+The tokens can be swapped while the API runs (``TokenHolder.table``),
+so a reload can revoke a token without a restart.
 """
 
 import hashlib
 import hmac
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -38,7 +52,9 @@ __all__ = [
     "Principal",
     "Role",
     "TokenFileError",
+    "TokenHolder",
     "TokenTable",
+    "is_loopback_host",
     "token_middleware",
 ]
 
@@ -55,7 +71,9 @@ _HEX_DIGITS = frozenset("0123456789abcdef")
 _SHA256_HEX_LEN = 64
 _UNAUTHORISED = 401
 _FORBIDDEN = 403
+_UNSUPPORTED_MEDIA = 415
 _BEARER = "bearer"
+_JSON_TYPE = "application/json"
 
 
 @dataclass(frozen=True)
@@ -177,6 +195,49 @@ class TokenTable:
         return found
 
 
+@dataclass
+class TokenHolder:
+    """Hold the current token table (``None`` means development mode).
+
+    The middleware reads ``table`` on every request, so replacing it
+    (a reload re-reading the tokens file) takes effect at once.
+    """
+
+    table: TokenTable | None
+
+
+def is_loopback_host(header: str | None) -> bool:
+    """Return whether a ``Host`` header names this machine.
+
+    ``localhost``, ``127.0.0.0/8`` and ``[::1]`` count, each with an
+    optional ``:port``; anything else (or no header) does not.
+    """
+    if not header:
+        return False
+    text = header.strip()
+    if text.startswith("["):
+        name, sep, rest = text[1:].partition("]")
+        if not sep:
+            return False
+    else:
+        name, sep, port = text.partition(":")
+        rest = sep + port
+    if rest and not (rest.startswith(":") and rest[1:].isascii() and rest[1:].isdigit()):
+        return False
+    if name.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_json(request: HttpRequest) -> bool:
+    """Return whether the request says its body is JSON (a charset may follow)."""
+    content_type = request.headers.get("Content-Type") or ""
+    return content_type.partition(";")[0].strip().lower() == _JSON_TYPE
+
+
 def _bearer(request: HttpRequest) -> str | None:
     """Return the token of an ``Authorization: Bearer`` header, or ``None``."""
     header = request.headers.get("Authorization") or ""
@@ -194,34 +255,49 @@ def _unauthorised() -> Outcome:
     return response
 
 
-def token_middleware(tokens: TokenTable | None) -> Middleware:
+def token_middleware(tokens: TokenTable | TokenHolder | None) -> Middleware:
     """Return middleware that sets ``request.user`` to a ``Principal`` or refuses.
 
     Args:
-        tokens: The known tokens, or ``None`` for development mode (every
-            request is ``DEV_PRINCIPAL``).
+        tokens: The known tokens (or a holder whose table may change), or
+            ``None`` for development mode (every request is ``DEV_PRINCIPAL``).
 
-    A missing or unknown token is answered 401 ``{"error": "unauthorised"}``
-    with ``WWW-Authenticate: Bearer``; a viewer using a method other than
-    GET or HEAD is answered 403 ``{"error": "forbidden"}``.
+    In order: in development mode a ``Host`` that is not loopback is
+    answered 403 ``{"error": "forbidden host"}``; a missing or unknown
+    token is answered 401 ``{"error": "unauthorised"}`` with
+    ``WWW-Authenticate: Bearer``; a viewer using a method other than GET
+    or HEAD is answered 403 ``{"error": "forbidden"}``; a ``POST``
+    without ``Content-Type: application/json`` is answered 415
+    ``{"error": "use Content-Type: application/json"}``.
 
     """
+    holder = tokens if isinstance(tokens, TokenHolder) else TokenHolder(tokens)
 
     async def check(request: HttpRequest, call_next: CallNext) -> Outcome:
-        """Find the caller, check their role for the method, and go on."""
+        """Check the host, find the caller, check their role and the body type, and go on."""
+        table = holder.table
+        if table is None and not is_loopback_host(request.headers.get("Host")):
+            return json({"error": "forbidden host"}, _FORBIDDEN)
         if request.path == HEALTH_PATH:
             return await call_next(request)
-        if tokens is None:
+        if table is None:
             request.user = DEV_PRINCIPAL
-            return await call_next(request)
+            return await _typed(request, call_next)
         token = _bearer(request)
-        found = tokens.lookup(token) if token is not None else None
+        found = table.lookup(token) if token is not None else None
         if found is None:
             return _unauthorised()
         principal = Principal(*found)
         if principal.role != "operator" and request.method not in READ_METHODS:
             return json({"error": "forbidden"}, _FORBIDDEN)
         request.user = principal
-        return await call_next(request)
+        return await _typed(request, call_next)
 
     return check
+
+
+async def _typed(request: HttpRequest, call_next: CallNext) -> Outcome:
+    """Refuse a ``POST`` whose body is not declared JSON (415); otherwise go on."""
+    if request.method == "POST" and not _is_json(request):
+        return json({"error": "use Content-Type: application/json"}, _UNSUPPORTED_MEDIA)
+    return await call_next(request)
