@@ -9,7 +9,7 @@ themselves live in ``actions`` and ``reload``.
 
 import json
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta
 
 import pynet.loop
@@ -40,8 +40,14 @@ class ActionError(Exception):
         self.status = status
 
 
+type _Loaded = tuple[list[Run], dict[str, tuple[str, ...]]]
+
+
 class ActionSupport(RunCreation):
     """Provide the checks, store look-ups and commit shared by every action."""
+
+    _files: dict[str, tuple[str, ...]]
+    """The files each succeeded watcher run found, by run id (set up by ``Engine``)."""
 
     def _check_usable(self) -> None:
         """Refuse to act once the engine has failed stop or is stopping.
@@ -203,11 +209,21 @@ class ActionSupport(RunCreation):
         return slots
 
     async def _load_date(self, day: date, known: dict[date, bool]) -> bool:
-        """Load ``day``'s stored final runs missing from memory; return whether any are stored."""
+        """Load ``day``'s stored final runs missing from memory; return whether any are stored.
+
+        The files found by the succeeded runs among them (file watchers)
+        come back too, so a rerun downstream still gets ``PYSCHED_FILES``.
+        """
         if day not in known:
-            stored = await pynet.loop.run_in_thread(
-                self.store.query_runs, run_date=day, limit=LOAD_LIMIT
-            )
+            store = self.store
+
+            def read() -> _Loaded:
+                """Read the day's runs and their files (on a helper thread)."""
+                runs = store.query_runs(run_date=day, limit=LOAD_LIMIT)
+                done = [run.run_id for run in runs if run.state is RunState.SUCCEEDED]
+                return runs, store.run_files(done)
+
+            stored, files = await pynet.loop.run_in_thread(read)
             known[day] = bool(stored)
             for run in stored:
                 if run.run_id in self._recently_deleted:  # pruned while we were reading
@@ -215,6 +231,8 @@ class ActionSupport(RunCreation):
                 if run.is_final and self.book.get(run.run_id) is None:
                     self.book.put(run)
                     self.book.publish(run)
+                    if run.run_id in files:
+                        self._files[run.run_id] = files[run.run_id]
         return known[day]
 
     def _upstream_dates(self, job: JobDef, day: date) -> set[date]:
@@ -233,12 +251,15 @@ class ActionSupport(RunCreation):
         actor: str,
         action: str,
         befores: dict[str, RunState | None],
+        *,
+        run_files: Mapping[str, tuple[str, ...]] | None = None,
     ) -> list[Run]:
         """Add one event by ``actor`` per run in ``befores``, flush, return the committed runs.
 
         Runs made along the way (dependency-only downstream runs) get no
         event of the actor's: their own ``created`` event, by the
-        scheduler, names the upstream run that caused them.
+        scheduler, names the upstream run that caused them. ``run_files``
+        (a watcher run's files, ``()`` to clear them) go in the same commit.
 
         Raises:
             ActionError: 503 if the commit failed (the engine has failed stop).
@@ -253,7 +274,7 @@ class ActionSupport(RunCreation):
             }
             self._staged_events.append(Event(now, actor, run_id, action, json.dumps(detail)))
         try:
-            await self._flush()
+            await self._flush(run_files=run_files)
         except EngineFailedError as exc:
             raise ActionError(503, f"scheduler failed: {exc}") from exc
         committed: list[Run] = []

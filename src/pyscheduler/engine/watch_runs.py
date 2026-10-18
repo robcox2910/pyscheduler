@@ -9,7 +9,7 @@ every job waiting on that friend is handed the list: as ``PYSCHED_FILES``
 """
 
 import shlex
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -115,6 +115,25 @@ class WatchRuns(EngineBase):
             log_path=log,
             busy=self._poll_busy,
         )
+
+    def _fail(self, exc: BaseException, run_ids: Iterable[str]) -> None:
+        """Fail stop as ``EngineBase._fail`` does, and stop every polling watcher at once.
+
+        A watcher has no process to leave running, so its attempt task is
+        cancelled (as at ``stop``): nothing is recorded, its ``watch_limit``
+        permit is given back, and the next start resumes it.
+        """
+        first = self.error is None
+        watching = [
+            task
+            for run_id, handle in self._handles.items()
+            if isinstance(handle, WatcherHandle)
+            and (task := self._attempt_tasks.get(run_id)) is not None
+        ]
+        super()._fail(exc, run_ids)
+        if first:
+            for task in watching:
+                task.cancel()
 
     def _poll_busy(self, delta: int) -> None:
         """Count a watcher's look at the disk as engine work (``settle`` waits for it)."""

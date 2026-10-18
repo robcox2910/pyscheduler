@@ -6,7 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pynet.loop
-from engine_helpers import START, Harness, MakeHarness
+from engine_helpers import START, TODAY, Harness, MakeHarness
 from monitor_helpers import monitored, raised, run_monitor, step
 
 from pyscheduler.alerts.monitor import AlertMonitor
@@ -26,6 +26,7 @@ STOPPED_AT = START + timedelta(seconds=40)
 WATCHERS = 3
 GAVE_UP = "gave up: no stable file after 1m"
 FILE_NAME = "in_20261019.csv"
+OLD_DAYS = 10
 
 
 def watcher_config(tmp_path: Path, *, extra: str = "", give_up: str = "1d") -> str:
@@ -269,5 +270,78 @@ class TestWatchLimit:
             )
             await h.engine.reload(bigger, actor=ACTOR)
             assert h.engine.watch_limit is not first
+
+        h.run_engine(body)
+
+
+class TestFixRound:
+    """Files of old dates, stale files after a rerun, and watchers at fail-stop."""
+
+    def test_old_date_rerun_gets_files(self, harness: MakeHarness, tmp_path: Path) -> None:
+        """A downstream run older than memory_days, rerun after a restart, gets the files."""
+        h = harness(watcher_config(tmp_path), settings="memory_days: 3")
+        old = TODAY - timedelta(days=OLD_DAYS)
+        path = str(tmp_path / f"in_{old:%Y%m%d}.csv")
+        Path(path).write_text("x", encoding="utf-8")
+        watcher_id, load_id = f"in.{old}.1", f"load.{old}.1"
+
+        async def first() -> None:
+            """Run the old date's watcher and ``load`` to the end."""
+            await h.engine.trigger("in", run_date=old, actor=ACTOR)
+            await h.advance(5 * ONE_MINUTE)
+            assert h.engine.book.get(load_id) is not None
+
+        h.run_engine(first)
+        again = restarted(h, FakeClock(START + 10 * ONE_MINUTE))
+
+        async def second() -> None:
+            """Rerun the old ``load``: its upstream comes back with its files."""
+            assert again.engine.book.get(watcher_id) is None
+            await again.engine.rerun(load_id, actor=ACTOR)
+            await again.advance(ONE_MINUTE)
+            assert again.engine.files_for(watcher_id) == (path,)
+            (spec,) = specs_for(again, "load")
+            assert spec.env["PYSCHED_FILES"] == path
+
+        again.run_engine(second)
+
+    def test_watcher_rerun_clears_files(self, harness: MakeHarness, tmp_path: Path) -> None:
+        """Rerunning a succeeded watcher forgets its old files, in memory and in the store."""
+        h = harness(watcher_config(tmp_path))
+        target = tmp_path / FILE_NAME
+        target.write_text("x", encoding="utf-8")
+
+        async def body() -> None:
+            """Succeed, delete the file, rerun, and look for the old files."""
+            run = await h.engine.trigger("in", actor=ACTOR)
+            await h.advance(ONE_MINUTE)
+            assert h.engine.files_for(run.run_id) == (str(target),)
+            target.unlink()
+            await h.engine.rerun(run.run_id, actor=ACTOR)
+            await h.engine.settle()
+            assert h.engine.files_for(run.run_id) == ()
+            stored = await pynet.loop.run_in_thread(h.store.run_files, [run.run_id])
+            assert stored.get(run.run_id, ()) == ()
+
+        h.run_engine(body)
+
+    def test_fail_stop_stops_watchers(self, harness: MakeHarness, tmp_path: Path) -> None:
+        """After a fail-stop a watcher looks no more; its run stays running for the restart."""
+        h = harness(watcher_config(tmp_path))
+
+        async def body() -> None:
+            """Fail the engine, then create the file and wait well past min_age."""
+            run = await h.engine.trigger("in", actor=ACTOR)
+            await h.advance(POLL)
+            h.engine.fail_stop(RuntimeError("boom"))
+            await h.engine.settle()
+            (tmp_path / FILE_NAME).write_text("x", encoding="utf-8")
+            await h.advance(5 * ONE_MINUTE)
+            stored = await pynet.loop.run_in_thread(h.store.get_run, run.run_id)
+            assert stored is not None
+            assert stored.state is RunState.RUNNING
+            (row,) = await attempts(h, run.run_id)
+            log = Path(row.stdout_path)
+            assert not log.exists() or "found" not in log.read_text(encoding="utf-8")
 
         h.run_engine(body)

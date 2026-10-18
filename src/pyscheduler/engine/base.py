@@ -287,6 +287,7 @@ class EngineBase(AttemptHooks, ABC):
         *,
         engine: Mapping[str, str] | None = None,
         configs: Iterable[ConfigRecord] = (),
+        run_files: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Commit the tray (with the book's current copy of each run), then start what fits.
 
@@ -297,8 +298,10 @@ class EngineBase(AttemptHooks, ABC):
         events, self._staged_events = self._staged_events, []
         runs = [run for run_id in ids if (run := self.book.get(run_id)) is not None]
         configs = list(configs)
-        if runs or events or engine or configs:
-            await self._transition(runs, events=events, engine=engine, configs=configs)
+        if runs or events or engine or configs or run_files:
+            await self._transition(
+                runs, events=events, engine=engine, configs=configs, run_files=run_files
+            )
         self._pump()
 
     def _flush_soon(self) -> None:

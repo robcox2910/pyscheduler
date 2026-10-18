@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
 
+from pyscheduler.config.model import JobKind
 from pyscheduler.engine.action_support import ActionError, ActionSupport
 from pyscheduler.engine.creation import downstream_date
 from pyscheduler.engine.model import Run, RunState
@@ -86,8 +87,18 @@ class OperatorActions(ActionSupport):
                     updated_at=now,
                 )
                 self._stage(reopened)
+            # A reopened watcher run's old files are stale until it succeeds again.
+            cleared = {r.run_id: () for r in plan if self._is_watcher(r.job)}
+            for cleared_id in cleared:
+                self._files.pop(cleared_id, None)
             self._reevaluate(dict.fromkeys(r.job for r in plan))
-            return await self._commit(actor, "rerun", {r.run_id: r.state for r in plan})
+            befores: dict[str, RunState | None] = {r.run_id: r.state for r in plan}
+            return await self._commit(actor, "rerun", befores, run_files=cleared)
+
+    def _is_watcher(self, name: str) -> bool:
+        """Return whether ``name`` is a configured file-watcher job."""
+        job = self.config.jobs.get(name)
+        return job is not None and job.kind is JobKind.FILE_WATCHER
 
     async def _lock_plan(self, root: Run, stack: AsyncExitStack) -> list[Run]:
         """Plan the downstream rerun of ``root`` (whose lock is held) and lock all of it.

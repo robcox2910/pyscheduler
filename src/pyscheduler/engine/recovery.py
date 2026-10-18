@@ -83,14 +83,14 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
     async def recover(self) -> None:
         """Load the store's runs into memory and pick every open run up again.
 
-             Every store read happens first (an open run older than the memory
-             window brings back its date's final runs, so its dependencies can
-             be checked). Then all open runs are placed in one step (slots for
-             running attempts, the ready queue, retry timers, re-evaluation),
-             committed in one flush, and only then are queued runs started and
-             attempts finished, adopted or lost.
-        A file watcher that was polling has no process to find: it simply
-        resumes, its give-up deadline still counted from its first start.
+        Every store read happens first (an open run older than the memory
+        window brings back its date's final runs, so its dependencies can
+        be checked). Then all open runs are placed in one step (slots for
+        running attempts, the ready queue, retry timers, re-evaluation),
+        committed in one flush, and only then are queued runs started and
+        attempts finished, adopted or lost. A file watcher that was polling
+        has no process to find: it resumes, its give-up deadline still
+        counted from its first start.
         """
         store = self.store
         newest = self._memory_start()
