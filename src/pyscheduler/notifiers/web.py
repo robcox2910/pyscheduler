@@ -5,6 +5,7 @@ post it, and only check that the post office said "delivered" (a 2xx).
 The post runs on a helper thread so the scheduler never waits on the network.
 """
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -49,6 +50,9 @@ def _post(url: str, data: bytes, headers: Mapping[str, str], timeout: float) -> 
         raise NotifyError(str(exc.reason)) from exc
     except OSError as exc:
         raise NotifyError(str(exc)) from exc
+    except (http.client.HTTPException, ValueError) as exc:
+        # Their text can quote the URL (and so a bot token): name the kind only.
+        raise NotifyError(type(exc).__name__) from None
     if not 200 <= status < 300:  # noqa: PLR2004 -- the HTTP success range
         message = f"HTTP {status}"
         raise NotifyError(message)
@@ -68,9 +72,17 @@ async def post_json(
     await pynet.loop.run_in_thread(_post, url, data, headers, timeout)
 
 
+def _plain(definition: NotifierDef, key: str, value: str, *, spaces: bool = False) -> str:
+    """Return ``value`` unless it holds a control character (or a space, unless ``spaces``)."""
+    if any(ord(c) < ord(" ") or ord(c) == ord("\x7f") or (c == " " and not spaces) for c in value):
+        message = f"option {key!r} for {definition.type} notifier must not hold spaces or control characters"
+        raise ValueError(message)
+    return value
+
+
 def _url_option(definition: NotifierDef, key: str, default: str | None = None) -> str:
     """Return option ``key`` as an http(s) address."""
-    value = text_option(definition, key, default)
+    value = _plain(definition, key, text_option(definition, key, default))
     if not value.startswith(HTTP_SCHEMES):
         message = (
             f"option {key!r} for {definition.type} notifier must start with http:// or https://"
@@ -88,7 +100,11 @@ def _headers_option(definition: NotifierDef) -> dict[str, str]:
     ):
         message = "option 'headers' for webhook notifier must be a map of text to text"
         raise ValueError(message)
-    return dict(cast("dict[str, str]", raw))
+    headers = cast("dict[str, str]", raw)
+    for name, value in headers.items():
+        _plain(definition, "headers", name)
+        _plain(definition, "headers", value, spaces=True)
+    return dict(headers)
 
 
 def _line(alert: Mapping[str, JsonValue]) -> str:
@@ -101,7 +117,7 @@ class WebhookNotifier:
 
     def __init__(self, url: str, headers: Mapping[str, str], timeout: float) -> None:
         """Remember where to post, the extra headers, and the time limit."""
-        self.url = url
+        self._url = url
         self.headers = dict(headers)
         self.timeout = timeout
 
@@ -118,7 +134,7 @@ class WebhookNotifier:
 
     async def send(self, alert: Mapping[str, JsonValue]) -> None:
         """Post the alert as it is."""
-        await post_json(self.url, dict(alert), headers=self.headers, timeout=self.timeout)
+        await post_json(self._url, dict(alert), headers=self.headers, timeout=self.timeout)
 
 
 class SlackNotifier:
@@ -126,7 +142,7 @@ class SlackNotifier:
 
     def __init__(self, url: str, timeout: float) -> None:
         """Remember the webhook address and the time limit."""
-        self.url = url
+        self._url = url
         self.timeout = timeout
 
     @classmethod
@@ -138,7 +154,7 @@ class SlackNotifier:
 
     async def send(self, alert: Mapping[str, JsonValue]) -> None:
         """Post the one-line text."""
-        await post_json(self.url, {"text": _line(alert)}, headers={}, timeout=self.timeout)
+        await post_json(self._url, {"text": _line(alert)}, headers={}, timeout=self.timeout)
 
 
 class TelegramNotifier:
@@ -146,7 +162,7 @@ class TelegramNotifier:
 
     def __init__(self, api_url: str, bot_token: str, chat_id: str, timeout: float) -> None:
         """Remember the bot, the chat, the API address and the time limit."""
-        self.url = f"{api_url.rstrip('/')}/bot{bot_token}/sendMessage"
+        self._url = f"{api_url.rstrip('/')}/bot{bot_token}/sendMessage"
         self.chat_id = chat_id
         self.timeout = timeout
 
@@ -163,7 +179,7 @@ class TelegramNotifier:
             chat_id = text_option(definition, "chat_id")
         return cls(
             _url_option(definition, "api_url", TELEGRAM_API),
-            text_option(definition, "bot_token"),
+            _plain(definition, "bot_token", text_option(definition, "bot_token")),
             chat_id,
             definition.timeout.total_seconds(),
         )
@@ -171,7 +187,7 @@ class TelegramNotifier:
     async def send(self, alert: Mapping[str, JsonValue]) -> None:
         """Send the one-line text to the chat."""
         body: JsonValue = {"chat_id": self.chat_id, "text": _line(alert)}
-        await post_json(self.url, body, headers={}, timeout=self.timeout)
+        await post_json(self._url, body, headers={}, timeout=self.timeout)
 
 
 __all__ = ["SlackNotifier", "TelegramNotifier", "WebhookNotifier", "post_json"]

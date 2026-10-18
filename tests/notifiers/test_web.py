@@ -1,7 +1,9 @@
 """Tests for the webhook, Slack and Telegram notifiers."""
 
+import http.client
 import json
 import threading
+import urllib.request
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -206,3 +208,48 @@ def test_option_errors(tmp_path: Path, body: str, problem: str) -> None:
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigError, match=problem):
         load_config(path, env={})
+
+
+SECRET = "123:SECRET"  # noqa: S105 -- a fake token
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "{type: telegram, bot_token: \"1\\n2\", chat_id: '4'}",
+        '{type: webhook, url: "http://x/a\\nb"}',
+        "{type: webhook, url: 'http://x', headers: {X: \"a\\r\\nB: c\"}}",
+        "{type: slack, webhook_url: 'http://x/a b'}",
+    ],
+)
+def test_control_characters_are_config_problems(tmp_path: Path, body: str) -> None:
+    """Newlines and spaces in addresses, tokens and header values fail at load time."""
+    text = f"notifiers:\n  n: {body}\njobs:\n  a: {{command: 'true', schedule: manual}}\n"
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError, match="must not hold spaces or control characters"):
+        load_config(path, env={})
+
+
+def test_http_exceptions_never_leak_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An odd protocol error becomes a NotifyError naming only its kind."""
+
+    class Boom:
+        """An opener whose open fails with a message quoting the URL."""
+
+        def open(self, request: urllib.request.Request, timeout: float) -> None:
+            """Fail like http.client does."""
+            del timeout
+            message = f"bad {request.full_url}"
+            raise http.client.InvalidURL(message)
+
+    monkeypatch.setattr("pyscheduler.notifiers.web._OPENER", Boom())
+    notifier = build(
+        tmp_path, f"{{type: telegram, bot_token: '{SECRET}', chat_id: '4', api_url: 'http://x'}}"
+    )
+    with pytest.raises(NotifyError) as caught:
+        pynet.loop.run(notifier.send(ALERT))
+    assert str(caught.value) == "InvalidURL"
+    assert SECRET not in repr(notifier)

@@ -7,6 +7,7 @@ so it runs on a helper thread.
 
 import json
 import smtplib
+import ssl
 from collections.abc import Mapping
 from email.message import EmailMessage
 from typing import cast
@@ -111,21 +112,30 @@ class EmailNotifier:
 
     async def send(self, alert: Mapping[str, JsonValue]) -> None:
         """Email the alert: subject ``[pysched <criticality>] <message>``, body its JSON."""
-        mail = EmailMessage()
-        mail["Subject"] = f"[pysched {alert.get('criticality')}] {alert.get('message')}"
-        mail["From"] = self.sender
-        mail["To"] = ", ".join(self.recipients)
-        mail.set_content(json.dumps(alert, indent=2, sort_keys=True))
         try:
+            mail = self._compose(alert)
             await pynet.loop.run_in_thread(self._deliver, mail)
         except (smtplib.SMTPException, OSError) as exc:
             raise NotifyError(str(exc) or type(exc).__name__) from exc
+        except ValueError as exc:
+            message = f"cannot build the email: {exc}"
+            raise NotifyError(message) from exc
+
+    def _compose(self, alert: Mapping[str, JsonValue]) -> EmailMessage:
+        """Build the email (a subject must be one line, so whitespace is collapsed)."""
+        mail = EmailMessage()
+        subject = f"[pysched {alert.get('criticality')}] {alert.get('message')}"
+        mail["Subject"] = " ".join(subject.split())
+        mail["From"] = self.sender
+        mail["To"] = ", ".join(self.recipients)
+        mail.set_content(json.dumps(alert, indent=2, sort_keys=True))
+        return mail
 
     def _deliver(self, mail: EmailMessage) -> None:
         """Talk to the server (a helper thread)."""
         with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as server:
             if self.starttls:
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
             if self.credentials is not None:
                 server.login(*self.credentials)
             server.send_message(mail)

@@ -1,6 +1,7 @@
 """Tests for the email notifier."""
 
 import smtplib
+import ssl
 from collections.abc import Mapping
 from email.message import EmailMessage
 from pathlib import Path
@@ -41,9 +42,9 @@ class FakeSMTP:
     ) -> None:
         """Leave the ``with`` block."""
 
-    def starttls(self) -> None:
-        """Record the upgrade."""
-        calls.append(("starttls", None))
+    def starttls(self, *, context: ssl.SSLContext) -> None:
+        """Record the upgrade and its TLS context."""
+        calls.append(("starttls", context))
 
     def login(self, user: str, password: str) -> None:
         """Record the login."""
@@ -84,6 +85,9 @@ def test_email_starttls_login_send(tmp_path: Path) -> None:
     )
     pynet.loop.run(notifier.send(ALERT))
     assert [name for name, _ in calls] == ["connect", "starttls", "login", "send_message"]
+    context = calls[1][1]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
     assert calls[0][1] == ("mail.example", PORT, 10.0)
     assert calls[2][1] == ("u", "p")
     message = calls[3][1]
@@ -134,3 +138,13 @@ def test_email_option_errors(tmp_path: Path, body: str, problem: str) -> None:
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigError, match=problem):
         load_config(path, env={})
+
+
+def test_email_multiline_message(tmp_path: Path) -> None:
+    """A message with line breaks gives a one-line subject; the body keeps the text."""
+    notifier = build(tmp_path, "{type: email, host: h, from: a@x.org, to: b@x.org}")
+    pynet.loop.run(notifier.send({"criticality": "high", "message": "line one\nline  two\r\n"}))
+    message = calls[-1][1]
+    assert isinstance(message, EmailMessage)
+    assert message["Subject"] == "[pysched high] line one line two"
+    assert "line one" in message.get_content()
