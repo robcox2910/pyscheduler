@@ -1,5 +1,8 @@
 """Test the web UI shell: HTML helpers, login and logout, static files, headers."""
 
+import subprocess
+import sys
+
 import pytest
 from api_helpers import PHRASE, ApiHarness, MakeApi, log_in, users_yaml
 from ui_helpers import (
@@ -19,6 +22,7 @@ OK = 200
 SEE_OTHER = 303
 UNAUTHORISED = 401
 NOT_FOUND = 404
+FORBIDDEN = 403
 TOO_MANY = 429
 BAD_PASSWORDS = 5
 HTML = {"Accept": "text/html"}
@@ -27,7 +31,7 @@ PEOPLE = {"ada": "admin", "vic": "viewer", "ola": "operator"}
 ESCAPED = "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;&amp;"
 CSP = (
     "default-src 'self'; img-src 'self' data:; style-src 'self'; "
-    "script-src 'self'; frame-ancestors 'none'"
+    "script-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'"
 )
 
 
@@ -54,6 +58,12 @@ class TestHtmlHelpers:
         )
         assert h("input", {"disabled": True, "checked": False}) == "<input disabled>"
         assert join(h("br"), None, h("hr")) == "<br><hr>"
+        with pytest.raises(TypeError, match="Safe"):
+            join(HOSTILE)  # type: ignore[arg-type]
+        for action in ("https://evil.com/x", "//evil.com", "x"):
+            with pytest.raises(ValueError, match="path on this site"):
+                h("form", {"action": action})
+        assert h("form", {"action": "/logout"}) == '<form action="/logout"></form>'
 
     def test_h_rejects_unknown_tag(self) -> None:
         """A tag, attribute or link target off the lists raises ``ValueError``."""
@@ -160,6 +170,7 @@ class TestShell:
                 assert response.headers.get("Content-Security-Policy") == CSP
                 assert response.headers.get("X-Content-Type-Options") == "nosniff"
                 assert response.headers.get("Referrer-Policy") == "same-origin"
+                assert response.headers.get("Cache-Control") == "no-store"
                 assert "<script>" not in response.text
                 assert not any(
                     key.startswith("on") for _, attrs, _ in parse(response.text) for key in attrs
@@ -271,3 +282,46 @@ class TestSignedInLogin:
             assert again.status == SEE_OTHER
 
         h_.run(body)
+
+
+class TestLogout:
+    """Logout needs the session's CSRF token; a stranger's logout is harmless."""
+
+    def test_logout_needs_the_csrf_token(self, api: MakeApi) -> None:
+        """A cookie user without a good token gets 403 and stays signed in."""
+        h_ = _site(api)
+        csrf = log_in(h_, "ada")
+
+        async def body() -> None:
+            """Try no token and a wrong token, then check the session still works."""
+            assert (await h_.client.post("/logout", form={})).status == FORBIDDEN
+            bad = await h_.client.post("/logout", form={"csrf_token": "x" + csrf})
+            assert bad.status == FORBIDDEN
+            assert (await h_.client.get(SHELL_PATH)).status == OK
+
+        h_.run(body)
+
+    def test_stranger_logout_is_harmless(self, api: MakeApi) -> None:
+        """A logged-out POST /logout just goes to the login page."""
+        h_ = _site(api)
+
+        async def body() -> None:
+            """Post with no session."""
+            done = await h_.client.post("/logout", form={}, headers=HTML)
+            assert done.status == SEE_OTHER
+            assert (done.headers.get("Location") or "").startswith("/login")
+
+        h_.run(body)
+
+    def test_ui_imports_on_its_own(self) -> None:
+        """The ui and api packages import in a fresh interpreter, in either order."""
+        for code in (
+            "import pyscheduler.ui.html; import pyscheduler.ui",
+            "import pyscheduler.ui.layout",
+            "import pyscheduler.ui.login",
+            "import pyscheduler.api; import pyscheduler.ui",
+        ):
+            run = subprocess.run(  # noqa: S603 - fixed arguments
+                [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=False
+            )
+            assert run.returncode == 0, run.stderr

@@ -32,7 +32,6 @@ from pyscheduler.api.runs import add_run_routes
 from pyscheduler.api.session_key import load_or_make_key
 from pyscheduler.api.users import UserHolder
 from pyscheduler.engine.core import Engine
-from pyscheduler.ui import add_ui
 
 __all__ = ["build_app"]
 
@@ -71,6 +70,8 @@ def build_app(
     Besides the API this adds the web UI (``pyscheduler.ui``).
 
     """
+    from pyscheduler.ui import add_ui  # noqa: PLC0415 - ui imports api, so load it late
+
     app = App()
     token_holder = tokens if isinstance(tokens, TokenHolder) else TokenHolder(tokens)
     people = users or UserHolder(None)

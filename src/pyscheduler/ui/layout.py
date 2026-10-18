@@ -30,7 +30,7 @@ PAGE_TEMPLATE = (TEMPLATES / "page.html").read_text(encoding="utf-8")
 SECURITY_HEADERS: Mapping[str, str] = {
     "Content-Security-Policy": (
         "default-src 'self'; img-src 'self' data:; style-src 'self'; "
-        "script-src 'self'; frame-ancestors 'none'"
+        "script-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'"
     ),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "same-origin",
@@ -48,9 +48,10 @@ NAV: tuple[tuple[str, str, str, Role], ...] = (
 
 
 def secure(response: HttpResponse) -> HttpResponse:
-    """Add the security headers to ``response`` and return it."""
+    """Add the security headers (and ``no-store``, as pages are private) and return it."""
     for name, value in SECURITY_HEADERS.items():
         response.headers.set(name, value)
+    response.headers.set("Cache-Control", "no-store")
     return response
 
 

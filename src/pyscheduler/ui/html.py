@@ -56,6 +56,7 @@ ATTRS = frozenset(
 _PREFIXED = re.compile(r"(?:data|aria)-[a-z][a-z0-9-]*")
 _URL_ATTRS = frozenset({"href", "action"})
 _SAFE_URL = re.compile(r"(?:/|#|\?|https?:|[^:/?#]*(?:[/?#]|$))", re.IGNORECASE)
+_LOCAL = re.compile(r"(?:|/(?!/).*)")
 _STRIP = re.compile(r"[\x00-\x20\x7f]+")
 
 
@@ -63,6 +64,9 @@ def _check_attr(tag: str, name: str, value: str) -> None:
     """Raise ``ValueError`` for an attribute name off the list or a link to a script."""
     if name not in ATTRS and not _PREFIXED.fullmatch(name):
         msg = f"attribute {name!r} is not allowed on <{tag}>"
+        raise ValueError(msg)
+    if name == "action" and not _LOCAL.fullmatch(_STRIP.sub("", value)):
+        msg = f"action={value!r} must be a path on this site"
         raise ValueError(msg)
     if name in _URL_ATTRS and not _SAFE_URL.match(_STRIP.sub("", value)):
         msg = f"{name}={value!r} is not a local or http(s) address"
@@ -119,4 +123,9 @@ def h(
 
 def join(*parts: Safe | None) -> Safe:
     """Return the ``Safe`` parts one after another (``None`` is skipped)."""
-    return Safe("".join(part for part in parts if part is not None))
+    kept = [part for part in parts if part is not None]
+    for part in kept:
+        if not isinstance(part, Safe):  # pyright: ignore[reportUnnecessaryIsInstance]
+            msg = "join takes Safe parts (build text with h(), which escapes it)"
+            raise TypeError(msg)
+    return Safe("".join(kept))
