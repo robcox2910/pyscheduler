@@ -65,6 +65,9 @@ def _check_attr(tag: str, name: str, value: str) -> None:
     if name not in ATTRS and not _PREFIXED.fullmatch(name):
         msg = f"attribute {name!r} is not allowed on <{tag}>"
         raise ValueError(msg)
+    if name in _URL_ATTRS and ("\\" in value or _STRIP.sub("", value).startswith("//")):
+        msg = f"{name}={value!r} may point off this site (backslash or //)"
+        raise ValueError(msg)
     if name == "action" and not _LOCAL.fullmatch(_STRIP.sub("", value)):
         msg = f"action={value!r} must be a path on this site"
         raise ValueError(msg)

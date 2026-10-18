@@ -60,7 +60,11 @@ class TestHtmlHelpers:
         assert join(h("br"), None, h("hr")) == "<br><hr>"
         with pytest.raises(TypeError, match="Safe"):
             join(HOSTILE)  # type: ignore[arg-type]
-        for action in ("https://evil.com/x", "//evil.com", "x"):
+        for target in ("/\\evil.com", "\\\\evil.com", "/\\/evil.com", "//evil.com"):
+            for attr, tag in (("action", "form"), ("href", "a")):
+                with pytest.raises(ValueError, match="off this site"):
+                    h(tag, {attr: target})
+        for action in ("https://evil.com/x", "x"):
             with pytest.raises(ValueError, match="path on this site"):
                 h("form", {"action": action})
         assert h("form", {"action": "/logout"}) == '<form action="/logout"></form>'
@@ -310,6 +314,8 @@ class TestLogout:
             done = await h_.client.post("/logout", form={}, headers=HTML)
             assert done.status == SEE_OTHER
             assert (done.headers.get("Location") or "").startswith("/login")
+            assert done.headers.get("Set-Cookie") is None
+            assert SESSION_COOKIE not in h_.client.cookies
 
         h_.run(body)
 
