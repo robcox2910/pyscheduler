@@ -13,7 +13,7 @@ that a crash could take back.
 """
 
 import bisect
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from datetime import date, datetime
 
 from pyscheduler.engine.model import FINAL_STATES, Run, RunState, Trigger, parse_run_id
@@ -130,11 +130,17 @@ class RunBook:
         """Return the open (not final) runs of ``job``."""
         return self._ordered(self._open_by_job.get(job, ()))
 
-    def evict_final_before(self, run_date: date, keep: Collection[tuple[str, date]] = ()) -> int:
+    def evict_final_before(
+        self,
+        run_date: date,
+        keep: Collection[tuple[str, date]] = (),
+        busy: Callable[[str], bool] | None = None,
+    ) -> int:
         """Forget final runs dated before ``run_date``; return how many were removed.
 
         Runs whose ``(job, run_date)`` is in ``keep`` stay (open runs'
-        dependencies still look at them).
+        dependencies still look at them), and so do runs for which
+        ``busy(run_id)`` is true (an action holds their lock).
         """
         doomed: list[Run] = []
         for day in [d for d in self._by_date if d < run_date]:
@@ -143,6 +149,7 @@ class RunBook:
                 for run_id in self._by_date[day]
                 if (run := self._runs[run_id]).state in FINAL_STATES
                 and (run.job, run.run_date) not in keep
+                and (busy is None or not busy(run_id))
             )
         for run in doomed:
             self._unindex(run)
@@ -151,7 +158,7 @@ class RunBook:
         for day in [d for d in self._pub_by_date if d < run_date]:
             for run_id in list(self._pub_by_date[day]):
                 old = self._published[run_id]
-                kept = (old.job, old.run_date) in keep
+                kept = (old.job, old.run_date) in keep or (busy is not None and busy(run_id))
                 if old.state in FINAL_STATES and run_id not in self._runs and not kept:
                     self._drop_published(run_id)
         return len(doomed)

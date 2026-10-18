@@ -40,6 +40,11 @@ class RunLocks:
         """Return how many runs have a lock held or waited for."""
         return len(self._keys)
 
+    def busy(self, run_id: str) -> bool:
+        """Return whether ``run_id``'s lock is held or waited for (without taking it)."""
+        key = self._keys.get(run_id)
+        return key is not None and (key.held or bool(key.waiters))
+
     def try_take(self, run_id: str) -> bool:
         """Take ``run_id``'s lock if it is free right now; return whether it was taken."""
         key = self._keys.setdefault(run_id, _Key())

@@ -32,7 +32,7 @@ from pynet.loop import Cancelled, Task
 from pyscheduler.config import Config
 from pyscheduler.engine.base import EngineFailedError, logger
 from pyscheduler.engine.clock import MAX_NAP, Clock
-from pyscheduler.engine.launcher import Launcher
+from pyscheduler.engine.launcher import Launcher, drain_launches
 from pyscheduler.engine.model import RunState, Trigger
 from pyscheduler.engine.recovery import LAST_TICK, Recovery
 from pyscheduler.schedule.firings import Firing, next_firing
@@ -127,8 +127,10 @@ class Engine(Recovery):
             return
         self._stopped = True
         self._stopping = True
+        self.closing.set()  # the launch thread refuses everything still queued
         try:
             await self._wind_down(kill_running=kill_running)
+            await drain_launches()  # after this, no minder is forked any more
         finally:
             try:
                 await self.writer.close()

@@ -11,7 +11,7 @@ from datetime import date
 from enum import StrEnum
 
 from pyscheduler.calendars import BusinessCalendar
-from pyscheduler.config.model import Dependency, DepOn, JobDef
+from pyscheduler.config.model import Config, Dependency, DepOn, JobDef
 from pyscheduler.engine.model import RunState
 from pyscheduler.engine.runbook import RunBook
 
@@ -71,3 +71,31 @@ def _check(dep: Dependency, upstream_date: date, book: RunBook) -> DepResult:
     if dep.on is DepOn.FAILURE and state is not RunState.FAILED:
         return DepResult(Verdict.SKIP, f"skipped: {label} did not fail")
     return DepResult(Verdict.READY, "")
+
+
+REACH_SLACK = 7
+"""Calendar days added to a non-zero reach, for the weekends and holidays to come."""
+
+
+def dependency_reach(config: Config, today: date) -> int:
+    """Return how many calendar days back any dependency offset can look (ruling R27).
+
+    For each dependency, the distance is ``today - calendar.shift(today,
+    offset)`` on the downstream job's calendar; the largest one, plus
+    ``REACH_SLACK`` days for weekends and holidays the measurement did not
+    meet, is the reach. With no non-zero offset the reach is 0. The engine
+    keeps final runs for ``memory_days`` plus this many days in memory,
+    so a new run always finds the upstream runs it looks back at.
+    """
+    furthest = 0
+    for job in config.jobs.values():
+        calendar = config.calendar_for(job)
+        for dep in job.depends_on:
+            if dep.run_date_offset == 0:
+                continue
+            try:
+                back = (today - calendar.shift(today, dep.run_date_offset)).days
+            except ValueError, OverflowError:
+                continue
+            furthest = max(furthest, back)
+    return furthest + REACH_SLACK if furthest else 0

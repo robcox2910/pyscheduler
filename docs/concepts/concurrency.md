@@ -58,19 +58,33 @@ for job in ("on the loop", "on a helper thread"):
 # on a helper thread: 0 ms late (or a millisecond or two)
 ```
 
-## The Proof: Two Hundred Jobs at Once
+## The Proof: Two Hundred Jobs Started Together
 
 `tests/test_concurrency.py` runs the real thing: a real clock, a real
 store on disk and a real minder process for every attempt. Two hundred
 jobs of `sleep 0.2` are triggered at the same moment with
 `max_running: 200`, and the test checks that:
 
-- all 200 succeed in under **6 seconds**;
-- never more than 200 are running at once;
-- the kitchen timer is never more than **50 ms** late.
+- all 200 succeed in under **6 seconds** (about 3 s in practice);
+- at the busiest instant at least 10 attempts are alive together;
+- 99 % of the kitchen timer's ticks are less than **50 ms** late, and
+  even the single worst tick is less than **250 ms** late.
 
-A second test runs 50 jobs with `max_running: 8` and watches every state
-change: never more than 8 are running.
+Two hundred jobs started together is not two hundred *alive* together:
+at any instant only about 35 are. Each attempt pays a Python start-up
+for its minder (about 10 ms of work), and a `sleep 0.2` is over soon
+after, so the early jobs finish while the later ones are still being
+started.
+
+Why a percentile and a separate worst case? On a busy test machine the
+operating system sometimes parks the whole process for a moment, and
+one late tick then says more about the machine than about the code. The
+99th percentile catches a loop that is often stuck; the generous worst
+case still catches a long stall.
+
+Two more tests watch every state change: 200 jobs with `max_running: 50`
+(at least 10 alive at the peak, never more than 50 running), and 50 jobs
+with `max_running: 8` (never more than 8 running).
 
 ## What the Probe Found
 
@@ -92,8 +106,9 @@ waiting for its turn. With one launch thread, the loop always gets a turn
 between two forks.
 
 After the fixes, on a six-core laptop, the 200 jobs finish in about 2.5
-seconds and the timer is never more than about 30 to 45 ms late (the
-higher figures with test coverage switched on, which slows Python down).
+seconds, 99 % of the ticks are within about 13 to 20 ms, and the worst
+tick is about 30 to 45 ms late (the higher figures with test coverage
+switched on, which slows Python down).
 
 ## Why Not Just Raise the Limit?
 

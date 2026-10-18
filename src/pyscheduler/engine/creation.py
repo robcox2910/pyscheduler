@@ -103,9 +103,19 @@ class RunCreation(EngineBase):
         return created
 
     def _new_run(
-        self, job: str, run_date: date, scheduled_at: datetime, trigger: Trigger
+        self,
+        job: str,
+        run_date: date,
+        scheduled_at: datetime,
+        trigger: Trigger,
+        because: str | None = None,
     ) -> Run | None:
-        """Stage a new ``scheduled`` run unless one already exists for that slot."""
+        """Stage a new ``scheduled`` run unless one already exists for that slot.
+
+        Its ``created`` event is the scheduler's. A dependency run's event
+        names the upstream run it was made ``because`` of, so a run made
+        for an operator's trigger never looks like the operator's own.
+        """
         if trigger in _SCHEDULED_TRIGGERS and self.book.by_scheduled(job, scheduled_at):
             return None
         if trigger is Trigger.DEPENDENCY and (
@@ -128,9 +138,12 @@ class RunCreation(EngineBase):
             created_at=now,
             updated_at=now,
         )
-        created = self._event(
-            run.run_id, "created", trigger=trigger.value, scheduled_at=scheduled_at.isoformat()
-        )
+        if because is not None:
+            created = self._event(run.run_id, "created", trigger=trigger.value, because=because)
+        else:
+            created = self._event(
+                run.run_id, "created", trigger=trigger.value, scheduled_at=scheduled_at.isoformat()
+            )
         self._stage(run, created)
         return run
 
@@ -156,7 +169,9 @@ class RunCreation(EngineBase):
                 run_date = downstream_date(upstream.run_date, dep.run_date_offset, calendar)
                 if run_date is None:
                     continue
-                run = self._new_run(name, run_date, upstream.scheduled_at, Trigger.DEPENDENCY)
+                run = self._new_run(
+                    name, run_date, upstream.scheduled_at, Trigger.DEPENDENCY, upstream.run_id
+                )
                 if run is not None:
                     made.append(run)
         return made

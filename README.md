@@ -27,9 +27,11 @@ computer jobs. You describe your jobs in a YAML file and it:
 - forecasts what will run, and checks a config for every mistake before it
   ever runs.
 
-It is concurrent: one event loop looks after every running job, and a test
-proves 200 real jobs can run at once without the loop stalling for more
-than 50 ms.
+It is concurrent: one event loop looks after every running job. In a test,
+200 real jobs started together and finished in about 3 s; about 35 are
+alive at any instant, because each attempt pays a Python start-up for its
+minder. Through it all, 99 % of the loop's 10 ms ticks are less than
+50 ms late.
 
 ## Quick Start
 

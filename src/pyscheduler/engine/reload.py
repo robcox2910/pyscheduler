@@ -81,8 +81,8 @@ class ConfigReload(OperatorActions):
         await self._seed_old_seqs(job, [day])
         self._usable_job(job)
         made = self._create_runs(job, day, self.clock.now(), Trigger.MANUAL)
-        others = [run.run_id for run in made[1:]]
-        return (await self._commit(actor, "trigger", {made[0].run_id: None}, created=others))[0]
+        # The downstream runs made along the way log only the scheduler's ``created``.
+        return (await self._commit(actor, "trigger", {made[0].run_id: None}))[0]
 
     async def backfill(self, job: str, *, start: date, end: date, actor: str) -> list[Run]:
         """Create one run per business day from ``start`` to ``end`` on which ``job`` has none.
@@ -111,7 +111,6 @@ class ConfigReload(OperatorActions):
         definition = self._usable_job(job)
         calendar = self.config.calendar_for(definition)
         filled: dict[str, RunState | None] = {}
-        others: list[str] = []
         for day in days:
             due = first_firing(definition, calendar, day)
             if self.book.runs_for(job, day) or due is None:
@@ -119,8 +118,7 @@ class ConfigReload(OperatorActions):
             made = self._create_runs(job, day, due, Trigger.BACKFILL)
             if made:
                 filled[made[0].run_id] = None
-                others.extend(run.run_id for run in made[1:])
-        return await self._commit(actor, "backfill", filled, created=others)
+        return await self._commit(actor, "backfill", filled)
 
     async def reload(self, new_config: Config, *, actor: str) -> None:
         """Swap in ``new_config`` (already validated) and apply the reload rules.

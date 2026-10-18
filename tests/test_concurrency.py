@@ -1,4 +1,4 @@
-"""Prove the engine is concurrent with real processes: many at once, the cap held, the loop free."""
+"""Prove the engine is concurrent with real processes: many together, the cap held, the loop free."""
 
 import time
 from datetime import UTC, datetime
@@ -15,13 +15,25 @@ from pyscheduler.engine.model import Run, RunState
 from pyscheduler.store import Store
 
 MANY = 200
-"""How many jobs run at once in the big test."""
+"""How many jobs are started together in the big tests."""
 
 WALL_LIMIT = 6.0
 """How long (real seconds) 200 jobs of ``sleep 0.2`` may take, from first trigger to last success."""
 
 LAG_LIMIT = 0.05
-"""The most a 10 ms timer may be late at any point (the loop is never blocked longer)."""
+"""The most the 99th percentile of the 10 ms timer's lateness may be (ruling R25)."""
+
+LAG_MAX = 0.25
+"""The most the single worst tick may be late (a busy test machine gets this much slack)."""
+
+PERCENTILE = 0.99
+"""Which share of the ticks must be on time (within ``LAG_LIMIT``)."""
+
+PEAK_FLOOR = 10
+"""The fewest attempts that must be alive together in the 200-job tests."""
+
+BIG_CAP = 50
+"""The ``max_running`` of the 200-job cap test (below 200, so it could be exceeded)."""
 
 PROBE_EVERY = 0.01
 """How often the loop-lag probe ticks (seconds)."""
@@ -72,8 +84,7 @@ class LagProbe:
 
     def __init__(self) -> None:
         """Start with no ticks seen."""
-        self.worst = 0.0
-        self.ticks = 0
+        self.lateness: list[float] = []
         self._due = 0.0
         self._timer: pynet.loop.TimerHandle | None = None
 
@@ -93,9 +104,25 @@ class LagProbe:
 
     def _tick(self) -> None:
         """Record this tick's lateness and plan the next."""
-        self.worst = max(self.worst, time.monotonic() - self._due)
-        self.ticks += 1
+        self.lateness.append(time.monotonic() - self._due)
         self._plan()
+
+    @property
+    def ticks(self) -> int:
+        """Return how many ticks were seen."""
+        return len(self.lateness)
+
+    @property
+    def worst(self) -> float:
+        """Return the latest any tick was (seconds)."""
+        return max(self.lateness, default=0.0)
+
+    def percentile(self, share: float) -> float:
+        """Return the lateness that ``share`` of the ticks were within (seconds)."""
+        ordered = sorted(self.lateness)
+        if not ordered:
+            return 0.0
+        return ordered[min(len(ordered) - 1, int(share * len(ordered)))]
 
 
 def _config(tmp_path: Path, count: int, max_running: int) -> Path:
@@ -173,18 +200,31 @@ class TestConcurrency:
 
     @pytest.mark.timeout(30)
     def test_two_hundred_jobs(self, tmp_path: Path) -> None:
-        """Run 200 jobs at once, fast, never over the cap, with the loop never blocked."""
+        """Start 200 jobs together: all finish fast, many overlap, the loop stays free."""
         proof = Proof(tmp_path, MANY, MANY)
         proof.run()
+        p99 = proof.probe.percentile(PERCENTILE)
         print(  # noqa: T201 -- the measured numbers, shown with ``-s``
-            f"wall {proof.wall:.2f}s, lag {proof.probe.worst * 1000:.1f}ms, "
-            f"most live {proof.launcher.most}, ticks {proof.probe.ticks}"
+            f"wall {proof.wall:.2f}s, lag p99 {p99 * 1000:.1f}ms "
+            f"max {proof.probe.worst * 1000:.1f}ms, peak alive {proof.launcher.most}, "
+            f"ticks {proof.probe.ticks}"
         )
         assert proof.succeeded() == MANY
         assert proof.wall < WALL_LIMIT
-        assert proof.launcher.most <= MANY
+        assert PEAK_FLOOR <= proof.launcher.most <= MANY
         assert proof.probe.ticks > 0
-        assert proof.probe.worst < LAG_LIMIT
+        assert p99 < LAG_LIMIT
+        assert proof.probe.worst < LAG_MAX
+
+    @pytest.mark.timeout(30)
+    def test_two_hundred_jobs_under_a_cap(self, tmp_path: Path) -> None:
+        """Start 200 jobs with ``max_running: 50``: many overlap, never more than 50."""
+        proof = Proof(tmp_path, MANY, BIG_CAP)
+        proof.run()
+        print(f"peak alive {proof.launcher.most}, peak running {proof.most_running}")  # noqa: T201
+        assert proof.succeeded() == MANY
+        assert PEAK_FLOOR <= proof.launcher.most <= BIG_CAP
+        assert proof.most_running <= BIG_CAP
 
     @pytest.mark.timeout(30)
     def test_cap_respected_real(self, tmp_path: Path) -> None:

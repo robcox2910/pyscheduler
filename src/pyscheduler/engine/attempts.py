@@ -20,7 +20,12 @@ from pathlib import Path
 from pyscheduler.config import JobDef
 from pyscheduler.engine.base import EngineBase, EngineFailedError
 from pyscheduler.engine.clock import Cancel
-from pyscheduler.engine.launcher import AttemptHandle, AttemptResult, LaunchSpec
+from pyscheduler.engine.launcher import (
+    CANCELLED_MESSAGE,
+    AttemptHandle,
+    AttemptResult,
+    LaunchSpec,
+)
 from pyscheduler.engine.model import Attempt, Outcome, Run, RunState
 from pyscheduler.templates import render
 
@@ -174,6 +179,7 @@ class AttemptRunner(EngineBase):
             stdout_path=Path(render(job.stdout, values)),
             stderr_path=stderr,
             status_path=self._status_path(run.run_id, run.attempt),
+            closing=self.closing,
         )
 
     async def _attempt(
@@ -198,7 +204,7 @@ class AttemptRunner(EngineBase):
         if spec is not None:
             try:
                 handle = await self.launcher.launch(spec)
-            except OSError as exc:
+            except (OSError, ValueError, TypeError) as exc:  # Popen refuses a NUL with ValueError
                 error = str(exc)
         if handle is None:
             result = AttemptResult(None, None, None, self.clock.now(), error)
@@ -318,7 +324,9 @@ class AttemptRunner(EngineBase):
         job = self.config.jobs.get(run.job)
         tries = run.attempt - run.rerun
         count = job.retries.count if job is not None and job.enabled else 0
-        if outcome not in _NO_RETRY and not killed and tries <= count and job is not None:
+        cancelled = result.start_error == CANCELLED_MESSAGE  # the scheduler is stopping
+        retry = outcome not in _NO_RETRY and not killed and not cancelled
+        if retry and tries <= count and job is not None:
             when = now + job.retries.delay_for(tries)
             waiting = self._changed(
                 run, RunState.RETRY_WAIT, f"retry {tries}/{count} after {reason}"

@@ -12,25 +12,52 @@ job ends. Tests use ``pyscheduler.testing.FakeLauncher`` instead.
 
 import contextlib
 import functools
-import json
 import logging
 import signal
 import subprocess
 import sys
+import threading
 import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 import pynet.loop
 from pynet.loop import EventLoop, Future, WorkerPool, get_child_watcher, get_running_loop
 from pynet.process import Process
 
+from pyscheduler.engine.status_note import CORRUPT_PREFIX, AttemptResult, read_status
 from pyscheduler.minder import Note, utc_now, write_status
 
-CORRUPT_PREFIX = "corrupt status file: "
+__all__ = [
+    "CANCELLED_MESSAGE",
+    "CORRUPT_PREFIX",
+    "AttemptHandle",
+    "AttemptResult",
+    "LaunchCancelledError",
+    "LaunchSpec",
+    "Launcher",
+    "MinderHandle",
+    "MinderLauncher",
+    "drain_launches",
+    "live_minder_pids",
+    "pid_path",
+    "read_status",
+]
+
+CANCELLED_MESSAGE = "launch cancelled: scheduler stopping"
+"""The start error of a launch refused because the scheduler is stopping."""
+
+
+class LaunchCancelledError(OSError):
+    """Raised instead of forking once the spec's ``closing`` event is set.
+
+    It is an ``OSError`` so the engine records it like any other failure
+    to start: a start error for that attempt.
+    """
+
 
 logger = logging.getLogger("pyscheduler.engine.launcher")
 
@@ -83,6 +110,9 @@ class LaunchSpec:
         stdout_path: The log file for stdout.
         stderr_path: The log file for stderr, or None to share stdout's.
         status_path: Where the minder writes its status note.
+        closing: Set once the scheduler is stopping (``stop`` or fail-stop):
+            the launch thread checks it right before forking and refuses
+            to start anything new. None means never.
 
     """
 
@@ -94,31 +124,7 @@ class LaunchSpec:
     stdout_path: Path
     stderr_path: Path | None
     status_path: Path
-
-
-@dataclass(frozen=True)
-class AttemptResult:
-    """How one attempt ended.
-
-    Attributes:
-        exit_code: The job's exit code, or None if a signal ended it or it never started.
-        signal: The signal number that ended it, or None.
-        started_at: When the job started, or None if unknown.
-        ended_at: When it ended (or when we found out).
-        start_error: Why it could not start or be read, or None.
-
-    """
-
-    exit_code: int | None
-    signal: int | None
-    started_at: datetime | None
-    ended_at: datetime
-    start_error: str | None
-
-    @property
-    def succeeded(self) -> bool:
-        """Return whether the job exited 0 with no signal and no start error."""
-        return self.exit_code == 0 and self.signal is None and self.start_error is None
+    closing: threading.Event | None = field(default=None, compare=False, repr=False)
 
 
 class AttemptHandle(Protocol):
@@ -148,90 +154,6 @@ class Launcher(Protocol):
     async def launch(self, spec: LaunchSpec) -> AttemptHandle:
         """Start the attempt described by ``spec`` and return its handle."""
         ...
-
-
-def _instant(value: object) -> datetime:
-    """Parse an ISO 8601 instant with a zone into aware UTC.
-
-    Raises:
-        ValueError: If the value is not a string or has no time zone.
-
-    """
-    if not isinstance(value, str):
-        message = f"bad instant {value!r}"
-        raise ValueError(message)  # noqa: TRY004 -- one error type for any bad note
-    instant = datetime.fromisoformat(value)
-    if instant.tzinfo is None:
-        message = f"instant without a time zone {value!r}"
-        raise ValueError(message)
-    return instant.astimezone(UTC)
-
-
-def _optional_int(data: Mapping[str, object], key: str) -> int | None:
-    """Return ``data[key]`` if it is an int or None (bools rejected)."""
-    value = data.get(key)
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        message = f"bad {key} {value!r}"
-        raise ValueError(message)  # noqa: TRY004 -- one error type for any bad note
-    return value
-
-
-def _parse_status(text: str) -> AttemptResult:
-    """Turn the minder's JSON note into an ``AttemptResult``.
-
-    Raises:
-        ValueError: If the note is not the shape the minder writes.
-
-    """
-    raw: object = json.loads(text)
-    if not isinstance(raw, dict):
-        message = "not a JSON object"
-        raise ValueError(message)  # noqa: TRY004 -- one error type for any bad note
-    data = cast("dict[str, object]", raw)  # JSON object keys are always strings
-    start_error = data.get("start_error")
-    if start_error is not None and not isinstance(start_error, str):
-        message = f"bad start_error {start_error!r}"
-        raise ValueError(message)
-    started_at = data.get("started_at")
-    return AttemptResult(
-        exit_code=_optional_int(data, "exit_code"),
-        signal=_optional_int(data, "signal"),
-        started_at=None if started_at is None else _instant(started_at),
-        ended_at=_instant(data.get("ended_at")),
-        start_error=start_error,
-    )
-
-
-def read_status(path: Path) -> AttemptResult | None:
-    """Read the minder's status note at ``path``.
-
-    Return None if there is no note. A note that exists but cannot be read
-    or understood gives a result whose ``start_error`` begins
-    ``corrupt status file:``; this never raises.
-    """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError) as exc:
-        return _corrupt(exc)
-    try:
-        return _parse_status(text)
-    except (ValueError, RecursionError) as exc:  # JSONDecodeError is a ValueError
-        return _corrupt(exc)
-
-
-def _corrupt(exc: Exception) -> AttemptResult:
-    """Build the result for a status note that could not be understood."""
-    return AttemptResult(
-        exit_code=None,
-        signal=None,
-        started_at=None,
-        ended_at=datetime.now(UTC),
-        start_error=f"{CORRUPT_PREFIX}{exc}",
-    )
 
 
 def pid_path(status_path: Path) -> Path:
@@ -373,13 +295,22 @@ class MinderLauncher:
 def _start_minder(command: list[str], spec: LaunchSpec) -> subprocess.Popen[bytes]:
     """Remove any old note and pid file, start the minder, and write its pid file (a thread).
 
+    The new pid joins ``live_minder_pids`` here, on the launch thread, the
+    moment it exists, so recovery never ``waitpid``s it while the loop has
+    not heard of it yet.
+
     Raises:
+        LaunchCancelledError: If ``spec.closing`` is set (nothing is forked).
         OSError: If the minder cannot be started.
+        ValueError: If ``Popen`` refuses the command or environment (a NUL).
+        TypeError: If ``Popen`` refuses an argument's type.
 
     """
     for stale in (spec.status_path, pid_path(spec.status_path)):
         with contextlib.suppress(FileNotFoundError, NotADirectoryError):
             stale.unlink()
+    if spec.closing is not None and spec.closing.is_set():
+        raise LaunchCancelledError(CANCELLED_MESSAGE)
     popen = subprocess.Popen(  # noqa: S603 -- running the job's command is the point
         command,
         cwd=spec.cwd,
@@ -387,12 +318,39 @@ def _start_minder(command: list[str], spec: LaunchSpec) -> subprocess.Popen[byte
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
+    _LIVE_MINDERS.add(popen.pid)  # at once: nothing else may waitpid it from now on
     note: Note = {"pid": popen.pid, "started_at": utc_now()}
     try:
         write_status(pid_path(spec.status_path), note)
     except OSError:  # the minder writes it too; recovery copes without it
         logger.warning("cannot write the pid file of %s", spec.run_id, exc_info=True)
     return popen
+
+
+async def drain_launches() -> None:
+    """Wait until every launch already queued has finished: forked or refused.
+
+    ``Engine.stop`` sets every spec's ``closing`` event first, so the
+    queue empties fast, and once this returns no minder is forked any
+    more. It does nothing when no launch is in flight.
+    """
+    if not _LAUNCH_POOL.busy():
+        return
+    loop = get_running_loop()
+    done: Future[None] = Future(loop)
+
+    def finished() -> None:
+        """On the loop: wake the waiter."""
+        if not done.done():
+            done.set_result(None)
+
+    def tell(_result: object, _error: BaseException | None) -> None:
+        """On the launch thread: the queue ahead of us is empty now."""
+        with contextlib.suppress(RuntimeError):  # the loop has closed
+            loop.call_soon_threadsafe(finished)
+
+    _launch_pool(loop).submit(lambda: None, tell)
+    await done
 
 
 async def _forget_when_done(process: Process) -> None:

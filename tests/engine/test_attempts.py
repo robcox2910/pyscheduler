@@ -105,6 +105,31 @@ class TestRetries:
         h.run_engine(body)
         assert h.run("r").reason == f"start error: {RUN_ID}"
 
+    @pytest.mark.parametrize("error", [ValueError, TypeError])
+    def test_launch_value_error_is_start_error(
+        self, harness: MakeHarness, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+    ) -> None:
+        """A ``ValueError``/``TypeError`` from ``Popen`` (a NUL in argv) is a start error."""
+        h = harness(job("command: work"))
+
+        async def launch(spec: LaunchSpec) -> FakeHandle:
+            """Refuse the way ``Popen`` refuses an embedded NUL."""
+            msg = f"embedded null byte in {spec.run_id}"
+            raise error(msg)
+
+        monkeypatch.setattr(h.launcher, "launch", launch)
+
+        async def body() -> None:
+            """Fire the job."""
+            await h.advance_to(AT_0100)
+            rows = await attempts(h)
+            assert rows[0].outcome is Outcome.START_ERROR
+
+        h.run_engine(body)
+        assert h.engine.error is None
+        assert h.run("r").state is RunState.FAILED
+        assert h.run("r").reason == f"start error: embedded null byte in {RUN_ID}"
+
     def test_signal_reason_and_kill_flag(self, harness: MakeHarness) -> None:
         """Name the signal in the reason; an operator kill never retries."""
         h = harness(job("command: work\nretries: {count: 3}"))

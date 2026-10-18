@@ -41,12 +41,16 @@ class Retention(ActionSupport):
         attempts and events, in one commit. A run whose lock is held (an
         action is on it) or that memory has reopened is left for the next
         round. Open runs, and the final runs their dependencies point at,
-        are never pruned or forgotten. Return how many were deleted.
+        are never pruned or forgotten, nor is a run an action holds the
+        lock of. The ids deleted are remembered until the next round, so
+        a store read that raced the delete (``_load_date``) does not put
+        them back in memory. Return how many were deleted.
         """
         settings = self.config.settings
         cutoff = (now.astimezone(settings.timezone) - settings.retention).date()
         keep = self._protected()
         skip: set[str] = set()
+        self._recently_deleted.clear()  # a read that raced the last round has landed by now
         deleted = 0
         while not self._stopping:
             ids = await pynet.loop.run_in_thread(
@@ -65,7 +69,9 @@ class Retention(ActionSupport):
             deleted += len(locked)
             if len(ids) < PRUNE_BATCH:
                 break
-        self.book.evict_final_before(self._memory_start(now), self._protected())
+        self.book.evict_final_before(
+            self._memory_start(now), self._protected(), busy=self._run_locks.busy
+        )
         return deleted
 
     def _protected(self) -> Collection[tuple[str, date]]:
@@ -101,6 +107,7 @@ class Retention(ActionSupport):
         except Exception as exc:
             self._fail(exc, ())
             raise EngineFailedError(str(exc)) from exc
+        self._recently_deleted.update(run_ids)  # so a store read racing us does not revive them
         for run_id in run_ids:
             self.book.drop(run_id)
 

@@ -24,6 +24,7 @@ reconciles the rest from the store.
 
 import json
 import logging
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
@@ -112,6 +113,13 @@ class EngineBase(ABC):
         self._run_locks = RunLocks()
         self._held: set[str] = set()
         self._stopping = False
+        self._recently_deleted: set[str] = set()
+        """Run ids the current (or last) prune round deleted; cleared each round."""
+        self._reach_for: Config | None = None
+        self._reach = 0
+        """Days the dependency offsets of ``_reach_for`` look back (see ``_memory_start``)."""
+        self.closing = threading.Event()
+        """Set by ``stop`` and fail-stop: the launch thread forks nothing more."""
         self.error: BaseException | None = None
         self._failed = LoopEvent()
 
@@ -171,6 +179,7 @@ class EngineBase(ABC):
         if first:
             self.error = exc
             self._stopping = True
+            self.closing.set()
             self._failed.set()
             for timer in self._retry_timers.values():
                 timer.cancel()

@@ -17,6 +17,7 @@ import pynet.loop
 from pyscheduler.config import JobDef
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.creation import RunCreation, downstream_date
+from pyscheduler.engine.deps import dependency_reach
 from pyscheduler.engine.model import Event, Run, RunState
 
 LOAD_LIMIT = 1_000_000
@@ -135,18 +136,27 @@ class ActionSupport(RunCreation):
                         todo.append((down, mapped, False))
 
     def memory_start(self) -> date:
-        """Return the oldest run date whose runs are all in memory (``memory_days``).
+        """Return the oldest run date whose runs are all in memory.
 
-        Runs dated before it may sit only in the store; readers such as
-        the API ask the store for those.
+        That is ``memory_days`` plus the dependency reach (see
+        ``deps.dependency_reach``). Runs dated before it may sit only in
+        the store; readers such as the API ask the store for those.
         """
         return self._memory_start()
 
     def _memory_start(self, now: datetime | None = None) -> date:
-        """Return the oldest run date whose final runs stay in memory (``memory_days``)."""
+        """Return the oldest run date whose final runs stay in memory.
+
+        The window is ``memory_days`` plus the reach of the config's
+        dependency offsets, in calendar days, so the upstream runs a new
+        run's dependencies look back at are never only in the store.
+        """
         settings = self.config.settings
         today = (now or self.clock.now()).astimezone(settings.timezone).date()
-        return today - timedelta(days=max(settings.memory_days - 1, 0))
+        if self._reach_for is not self.config:  # measured once per config (load or reload)
+            self._reach_for = self.config
+            self._reach = dependency_reach(self.config, today)
+        return today - timedelta(days=max(settings.memory_days - 1, 0) + self._reach)
 
     async def _seed_old_seqs(self, job: str, days: Iterable[date]) -> None:
         """Seed the sequence numbers of the old dates new runs of ``job`` may land on.
@@ -200,6 +210,8 @@ class ActionSupport(RunCreation):
             )
             known[day] = bool(stored)
             for run in stored:
+                if run.run_id in self._recently_deleted:  # pruned while we were reading
+                    continue
                 if run.is_final and self.book.get(run.run_id) is None:
                     self.book.put(run)
                     self.book.publish(run)
@@ -221,22 +233,19 @@ class ActionSupport(RunCreation):
         actor: str,
         action: str,
         befores: dict[str, RunState | None],
-        *,
-        created: Iterable[str] = (),
     ) -> list[Run]:
-        """Add one event per run in ``befores`` and ``created``, flush, return the committed runs.
+        """Add one event by ``actor`` per run in ``befores``, flush, return the committed runs.
 
-        ``created`` are runs made along the way (dependency-only downstream
-        runs): they get an event (``before`` is ``None``) but are not
-        returned.
+        Runs made along the way (dependency-only downstream runs) get no
+        event of the actor's: their own ``created`` event, by the
+        scheduler, names the upstream run that caused them.
 
         Raises:
             ActionError: 503 if the commit failed (the engine has failed stop).
 
         """
         now = self.clock.now()
-        logged = {**befores, **{run_id: None for run_id in created if run_id not in befores}}
-        for run_id, before in logged.items():
+        for run_id, before in befores.items():
             run = self.book.get(run_id)
             detail = {
                 "before": before.value if before is not None else None,

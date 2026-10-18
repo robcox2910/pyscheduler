@@ -66,7 +66,7 @@ with something you can run.
 12. [The Minder (A Babysitter Who Writes a Note When the Job's Done)](concepts/the-minder.md): The small program that runs each attempt.
 13. [Clocks and Launchers (A Practice Clock and a Starting Whistle)](concepts/clocks-and-launchers.md): Real and fake clocks; how attempts are started.
 14. [Group Commit (One Trip to the Post Box for Many Letters)](concepts/group-commit.md): Saving many changes in one trip to the disk.
-15. [Concurrency (One Waiter, Two Hundred Tables)](concepts/concurrency.md): Proving 200 jobs can run at once without the loop stalling.
+15. [Concurrency (One Waiter, Two Hundred Tables)](concepts/concurrency.md): Proving 200 jobs started together finish fast without the loop stalling.
 16. [Recovery and Catch-Up (Waking Up After a Nap and Reading the Babysitter's Notes)](concepts/recovery-and-catch-up.md): Restarting after a crash without losing a run.
 17. [Validation (The Teacher Who Checks Your Work Before the Test)](concepts/validation.md): Every mistake in a config, found before it runs.
 18. [Operator Actions (The Train Controller's Desk)](concepts/operator-actions.md): Hold, kill, rerun, force and friends.

@@ -22,7 +22,7 @@ Everything the scheduler knows is written down in its store before it
 acts (the write-ahead rule). On start it reads back:
 
 - every **open** run (not yet succeeded, failed, skipped or cancelled);
-- the **final** runs of the last `memory_days` run dates (default 7),
+- the **final** runs of the memory window: the last `memory_days` run dates (default 7) plus the dependencies' reach (see Step 4),
   so dependencies on recent runs can be checked.
 
 ## Step 2: Read the Babysitter's Notes
@@ -89,6 +89,10 @@ never signals a pid that fails these checks.
       warning) and a reused pid of our own user could be mistaken for
       the minder until it ends; a kill would then signal it.
     - Two processes started within the same 10 seconds look alike.
+    - If the computer's wall clock is stepped by more than 10 seconds
+      while a minder runs (a big NTP correction, say), "now minus
+      elapsed" no longer matches `started_at`, so a live minder can look
+      dead and its attempt counts as `lost`.
     - If the scheduler dies in the tiny gap between starting the minder
       and writing its `.pid` file (and before the minder writes its own),
       nothing records the pid: the attempt counts as `lost` and, with
@@ -127,11 +131,17 @@ jobs:
 At start-up and then once an hour the scheduler **prunes**: final runs
 whose run date is older than `retention` (default `90d`, counted in the
 scheduler's time zone) are deleted from the store, with their attempts
-and logbook lines, 500 at a time. Final runs older than `memory_days`
-are also forgotten in memory (they can still be read back from the
-store). Two kinds of run are always kept: open runs, however old, and
-the final runs an open run's dependencies point at, so a run still
-waiting for one upstream never loses sight of the others.
+and logbook lines, 500 at a time. Final runs older than the memory
+window are also forgotten in memory (they can still be read back from
+the store). The window is `memory_days` plus the dependencies' *reach*:
+the furthest any `run_date` offset in the config looks back (measured
+in calendar days from today), plus a week of slack for weekends and
+holidays. So with `run_date: -7` and the default `memory_days: 7`, a
+new run still finds last week's upstream run in memory. Two kinds of
+run are always kept: open runs, however old, and the final runs an open
+run's dependencies point at, so a run still waiting for one upstream
+never loses sight of the others. A run an operator action is busy with
+is never forgotten mid-action either.
 Log files are left alone: cleaning those is the operator's job.
 
 ## Try It

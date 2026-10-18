@@ -127,7 +127,7 @@ class TestDependencyOnlyRuns:
         assert [run.trigger for run in h.runs("d", TUESDAY)] == [Trigger.BACKFILL]
 
     def test_events_for_downstream_runs(self, harness: MakeHarness) -> None:
-        """Log the dependency-only runs a trigger and a backfill create."""
+        """The dependency-only runs a trigger and a backfill create log no operator event."""
         h = harness(DEP_ONLY)
 
         async def body() -> None:
@@ -138,6 +138,6 @@ class TestDependencyOnlyRuns:
             await h.engine.settle()
 
         h.run_engine(body)
-        assert [e.action for e in actor_events(h, "d.2026-10-19.1")] == ["trigger"]
-        assert [e.action for e in actor_events(h, "d.2026-10-20.1")] == ["backfill"]
+        assert actor_events(h, "d.2026-10-19.1") == []  # the scheduler made it (see audit test)
+        assert actor_events(h, "d.2026-10-20.1") == []
         assert len(h.runs("a")) + len(h.runs("a", TUESDAY)) == TWO

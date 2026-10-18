@@ -12,7 +12,10 @@ PyScheduler's engine has the same desk. Every button press is written in
 the logbook (the `events` table) with **who** pressed it, **when**, and
 the run's state **before** and **after**, and the logbook line is safely
 on disk *before* anything moves (see
-[The Scheduler Engine](scheduler.md)).
+[The Scheduler Engine](scheduler.md)). When a trigger or a backfill
+also makes runs of dependency-only downstream jobs, those runs are the
+scheduler's doing, not yours: their logbook line is `created` by
+`scheduler`, with `{"trigger": "dependency", "because": "<upstream run id>"}`.
 
 ## The Buttons
 

@@ -118,7 +118,7 @@ Run ids are one path segment: `/api/runs/extract-trades.2026-10-17.1/rerun`.
 
 The API shows the run book's **published** view: states already safely
 written to the store, so it never shows a state that a crash could take
-back. Runs older than the in-memory window (`memory_days`) are read from
+back. Runs older than the in-memory window (`memory_days` plus the dependencies' reach) are read from
 the store. Every store read and log file read happens on a helper
 thread, so one slow disk never holds up the event loop.
 
