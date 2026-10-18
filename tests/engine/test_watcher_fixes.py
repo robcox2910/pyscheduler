@@ -253,5 +253,7 @@ class TestReloadStopsWatchers:
             (row,) = await attempts(h, run.run_id)
             assert row.reason == reason
             assert h.launcher.launched == []
+            # The cancelled watcher handed its polling permit back.
+            assert h.engine.watch_limit.available() == h.engine.config.settings.watch_limit
 
         h.run_engine(body)

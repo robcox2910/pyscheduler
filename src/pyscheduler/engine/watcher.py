@@ -190,8 +190,9 @@ class WatcherHandle:
         """Run the polls for ``_poll`` (which tells ``busy`` when they start and end).
 
         A file counts as stable once it has been still for ``min_age`` by
-        the time of the look, or, for a watcher resumed after its deadline,
-        by the deadline itself (a file that came later came too late).
+        the time of the look. Only the first look of a resumed watcher (which
+        dates files by their mtime) judges it by the deadline instead, so a
+        file that arrived during the downtime but after the deadline is late.
         """
         deadline = self._started_at + self._spec.give_up_after
         min_age = self._spec.min_age
@@ -208,8 +209,11 @@ class WatcherHandle:
                 else (sig, _modified(sig, now) if resumed else now)
                 for path, sig in matches.items()
             }
+            # Only a resumed watcher's first look, which dates files by their
+            # mtime, judges stillness at the deadline: a file that arrived
+            # while the scheduler was down but after the deadline came too late.
+            cutoff = min(now, deadline) if resumed else now
             resumed = False
-            cutoff = min(now, deadline)
             stable = sorted(
                 path for path, (_, since) in first_seen.items() if cutoff - since >= min_age
             )

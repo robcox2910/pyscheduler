@@ -93,10 +93,12 @@ counts as a failed try, "send timed out after 10s".
 Each notifier has its own pigeonhole, and at most four of its letters are
 out being sent at once. The slow part (the network, the disk) runs on a
 team of eight helpers that all notifiers share, apart from the scheduler's
-own helpers. So one broken notifier never holds up the others: Slack can
-hang for an hour, tying up at most four helpers, while the log notifier
-writes every alert straight away. Several notifiers stuck at once can make
-the others wait their turn, but never the scheduler itself.
+own helpers. A send that times out frees its place in the pigeonhole, but
+the helper running it may stay stuck until the network gives up (a server
+that never answers, a lookup that never ends), and the retry takes another
+helper. So a notifier that stays broken for a long time can tie up every
+helper and make the other notifiers wait their turn. It can never hold up
+the scheduler itself: runs, the store and the API keep their own helpers.
 
 Here is a tiny PyMQ queue whose postman always fails. After two tries the
 letter lands in the dead letter box:

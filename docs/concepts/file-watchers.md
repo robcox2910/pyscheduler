@@ -104,6 +104,13 @@ when the deadline passed during the downtime, a file that had been still
 for `min_age` *by the deadline* makes the watch succeed; the watcher only
 gives up if no file was ready in time.
 
+The modified time is the file's own claim, so a copy that keeps the
+original's time (`cp -p`, `rsync -t`) and is still being written when the
+scheduler comes back can look finished at that first look. If files reach
+you that way, write them under a temporary name and rename them into
+place when they are complete, so the watch pattern only ever sees whole
+files.
+
 ## What a Watcher Does Not Take
 
 A watcher job may not have `command`, `cwd`, `env`, `timeout`, `pools`,
