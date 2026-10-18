@@ -38,6 +38,7 @@ from pynet.loop import Task
 from pyscheduler.config import Config, JobDef
 from pyscheduler.engine.admission import Admission, ReadyQueue
 from pyscheduler.engine.clock import Cancel, Clock
+from pyscheduler.engine.hooks import AttemptHooks
 from pyscheduler.engine.launcher import AttemptHandle, Launcher
 from pyscheduler.engine.locks import RunLocks
 from pyscheduler.engine.model import Attempt, Event, Run, RunState
@@ -63,7 +64,7 @@ class EngineFailedError(RuntimeError):
     """Raised inside the engine after a failed commit; the failure is already recorded."""
 
 
-class EngineBase(ABC):
+class EngineBase(AttemptHooks, ABC):
     """Hold the engine's shared state and commit changes write-ahead.
 
     Attributes:
@@ -86,6 +87,7 @@ class EngineBase(ABC):
         config_version: int = 1,
     ) -> None:
         """Set up empty state; nothing runs until ``start``."""
+        super().__init__()
         self.config = config
         self.store = store
         self.clock = clock
@@ -265,6 +267,7 @@ class EngineBase(ABC):
                 self.book.publish(run)
             for run in changes:
                 self._notify(run)
+            self._notify_attempts(batch.attempts if changes else ())
             if self.error is not None:
                 # Durable, but the engine failed while this save waited: act on nothing.
                 self._fail(self.error, ids)

@@ -75,3 +75,4 @@ with something you can run.
 21. [The Service and the CLI (Opening the Shop and the Remote Control)](concepts/the-service-and-cli.md): `pysched serve` and the `pysched` commands.
 22. [Notifiers (The Ways to Reach Someone)](concepts/notifiers.md): Log lines, commands and messages that carry an alert to a person.
 23. [Routing Alerts (The Post Office With a Pigeonhole per Notifier)](concepts/routing-alerts.md): Topics, `*` and `#`, retries, dead letters and replay.
+24. [Alerts (The Smoke Alarm and the Teacher Who Notices You Never Arrived)](concepts/alerts.md): Every alert kind, `must_start_by`, `max_runtime`, `min_runtime`, dedupe and a job's `alerts:`.
