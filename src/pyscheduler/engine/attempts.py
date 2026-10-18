@@ -14,6 +14,7 @@ the slot is given back and the next queued runs are started.
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 
 from pyscheduler.config import JobDef
@@ -32,11 +33,24 @@ MERGED = "stdout"
 _NO_RETRY = frozenset({Outcome.SUCCEEDED, Outcome.KILLED})
 
 
+LOST = "lost"
+"""The reason on an attempt whose process vanished without leaving a status note."""
+
+
 @dataclass
-class _Watch:
-    """The timers and flags of one running attempt."""
+class Watch:
+    """The timers and flags of one running attempt.
+
+    Attributes:
+        timed_out: The timeout rang (the attempt was asked to stop).
+        lost: The process vanished without a status note (found by recovery).
+        term: The timer that rings the timeout.
+        kill: The timer that sends SIGKILL after the grace.
+
+    """
 
     timed_out: bool = False
+    lost: bool = False
     term: Cancel | None = None
     kill: Cancel | None = None
 
@@ -47,16 +61,22 @@ class _Watch:
                 timer.cancel()
 
 
-def classify(result: AttemptResult, *, timed_out: bool, killed: bool) -> tuple[Outcome, str]:
-    """Return the outcome of an attempt and the reason to show for it."""
+def classify(
+    result: AttemptResult, *, timed_out: bool, killed: bool, lost: bool = False
+) -> tuple[Outcome, str]:
+    """Return the outcome of an attempt and the reason to show for it.
+
+    A ``lost`` attempt (no status note, process gone) is ``lost`` unless
+    it was being timed out or killed, which explains its end better.
+    """
     if result.start_error is not None:
         return Outcome.START_ERROR, f"start error: {result.start_error}"
     if result.succeeded:
         return Outcome.SUCCEEDED, ""
-    if timed_out:
-        return Outcome.TIMEOUT, "timeout"
-    if killed:
-        return Outcome.KILLED, "killed"
+    flags = ((timed_out, Outcome.TIMEOUT, "timeout"), (killed, Outcome.KILLED, "killed"))
+    for flag, outcome, reason in (*flags, (lost, Outcome.LOST, LOST)):
+        if flag:
+            return outcome, reason
     if result.signal is not None:
         return Outcome.FAILED, f"signal {result.signal}"
     return Outcome.FAILED, f"exit {result.exit_code}"
@@ -182,7 +202,7 @@ class AttemptRunner(EngineBase):
                 error = str(exc)
         if handle is None:
             result = AttemptResult(None, None, None, self.clock.now(), error)
-            await self._finish(row, result, _Watch())
+            await self._finish(row, result, Watch())
             return
         self._handles[running.run_id] = handle
         if running.run_id in self._kill_requested:  # an operator kill came mid-launch
@@ -216,9 +236,14 @@ class AttemptRunner(EngineBase):
         finally:
             self._busy += 1
 
-    def _arm(self, run: Run, handle: AttemptHandle) -> _Watch:
-        """Arm the job's timeout: SIGTERM when it rings, SIGKILL after the grace."""
-        watch = _Watch()
+    def _arm(self, run: Run, handle: AttemptHandle, started: datetime | None = None) -> Watch:
+        """Arm the job's timeout: SIGTERM when it rings, SIGKILL after the grace.
+
+        The timeout counts from ``started`` (default now); an adopted
+        attempt passes its real start, so a timeout already passed rings
+        at once.
+        """
+        watch = Watch()
         job = self.config.jobs.get(run.job)
         if job is None or job.timeout is None:
             return watch
@@ -230,7 +255,8 @@ class AttemptRunner(EngineBase):
             handle.terminate()
             watch.kill = self.clock.call_at(self.clock.now() + grace, self._guard(handle.kill))
 
-        watch.term = self.clock.call_at(self.clock.now() + job.timeout, self._guard(ring))
+        begin = started or self.clock.now()
+        watch.term = self.clock.call_at(begin + job.timeout, self._guard(ring))
         return watch
 
     def _signal_kill(self, run_id: str, handle: AttemptHandle) -> None:
@@ -239,7 +265,7 @@ class AttemptRunner(EngineBase):
         when = self.clock.now() + self.config.settings.kill_grace
         self._kill_timers[run_id] = self.clock.call_at(when, self._guard(handle.kill))
 
-    async def _finish(self, row: Attempt, result: AttemptResult, watch: _Watch) -> None:
+    async def _finish(self, row: Attempt, result: AttemptResult, watch: Watch) -> None:
         """Free the slots, record how the attempt ended, then retry or end the run.
 
         The process is over, so its slots are given back before the commit.
@@ -256,9 +282,7 @@ class AttemptRunner(EngineBase):
         self._reevaluate([final.job])
         await self._flush()
 
-    async def _record_ending(
-        self, row: Attempt, result: AttemptResult, watch: _Watch
-    ) -> Run | None:
+    async def _record_ending(self, row: Attempt, result: AttemptResult, watch: Watch) -> Run | None:
         """Commit the attempt's ending; return the final run, or ``None`` if it retries."""
         run_id = row.run_id
         killed = run_id in self._kill_requested
@@ -269,7 +293,9 @@ class AttemptRunner(EngineBase):
         # The process has ended, so its slots are free now; until the commit
         # lands, published copies may briefly show a pool over its limit.
         self._release(run_id)
-        outcome, reason = classify(result, timed_out=watch.timed_out, killed=killed)
+        outcome, reason = classify(
+            result, timed_out=watch.timed_out, killed=killed, lost=watch.lost
+        )
         if outcome is Outcome.KILLED and actor is not None:
             reason = f"killed by {actor}"
         now = self.clock.now()

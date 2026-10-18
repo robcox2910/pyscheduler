@@ -17,8 +17,8 @@ The work is split over a few modules: ``base`` (shared state and the
 write-ahead rule), ``creation`` (runs, dependencies, overlap),
 ``attempts`` (launching, timeouts, retries), ``actions`` (operator
 actions on runs, with their shared steps in ``action_support`` and the
-per-run locks in ``locks``) and ``reload`` (trigger, backfill,
-reload). ``Engine``
+per-run locks in ``locks``), ``reload`` (trigger, backfill,
+reload) and ``recovery`` (recovery, catch-up and retention). ``Engine``
 puts them together with the firing task and the pump that starts
 queued runs.
 """
@@ -30,17 +30,18 @@ import pynet.loop
 from pynet.loop import Cancelled, Task
 
 from pyscheduler.config import Config
-from pyscheduler.engine.attempts import AttemptRunner
 from pyscheduler.engine.base import EngineFailedError, logger
-from pyscheduler.engine.clock import Clock
+from pyscheduler.engine.clock import MAX_NAP, Clock
 from pyscheduler.engine.launcher import Launcher
 from pyscheduler.engine.model import RunState, Trigger
-from pyscheduler.engine.reload import ConfigReload
+from pyscheduler.engine.recovery import LAST_TICK, Recovery
 from pyscheduler.schedule.firings import Firing, next_firing
 from pyscheduler.store import Store
 
-LAST_TICK = "last_tick"
-"""The engine key holding the instant of the latest firing handled."""
+__all__ = ["LAST_TICK", "Engine"]
+
+LATE = timedelta(seconds=2 * MAX_NAP)
+"""How far behind the wall clock a firing may be found before it counts as a clock jump."""
 
 JUST_BEFORE = timedelta(microseconds=1)
 """How far before ``now`` the first firing search starts, so a firing due right now counts."""
@@ -48,7 +49,7 @@ JUST_BEFORE = timedelta(microseconds=1)
 type _Due = tuple[datetime, str, Firing]
 
 
-class Engine(ConfigReload, AttemptRunner):
+class Engine(Recovery):
     """Run jobs on time, in dependency order, within the slots, durably.
 
     Args:
@@ -81,9 +82,25 @@ class Engine(ConfigReload, AttemptRunner):
         self._stopped = False
 
     async def start(self) -> None:
-        """Start the store writer and the firing task."""
+        """Start the writer, recover, catch up, then start the firing task and retention.
+
+        After a restart the firing task starts strictly after the
+        catch-up instant (catch-up has handled everything up to it); on
+        the very first start a firing due right now still counts.
+
+        Raises:
+            EngineFailedError: If a recovery or catch-up commit failed (the
+                engine has failed stop; ``error`` holds the cause).
+
+        """
         await self.writer.start()
+        await self.recover()
+        now = self.clock.now()
+        first = await pynet.loop.run_in_thread(self.store.get_engine, LAST_TICK) is None
+        await self.catch_up(now)
+        self._firings_after = None if first else now
         self._firing_task = pynet.loop.spawn(self._fire_loop(), name="engine-firings")
+        self._arm_retention()
 
     async def stop(self, *, kill_running: bool = False) -> None:
         """Stop creating and starting runs, flush the writer and close the store.
@@ -119,6 +136,9 @@ class Engine(ConfigReload, AttemptRunner):
         if self._firing_task is not None:
             self._firing_task.cancel()
             await _quietly(self._firing_task)
+        if self._retention_timer is not None:
+            self._retention_timer.cancel()
+            self._retention_timer = None
         for timers in (self._retry_timers, self._kill_timers):
             for timer in timers.values():
                 timer.cancel()
@@ -159,9 +179,9 @@ class Engine(ConfigReload, AttemptRunner):
         """Sleep until the next firing, create its runs, and repeat.
 
         Any error fails the engine (see ``EngineBase._fail``). If the wall
-        clock jumps forward, every firing passed over is created on wake,
-        each once; the catch-up policy for missed firings (``catch_up``)
-        is applied at start-up by recovery, not here.
+        clock jumps forward (a firing is found more than ``LATE`` behind
+        it), the job's ``catch_up`` policy is applied to the firings it
+        passed over, as at start-up.
         """
         try:
             heap = self._first_firings()
@@ -211,17 +231,28 @@ class Engine(ConfigReload, AttemptRunner):
             self._firings_stale = True
 
     def _fire_due(self, heap: list[_Due]) -> datetime | None:
-        """Create the runs of every firing due now; return the latest instant handled."""
+        """Create the runs of every firing due now; return the latest instant handled.
+
+        A firing more than ``LATE`` behind the clock means the clock
+        jumped: that job's firings up to now follow its ``catch_up`` policy
+        (as ``catch_up`` runs) instead of all being created.
+        """
         now = self.clock.now()
         tick: datetime | None = None
         while heap and heap[0][0] <= now:
             when, name, firing = heapq.heappop(heap)
-            tick = when
+            tick = max(tick or when, when)
             job = self.config.jobs.get(name)
             if job is None or not job.enabled:
                 continue
-            self._create_run(name, firing.run_date, when, Trigger.SCHEDULE)
-            upcoming = next_firing(job, self.config.calendar_for(job), when)
+            after = when
+            if when < now - LATE:
+                for missed in self._missed(job, when - JUST_BEFORE, now):
+                    self._create_run(name, missed.run_date, missed.scheduled_at, Trigger.CATCH_UP)
+                after = tick = now
+            else:
+                self._create_run(name, firing.run_date, when, Trigger.SCHEDULE)
+            upcoming = next_firing(job, self.config.calendar_for(job), after)
             if upcoming is not None:
                 heapq.heappush(heap, (upcoming.scheduled_at, name, upcoming))
         return tick

@@ -75,6 +75,18 @@ class Admission:
         for pool, amount in needs.items():
             self._used[pool] = self.in_use(pool) + amount
 
+    def adopt(self, needs: Mapping[str, int]) -> None:
+        """Take a slot for a run that is already running, even over the limits.
+
+        Recovery uses it for attempts that kept running while the
+        scheduler was down: they hold their slots whatever the limits say
+        now, just as runs do after a reload lowers a limit.
+        """
+        _check_needs(needs)
+        self._running += 1
+        for pool, amount in needs.items():
+            self._used[pool] = self.in_use(pool) + amount
+
     def release(self, needs: Mapping[str, int]) -> None:
         """Give back a slot and the pool amounts in ``needs``.
 

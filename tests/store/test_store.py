@@ -23,6 +23,7 @@ LIMIT_TWO = 2
 EXIT_CODE = 0
 PID = 4321
 CONFIG_VERSION = 7
+THREE = 3
 
 
 @pytest.fixture
@@ -310,4 +311,21 @@ class TestNullsAndSchemaVersion:
         store = Store.open(tmp_path / "state", sync=False)
         store.apply(Batch(runs=[make_run()]))
         assert store.get_run(make_run().run_id) == make_run()
+        store.close()
+
+
+class TestMaxSeq:
+    """The highest sequence number stored for a job and run date."""
+
+    def test_max_seq(self, store: Store) -> None:
+        """Return the highest seq of that job and date only, or 0."""
+        runs = [
+            make_run(seq=1),
+            make_run(seq=3),
+            make_run("load", seq=5),
+            make_run(seq=9, run_date=NEXT_DAY),
+        ]
+        store.apply(Batch(runs=runs))
+        assert store.max_seq("extract", DAY) == THREE
+        assert store.max_seq("extract", PREV_DAY) == 0
         store.close()

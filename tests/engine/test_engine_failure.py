@@ -28,12 +28,16 @@ jobs:
 
 
 def failing_apply(h: Harness, monkeypatch: pytest.MonkeyPatch, state: RunState | None) -> None:
-    """Make every commit fail that carries a run in ``state`` (``None``: the firing batch)."""
+    """Make every commit fail that carries a run in ``state`` (``None``: the firing batch).
+
+    The firing batch is one with ``last_tick`` and runs; the start-up
+    ``last_tick`` save (no runs) still succeeds.
+    """
     real = h.store.apply
 
     def apply(batch: Batch) -> None:
         """Raise for the chosen batches, else really commit."""
-        if state is None and batch.engine:
+        if state is None and batch.engine and batch.runs:
             raise OSError(DISK_FULL)
         if state is not None and any(run.state is state for run in batch.runs):
             raise OSError(DISK_FULL)

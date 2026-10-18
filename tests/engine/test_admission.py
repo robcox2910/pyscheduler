@@ -54,6 +54,17 @@ class TestAdmission:
         assert adm.running == 0
         assert adm.in_use("db") == 0
 
+    def test_adopt_goes_over_the_limits(self) -> None:
+        """Adopt takes a slot even when the cap and the pool are full."""
+        adm = Admission(1, {"db": 1})
+        adm.acquire(DB)
+        adm.adopt(DB)
+        assert adm.running == TWO
+        assert adm.in_use("db") == TWO
+        adm.release(DB)
+        adm.release(DB)
+        assert adm.running == 0
+
     def test_acquire_when_full_raises(self) -> None:
         """Acquire refuses what does not fit."""
         adm = Admission(1, {})

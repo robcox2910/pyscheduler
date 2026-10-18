@@ -108,6 +108,7 @@ class EngineBase(ABC):
         self._kill_actors: dict[str, str] = {}
         self._kill_timers: dict[str, Cancel] = {}
         self._retry_timers: dict[str, Cancel] = {}
+        self._retention_timer: Cancel | None = None
         self._run_locks = RunLocks()
         self._held: set[str] = set()
         self._stopping = False

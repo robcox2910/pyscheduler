@@ -78,6 +78,7 @@ class ConfigReload(OperatorActions):
         definition = self._usable_job(job)
         day = run_date or self.clock.now().astimezone(definition.timezone).date()
         await self._load_dates(job, [day])
+        await self._seed_old_seqs(job, [day])
         self._usable_job(job)
         made = self._create_runs(job, day, self.clock.now(), Trigger.MANUAL)
         others = [run.run_id for run in made[1:]]
@@ -106,6 +107,7 @@ class ConfigReload(OperatorActions):
         span = range((end - start).days + 1)
         days = [d for n in span if calendar.is_business_day(d := start + n * ONE_DAY)]
         await self._load_dates(job, days)
+        await self._seed_old_seqs(job, days)
         definition = self._usable_job(job)
         calendar = self.config.calendar_for(definition)
         filled: dict[str, RunState | None] = {}

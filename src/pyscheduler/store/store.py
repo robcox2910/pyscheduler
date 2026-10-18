@@ -15,6 +15,7 @@ Every method is synchronous and holds PyDB's re-entrant lock, so the
 store can be used from worker threads while another thread commits.
 """
 
+import contextlib
 from collections.abc import Iterable
 from datetime import date, timedelta
 from pathlib import Path
@@ -26,7 +27,15 @@ from pydb.record import Record, Value
 from pydb.table import Table
 from pydb.transaction import Transaction
 
-from pyscheduler.engine.model import FINAL_STATES, Attempt, Event, Outcome, Run, RunState
+from pyscheduler.engine.model import (
+    FINAL_STATES,
+    Attempt,
+    Event,
+    Outcome,
+    Run,
+    RunState,
+    parse_run_id,
+)
 from pyscheduler.store.schema import (
     ATTEMPTS,
     CONFIGS,
@@ -244,6 +253,17 @@ class Store:
             runs = [run_from_row(r.data) for r in records]
         final = sorted((r for r in runs if r.is_final), key=lambda r: (r.run_date, r.run_id))
         return [run.run_id for run in final[:limit]]
+
+    def max_seq(self, job: str, run_date: date) -> int:
+        """Return the highest sequence number stored for ``job`` on ``run_date`` (0 if none)."""
+        with self._db.lock:
+            records = self._by_index(self._runs, "runs_run_date", run_date)
+            ids = [cast(str, r["run_id"]) for r in records if r["job"] == job]
+        seqs = [0]
+        for run_id in ids:
+            with contextlib.suppress(ValueError):
+                seqs.append(parse_run_id(run_id)[2])
+        return max(seqs)
 
     def query_runs(
         self,

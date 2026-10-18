@@ -107,6 +107,11 @@ class RunBook:
         if run is not None:
             self._unindex(run)
 
+    def drop(self, run_id: str) -> None:
+        """Forget ``run_id`` completely: its current and its published copy."""
+        self.forget(run_id)
+        self._drop_published(run_id)
+
     def next_seq(self, job: str, run_date: date) -> int:
         """Return the next unused sequence number for ``job`` on ``run_date``."""
         return self._max_seq.get((job, run_date), 0) + 1

@@ -10,7 +10,7 @@ themselves live in ``actions`` and ``reload``.
 import json
 from collections import deque
 from collections.abc import Iterable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pynet.loop
 
@@ -107,7 +107,7 @@ class ActionSupport(RunCreation):
         """
         settings = self.config.settings
         today = self.clock.now().astimezone(settings.timezone).date()
-        newest = today - timedelta(days=max(settings.memory_days - 1, 0))
+        newest = self._memory_start()
         oldest = today - settings.retention
         known: dict[date, bool] = {}
         todo = deque((job, day, force) for day in days)
@@ -133,6 +133,56 @@ class ActionSupport(RunCreation):
                     mapped = downstream_date(day, dep.run_date_offset, calendar)
                     if dep.job == name and mapped is not None:
                         todo.append((down, mapped, False))
+
+    def _memory_start(self, now: datetime | None = None) -> date:
+        """Return the oldest run date whose final runs stay in memory (``memory_days``)."""
+        settings = self.config.settings
+        today = (now or self.clock.now()).astimezone(settings.timezone).date()
+        return today - timedelta(days=max(settings.memory_days - 1, 0))
+
+    async def _seed_old_seqs(self, job: str, days: Iterable[date]) -> None:
+        """Seed the sequence numbers of the old dates new runs of ``job`` may land on.
+
+        Final runs older than the in-memory window may sit in the store
+        unloaded, so before runs are made for ``(job, day)`` (and for the
+        dependency-only runs that follow), the store is asked for the
+        highest sequence used, and a new run never reuses a run id.
+        """
+        newest = self._memory_start()
+        old = sorted(slot for slot in self._creation_slots(job, days) if slot[1] < newest)
+        if not old:
+            return
+        store = self.store
+        found = await pynet.loop.run_in_thread(lambda: [store.max_seq(*slot) for slot in old])
+        for (name, day), seq in zip(old, found, strict=True):
+            self.book.seed_seq(name, day, seq)
+
+    def _creation_slots(self, job: str, days: Iterable[date]) -> set[tuple[str, date]]:
+        """Return the ``(job, run date)`` slots a run of ``job`` on ``days`` may create runs in.
+
+        Those are the days themselves and, through dependency-only
+        downstream jobs, the run dates their dependencies map to (followed
+        at most as many steps as there are jobs, like ``_create_runs``).
+        """
+        slots: set[tuple[str, date]] = set()
+        todo = deque((job, day, 0) for day in days)
+        while todo:
+            name, day, depth = todo.popleft()
+            if (name, day) in slots:
+                continue
+            slots.add((name, day))
+            if depth >= len(self.config.jobs):
+                continue
+            for down in sorted(self.config.dependents(name)):
+                child = self.config.jobs.get(down)
+                if child is None or not child.dependency_only or down == name:
+                    continue
+                calendar = self.config.calendar_for(child)
+                for dep in child.depends_on:
+                    mapped = downstream_date(day, dep.run_date_offset, calendar)
+                    if dep.job == name and mapped is not None:
+                        todo.append((down, mapped, depth + 1))
+        return slots
 
     async def _load_date(self, day: date, known: dict[date, bool]) -> bool:
         """Load ``day``'s stored final runs missing from memory; return whether any are stored."""

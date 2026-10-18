@@ -189,7 +189,7 @@ def _corrupt(exc: Exception) -> AttemptResult:
     )
 
 
-def _pid_path(status_path: Path) -> Path:
+def pid_path(status_path: Path) -> Path:
     """Return where the minder writes its pid, next to the status note."""
     return status_path.with_name(f"{status_path.name}.pid")
 
@@ -271,7 +271,7 @@ class MinderLauncher:
             OSError: If the minder itself cannot be started.
 
         """
-        for stale in (spec.status_path, _pid_path(spec.status_path)):
+        for stale in (spec.status_path, pid_path(spec.status_path)):
             with contextlib.suppress(FileNotFoundError, NotADirectoryError):
                 stale.unlink()
         process = await create_process(

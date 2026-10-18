@@ -29,3 +29,4 @@ something goes wrong.
 - [Retries and Backoff (Knock Again, but Wait a Bit Longer Each Time)](concepts/retries-and-backoff.md)
 - [The Scheduler Engine (The School Timetable)](concepts/scheduler.md)
 - [Operator Actions (The Train Controller's Desk)](concepts/operator-actions.md)
+- [Recovery and Catch-Up (Waking Up After a Nap and Reading the Babysitter's Notes)](concepts/recovery-and-catch-up.md)
