@@ -368,3 +368,53 @@ class TestWatcherHandle:
             assert not handle.gave_up
 
         run(main)
+
+
+class _LateClock(FakeClock):
+    """A fake clock whose reading lags one step behind once ``late_from`` has come."""
+
+    def __init__(self, start: datetime, late_from: datetime) -> None:
+        """Start at ``start`` and read late from ``late_from`` on."""
+        super().__init__(start)
+        self._late_from = late_from
+
+    def now(self) -> datetime:
+        """Return the time, one step later once the late time has come (a slow final look)."""
+        now = super().now()
+        return now + STEP if now >= self._late_from else now
+
+
+class TestFinalLook:
+    """The last look before giving up judges stillness at the time of the look."""
+
+    def test_late_final_look_still_finds_a_zero_age_file(self, tmp_path: Path) -> None:
+        """A file first seen at a final look that runs past the deadline is still found."""
+        target = tmp_path / "in.csv"
+        deadline = START + GIVE_UP
+
+        async def main() -> None:
+            """Create the file just before the final look, which reads the clock late."""
+            clock = _LateClock(START, deadline)
+            spec = WatchSpec(str(target), timedelta(0), POLL, GIVE_UP)
+            handle = WatcherHandle(
+                pattern=str(target),
+                spec=spec,
+                started_at=START,
+                clock=clock,
+                limit=Semaphore(LIMIT),
+                log_path=tmp_path / "logs" / "watch.log",
+            )
+            task = pynet.loop.spawn(handle.wait())
+
+            def before_poll(due: datetime) -> None:
+                """Drop the file in right before the look at the deadline."""
+                if due >= deadline:
+                    target.write_text("x")
+
+            await run_until(clock, [task], deadline, before_poll)
+            result = await task
+            assert result.exit_code == 0
+            assert handle.files == (str(target),)
+            assert handle.gave_up is False
+
+        run(main)
