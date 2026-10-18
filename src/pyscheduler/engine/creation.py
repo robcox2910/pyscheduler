@@ -69,22 +69,38 @@ class RunCreation(EngineBase):
 
         A schedule, catch-up or backfill run is unique by ``(job,
         scheduled_at)``; a dependency run is made only if the job has no
-        run at all for ``run_date``. A duplicate returns ``None``. Manual runs are always new. The new
-        runs are evaluated at once, so the returned copy may already be
-        queued, waiting or even cancelled by the overlap rule.
+        dependency or backfill run for ``run_date``. A duplicate returns
+        ``None``. Manual runs are always new. The new runs are evaluated
+        at once, so the returned copy may already be queued, waiting or
+        even cancelled by the overlap rule.
+        """
+        created = self._create_runs(job, run_date, scheduled_at, trigger)
+        return self.book.get(created[0].run_id) if created else None
+
+    def _create_runs(
+        self, job: str, run_date: date, scheduled_at: datetime, trigger: Trigger
+    ) -> list[Run]:
+        """Create a run as ``_create_run`` does; return every run made, the first first.
+
+        The dependency-only chain is followed at most as many steps as
+        there are jobs. A longer chain can only come from a cycle through
+        run-date offsets (``b`` needs yesterday's ``a``, ``a`` needs
+        today's ``b``), which would otherwise make runs for ever.
         """
         first = self._new_run(job, run_date, scheduled_at, trigger)
         if first is None:
-            return None
+            return []
         created = [first]
-        todo = deque(created)
+        todo = deque([(first, 0)])
         while todo:
-            upstream = todo.popleft()
+            upstream, depth = todo.popleft()
+            if depth >= len(self.config.jobs):
+                continue
             for downstream in self._dependency_runs(upstream):
                 created.append(downstream)
-                todo.append(downstream)
+                todo.append((downstream, depth + 1))
         self._reevaluate(dict.fromkeys(run.job for run in created))
-        return self.book.get(first.run_id)
+        return created
 
     def _new_run(
         self, job: str, run_date: date, scheduled_at: datetime, trigger: Trigger
@@ -93,9 +109,10 @@ class RunCreation(EngineBase):
         if trigger in _SCHEDULED_TRIGGERS and self.book.by_scheduled(job, scheduled_at):
             return None
         if trigger is Trigger.DEPENDENCY and (
-            self.book.dependency_run(job, run_date) or self.book.runs_for(job, run_date)
+            self.book.dependency_run(job, run_date)
+            or any(r.trigger is Trigger.BACKFILL for r in self.book.runs_for(job, run_date))
         ):
-            return None  # one run per run date, even if a backfill or trigger made it
+            return None  # one per run date; a backfill counts, a manual run does not
         now = self.clock.now()
         run = Run(
             run_id=make_run_id(job, run_date, self.book.next_seq(job, run_date)),
@@ -122,12 +139,15 @@ class RunCreation(EngineBase):
 
         For a dependency with offset ``k``, the downstream run date ``R``
         is the one with ``shift(R, k) == upstream.run_date`` on the
-        downstream job's calendar.
+        downstream job's calendar. A job's dependency on its own earlier
+        run dates never creates runs (each run would make the next, for ever).
         """
         made: list[Run] = []
         for name in sorted(self.config.dependents(upstream.job)):
             down = self.config.jobs.get(name)
             if down is None or not down.dependency_only or not down.enabled:
+                continue
+            if name == upstream.job:
                 continue
             calendar = self.config.calendar_for(down)
             for dep in down.depends_on:

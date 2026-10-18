@@ -26,6 +26,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine, Iterable, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 from typing import Any
 
@@ -37,6 +38,7 @@ from pyscheduler.config import Config, JobDef
 from pyscheduler.engine.admission import Admission, ReadyQueue
 from pyscheduler.engine.clock import Cancel, Clock
 from pyscheduler.engine.launcher import AttemptHandle, Launcher
+from pyscheduler.engine.locks import RunLocks
 from pyscheduler.engine.model import Attempt, Event, Run, RunState
 from pyscheduler.engine.runbook import RunBook
 from pyscheduler.store import Batch, ConfigRecord, Store, StoreWriter
@@ -106,6 +108,7 @@ class EngineBase(ABC):
         self._kill_actors: dict[str, str] = {}
         self._kill_timers: dict[str, Cancel] = {}
         self._retry_timers: dict[str, Cancel] = {}
+        self._run_locks = RunLocks()
         self._held: set[str] = set()
         self._stopping = False
         self.error: BaseException | None = None
@@ -207,6 +210,17 @@ class EngineBase(ABC):
                 self._fail(exc, ())
 
         return guarded
+
+    # -- one change at a time per run ------------------------------------
+
+    def _run_lock(self, run_id: str) -> AbstractAsyncContextManager[None]:
+        """Return ``run_id``'s lock: one ending or operator action on a run at a time.
+
+        An attempt's ending holds it across its commit and slot release, and
+        every operator action across check, stage, commit and act, so an
+        action never sees (or changes) a run halfway through a transition.
+        """
+        return self._run_locks.hold(run_id)
 
     # -- write-ahead transitions -----------------------------------------
 

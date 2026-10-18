@@ -34,6 +34,18 @@ for a bad request (like a backfill that ends before it starts), 404 for
 an unknown job or run, 409 when the run is in the wrong state, and 503
 when the scheduler is stopping or has failed stop.
 
+## One Hand on the Lever at a Time
+
+A train that is pulling into a station is halfway through a change: it
+has stopped, but the board does not say so yet. If the controller
+pressed "send round again" at that exact moment, two people would be
+moving the same train. So each run has its own **lock**. An attempt's
+ending holds it while its result is written down, and every button
+holds it from the first check until the press has been acted on. A
+press that arrives mid-change simply waits its turn, then sees the run
+as it really is (a kill that arrives just after the attempt ended is
+refused: the run is no longer running).
+
 ## Swapping the Timetable (Reload)
 
 A new timetable arrives. Trains already moving finish their trip the
@@ -43,7 +55,8 @@ a line that has closed are cancelled. In PyScheduler terms:
 - a run with an attempt **running** keeps the definition it started
   with; if its job was removed or disabled, it does not retry
 - every other open run **adopts** the new definition and is checked
-  again at once
+  again at once (a queued run goes back to be placed again, unless it
+  was force-started)
 - open runs of a removed job end `cancelled` ("removed by reload"), and
   of a disabled job `cancelled` ("disabled")
 - the new limits and pools apply at once, and the next firings are

@@ -198,6 +198,7 @@ class AttemptRunner(EngineBase):
             finally:
                 self._handles.pop(running.run_id, None)
                 self._attempt_tasks.pop(running.run_id, None)
+                self._cancel_kill_timer(running.run_id)
             raise
         watch = self._arm(running, handle)
         try:
@@ -239,19 +240,33 @@ class AttemptRunner(EngineBase):
         self._kill_timers[run_id] = self.clock.call_at(when, self._guard(handle.kill))
 
     async def _finish(self, row: Attempt, result: AttemptResult, watch: _Watch) -> None:
-        """Record how the attempt ended, retry or end the run, then free the slots.
+        """Free the slots, record how the attempt ended, then retry or end the run.
 
-        A killed attempt never retries, and neither does one whose job was
-        removed or disabled by a reload while it ran.
+        The process is over, so its slots are given back before the commit.
+        The run's lock is held across the commit, so no operator action
+        sees the run halfway. A killed attempt never retries, and neither
+        does one whose job was removed or disabled by a reload while it ran.
         """
+        run_id = row.run_id
+        async with self._run_lock(run_id):
+            final = await self._record_ending(row, result, watch)
+        if final is None:
+            self._pump()
+            return
+        self._reevaluate([final.job])
+        await self._flush()
+
+    async def _record_ending(
+        self, row: Attempt, result: AttemptResult, watch: _Watch
+    ) -> Run | None:
+        """Commit the attempt's ending; return the final run, or ``None`` if it retries."""
         run_id = row.run_id
         killed = run_id in self._kill_requested
         self._kill_requested.discard(run_id)
         actor = self._kill_actors.pop(run_id, None)
-        timer = self._kill_timers.pop(run_id, None)
-        if timer is not None:
-            timer.cancel()
+        self._cancel_kill_timer(run_id)
         self._attempt_tasks.pop(run_id, None)
+        self._release(run_id)
         outcome, reason = classify(result, timed_out=watch.timed_out, killed=killed)
         if outcome is Outcome.KILLED and actor is not None:
             reason = f"killed by {actor}"
@@ -271,31 +286,33 @@ class AttemptRunner(EngineBase):
         ]
         run = self.book.get(run_id)
         if run is None:  # pragma: no cover -- runs are never dropped while running
-            return
+            return None
         job = self.config.jobs.get(run.job)
         tries = run.attempt - run.rerun
         count = job.retries.count if job is not None and job.enabled else 0
         if outcome not in _NO_RETRY and not killed and tries <= count and job is not None:
-            delay = job.retries.delay_for(tries)
-            when = now + delay
+            when = now + job.retries.delay_for(tries)
             waiting = self._changed(
                 run, RunState.RETRY_WAIT, f"retry {tries}/{count} after {reason}"
             )
             events.append(self._event(run_id, "retry_scheduled", attempt=row.attempt, at=when))
             await self._transition([waiting], attempts=[ended], events=events)
-            self._release(run_id)
-            if not self._stopping:
+            current = self.book.get(run_id)
+            if not self._stopping and current and current.state is RunState.RETRY_WAIT:
                 retry = self._guard(lambda: self._retry(run_id))
                 self._retry_timers[run_id] = self.clock.call_at(when, retry)
-            self._pump()
-            return
+            return None
         state = RunState.SUCCEEDED if outcome is Outcome.SUCCEEDED else RunState.FAILED
         final = self._changed(run, state, reason)
         events.append(self._event(run_id, "finished", state=state.value, reason=reason))
         await self._transition([final], attempts=[ended], events=events)
-        self._release(run_id)
-        self._reevaluate([run.job])
-        await self._flush()
+        return final
+
+    def _cancel_kill_timer(self, run_id: str) -> None:
+        """Call off the planned SIGKILL of ``run_id``'s attempt, if any."""
+        timer = self._kill_timers.pop(run_id, None)
+        if timer is not None:
+            timer.cancel()
 
     def _retry(self, run_id: str) -> None:
         """Queue a run whose retry wait is over (if it is still waiting)."""

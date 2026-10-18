@@ -170,6 +170,42 @@ class TestReload:
 
         h.run_engine(body)
 
+    def test_reload_reevaluates_queued_runs(self, harness: MakeHarness) -> None:
+        """Send a queued run back to waiting when the reload gives it a dependency."""
+        text = """
+            pools: {db: 1}
+            jobs:
+              hog:
+                command: run-hog
+                schedule: manual
+                pools: {db: 1}
+              b:
+                command: run-b
+                schedule: manual
+                pools: {db: 1}
+              c:
+                command: run-c
+                schedule: manual
+            """
+        h = harness(text)
+        h.launcher.plan("hog", FakeResult(duration=TEN_MINUTES))
+        plain = textwrap.dedent(text)[1:]
+        changed = new_config(h, plain.replace("run-b\n", "run-b\n    depends_on: [c]\n"))
+
+        async def body() -> None:
+            """Queue ``b`` behind ``hog``, then reload."""
+            await h.engine.trigger("hog", actor=ALICE)
+            queued = await h.engine.trigger("b", actor=ALICE)
+            assert queued.state is RunState.QUEUED
+            await h.engine.reload(changed, actor=ALICE)
+            assert h.run("b").state is RunState.WAITING
+            assert queued.run_id not in h.engine.ready
+            await h.advance(FOUR_HOURS)
+
+        h.run_engine(body)
+        assert h.run("b").state is RunState.WAITING
+        assert h.engine.admission.running == 0
+
     def test_reload_commit_fails_503(
         self, harness: MakeHarness, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -16,7 +16,9 @@ write-ahead: a change is durable before it is shown or acted on.
 The work is split over a few modules: ``base`` (shared state and the
 write-ahead rule), ``creation`` (runs, dependencies, overlap),
 ``attempts`` (launching, timeouts, retries), ``actions`` (operator
-actions on runs) and ``reload`` (trigger, backfill, reload). ``Engine``
+actions on runs, with their shared steps in ``action_support`` and the
+per-run locks in ``locks``) and ``reload`` (trigger, backfill,
+reload). ``Engine``
 puts them together with the firing task and the pump that starts
 queued runs.
 """
@@ -74,6 +76,7 @@ class Engine(ConfigReload, AttemptRunner):
         self._firing_task: Task[None] | None = None
         self._firings_after: datetime | None = None
         self._firing_asleep = False
+        self._firing_due: datetime | None = None
         self._firings_stale = False
         self._stopped = False
 
@@ -169,6 +172,7 @@ class Engine(ConfigReload, AttemptRunner):
                 if not heap:
                     return
                 self._firing_asleep = True
+                self._firing_due = heap[0][0]
                 await self.clock.sleep_until(heap[0][0])
                 # Not in a ``finally``: a task cancelled by a reload must not
                 # touch the flag, which belongs to its replacement by then.
@@ -191,13 +195,16 @@ class Engine(ConfigReload, AttemptRunner):
         """Rebuild the firing heap from now, for the config in force.
 
         A firing task asleep (or finished) is replaced by a new one; one
-        busy creating runs rebuilds its heap when it is done.
+        busy creating runs, or woken for a firing due already, rebuilds its
+        heap when it has handled it.
         """
         task = self._firing_task
         if task is None or self._stopping:
             return
         self._firings_after = None
-        if self._firing_asleep or task.done():
+        due = self._firing_due
+        waiting = self._firing_asleep and (due is None or due > self.clock.now())
+        if waiting or task.done():
             task.cancel()
             self._firing_task = pynet.loop.spawn(self._fire_loop(), name="engine-firings")
         else:
@@ -211,7 +218,7 @@ class Engine(ConfigReload, AttemptRunner):
             when, name, firing = heapq.heappop(heap)
             tick = when
             job = self.config.jobs.get(name)
-            if job is None:
+            if job is None or not job.enabled:
                 continue
             self._create_run(name, firing.run_date, when, Trigger.SCHEDULE)
             upcoming = next_firing(job, self.config.calendar_for(job), when)

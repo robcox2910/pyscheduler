@@ -17,7 +17,8 @@ from datetime import date, datetime, time, timedelta
 
 from pyscheduler.calendars import BusinessCalendar
 from pyscheduler.config import Config, JobDef, RunDateRule
-from pyscheduler.engine.actions import ActionError, OperatorActions
+from pyscheduler.engine.action_support import ActionError
+from pyscheduler.engine.actions import OperatorActions
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.model import Event, Run, RunState, Trigger
 from pyscheduler.schedule.firings import firings_between, resolve_local
@@ -78,11 +79,9 @@ class ConfigReload(OperatorActions):
         day = run_date or self.clock.now().astimezone(definition.timezone).date()
         await self._load_dates(job, [day])
         self._usable_job(job)
-        run = self._create_run(job, day, self.clock.now(), Trigger.MANUAL)
-        if run is None:  # pragma: no cover -- manual runs are always new
-            msg = "manual run not created"
-            raise RuntimeError(msg)
-        return (await self._commit(actor, "trigger", {run.run_id: None}))[0]
+        made = self._create_runs(job, day, self.clock.now(), Trigger.MANUAL)
+        others = [run.run_id for run in made[1:]]
+        return (await self._commit(actor, "trigger", {made[0].run_id: None}, created=others))[0]
 
     async def backfill(self, job: str, *, start: date, end: date, actor: str) -> list[Run]:
         """Create one run per business day from ``start`` to ``end`` on which ``job`` has none.
@@ -109,15 +108,17 @@ class ConfigReload(OperatorActions):
         await self._load_dates(job, days)
         definition = self._usable_job(job)
         calendar = self.config.calendar_for(definition)
-        created: dict[str, RunState | None] = {}
+        filled: dict[str, RunState | None] = {}
+        others: list[str] = []
         for day in days:
-            if self.book.runs_for(job, day):
-                continue
             due = first_firing(definition, calendar, day)
-            run = self._create_run(job, day, due, Trigger.BACKFILL) if due is not None else None
-            if run is not None:
-                created[run.run_id] = None
-        return await self._commit(actor, "backfill", created)
+            if self.book.runs_for(job, day) or due is None:
+                continue
+            made = self._create_runs(job, day, due, Trigger.BACKFILL)
+            if made:
+                filled[made[0].run_id] = None
+                others.extend(run.run_id for run in made[1:])
+        return await self._commit(actor, "backfill", filled, created=others)
 
     async def reload(self, new_config: Config, *, actor: str) -> None:
         """Swap in ``new_config`` (already validated) and apply the reload rules.
@@ -126,12 +127,15 @@ class ConfigReload(OperatorActions):
           with; when the attempt ends, a removed or disabled job does not
           retry.
         - Every other open run adopts the new definition (and version) and
-          is re-evaluated at once; a queued run is re-queued with the new
-          criticality and pools.
+          is re-evaluated at once. A queued run goes back to ``scheduled``
+          to be placed again (dependencies and overlap of the new
+          definition), except a force-started one, which is re-queued with
+          the new criticality and pools.
         - Open, not running runs of a removed or disabled job are cancelled.
         - The new limits apply at once, and the firing heap is rebuilt
-          from now (firings between the old and the new config are not
-          caught up).
+          from now, in the same step as the config swap, so no firing of
+          the old heap fires under the new config (firings between the old
+          and the new config are not caught up).
 
         A ``ConfigRecord`` with the next version and one ``reload`` event
         (no run id) are committed with the changes. A config with the
@@ -150,6 +154,7 @@ class ConfigReload(OperatorActions):
         self.config = new_config
         self.config_version = version
         self.admission.set_limits(new_config.settings.max_running, new_config.pools)
+        self._restart_firings()
         cancelled: list[str] = []
         for run in self.book.open_runs():
             if run.state is RunState.RUNNING:
@@ -162,9 +167,12 @@ class ConfigReload(OperatorActions):
                 cancelled.append(run.run_id)
                 continue
             adopted = replace(run, config_version=version, updated_at=now)
-            if run.run_id in self.ready:
+            if run.run_id in self._force and run.run_id in self.ready:
                 self._needs[run.run_id] = dict(job.pools)
                 self.ready.push(adopted, job.criticality, job.pools)
+            elif run.state is RunState.QUEUED:
+                self._unqueue(run.run_id)
+                adopted = replace(adopted, state=RunState.SCHEDULED, reason="")
             self._stage(adopted)
         self._reevaluate(sorted(new_config.jobs))
         record = ConfigRecord(
@@ -181,4 +189,3 @@ class ConfigReload(OperatorActions):
             await self._flush(configs=[record])
         except EngineFailedError as exc:
             raise ActionError(503, f"scheduler failed: {exc}") from exc
-        self._restart_firings()
