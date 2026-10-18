@@ -1,18 +1,24 @@
 """Tests for the group-commit writer: many saves, few fsyncs."""
 
+import logging
 import time
 from pathlib import Path
+from typing import cast
 
 import pynet.loop
 import pytest
+from pydb.commits import mark_committed
 from store_helpers import make_run
 
+from pyscheduler.engine.model import Run
 from pyscheduler.store import Batch, Store, StoreWriter
 
 SAVES = 100
 MAX_COMMITS = 10
 APPLY_NAP = 0.02
 BOOM = "disk on fire"
+LATE = "lost the receipt"
+IN_FLIGHT_NAP = 0.005
 
 
 class SlowStore(Store):
@@ -35,6 +41,17 @@ class FlakyStore(Store):
             self.fail_next = False
             raise OSError(BOOM)
         super().apply(batch)
+
+
+class LateErrorStore(Store):
+    """A store that commits, then raises an error PyDB marks as already durable."""
+
+    def apply(self, batch: Batch) -> None:
+        """Commit for real, then raise a committed-marked error."""
+        super().apply(batch)
+        exc = OSError(LATE)
+        mark_committed(exc)
+        raise exc
 
 
 def open_as[S: Store](kind: type[S], tmp_path: Path) -> S:
@@ -161,4 +178,134 @@ class TestStoreWriter:
 
         pynet.loop.run(main())
         assert len(store.query_runs()) == len(runs)
+        store.close()
+
+
+class TestWriterTrouble:
+    """Bad batches, a dying writer, cancelled waiters and late errors never hang."""
+
+    def test_bad_batch_fails_its_group_only(self, tmp_path: Path) -> None:
+        """Fail the group whose merge breaks; the writer keeps working."""
+        store = Store.open(tmp_path / "state", sync=False)
+        writer = StoreWriter(store)
+        bad = Batch(engine={"k": "v"})
+        bad.runs = cast(list[Run], None)
+        errors: list[BaseException] = []
+
+        async def save(batch: Batch) -> None:
+            """Save and remember any error."""
+            try:
+                await writer.save(batch)
+            except TypeError as exc:
+                errors.append(exc)
+
+        async def main() -> None:
+            """Queue the bad batch with a good one, then save again."""
+            await writer.start()
+            tasks = [pynet.loop.spawn(save(bad)), pynet.loop.spawn(save(Batch(runs=[make_run()])))]
+            for task in tasks:
+                await task
+            await writer.save(Batch(runs=[make_run(seq=2)]))
+            await writer.close()
+
+        pynet.loop.run(main())
+        assert len(errors) == len(("bad", "good"))
+        assert [r.run_id for r in store.query_runs()] == [make_run(seq=2).run_id]
+        store.close()
+
+    def test_writer_death_fails_everyone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Give every waiter the error, then refuse later saves at once."""
+        store = Store.open(tmp_path / "state", sync=False)
+        writer = StoreWriter(store)
+
+        async def broken_commit(merged: Batch, waiters: object) -> None:
+            """Die as a bug in the writer would."""
+            del merged, waiters
+            raise ZeroDivisionError(BOOM)
+
+        monkeypatch.setattr(writer, "_commit", broken_commit)
+        errors: list[BaseException] = []
+
+        async def save(seq: int) -> None:
+            """Save and remember any error."""
+            try:
+                await writer.save(Batch(runs=[make_run(seq=seq)]))
+            except ZeroDivisionError as exc:
+                errors.append(exc)
+
+        async def main() -> None:
+            """Save twice into a dying writer, then try once more."""
+            await writer.start()
+            tasks = [pynet.loop.spawn(save(1)), pynet.loop.spawn(save(2))]
+            for task in tasks:
+                await task
+            with pytest.raises(RuntimeError, match="store writer failed"):
+                await writer.save(Batch(runs=[make_run(seq=3)]))
+            await writer.close()
+
+        pynet.loop.run(main())
+        assert len(errors) == len((1, 2))
+        store.close()
+
+    def test_cancelled_waiter_still_commits(self, tmp_path: Path) -> None:
+        """Commit a cancelled caller's batch, and keep serving others."""
+        store = open_as(SlowStore, tmp_path)
+        writer = StoreWriter(store)
+        first, second = make_run(seq=1), make_run(seq=2)
+
+        async def main() -> None:
+            """Cancel one waiter, then save another batch."""
+            await writer.start()
+            task = pynet.loop.spawn(writer.save(Batch(runs=[first])))
+            await pynet.loop.sleep(0)
+            task.cancel()
+            await writer.save(Batch(runs=[second]))
+            assert task.cancelled()
+            await writer.close()
+
+        pynet.loop.run(main())
+        assert store.get_run(first.run_id) == first
+        assert store.get_run(second.run_id) == second
+        store.close()
+
+    def test_close_during_in_flight_commit(self, tmp_path: Path) -> None:
+        """Finish the commit in flight before ``close`` returns."""
+        store = open_as(SlowStore, tmp_path)
+        writer = StoreWriter(store)
+        run = make_run()
+
+        async def main() -> None:
+            """Close while the worker thread is still committing."""
+            await writer.start()
+            task = pynet.loop.spawn(writer.save(Batch(runs=[run])))
+            await pynet.loop.sleep(IN_FLIGHT_NAP)
+            await writer.close()
+            assert task.done()
+            await task
+
+        pynet.loop.run(main())
+        assert writer.commits == 1
+        assert store.get_run(run.run_id) == run
+        store.close()
+
+    def test_durable_commit_error_is_success(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Report a commit PyDB says is durable as saved, and log the late error."""
+        store = open_as(LateErrorStore, tmp_path)
+        writer = StoreWriter(store)
+        run = make_run()
+
+        async def main() -> None:
+            """Save through a store that errors after committing."""
+            await writer.start()
+            await writer.save(Batch(runs=[run]))
+            await writer.close()
+
+        with caplog.at_level(logging.WARNING, logger="pyscheduler.store.writer"):
+            pynet.loop.run(main())
+        assert LATE in caplog.text
+        assert store.get_run(run.run_id) == run
         store.close()

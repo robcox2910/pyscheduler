@@ -45,6 +45,10 @@ class TestRunIds:
             "job.2026-10-17.x",
             "job.2026-10-17.-1",
             "job.2026-10-17.",
+            "job.2026-W42-6.1",
+            "job.2026-10-17.01",
+            "job.2026-10-17.0",
+            "job. 2026-10-17.1",
         ],
     )
     def test_malformed_ids_raise(self, bad: str) -> None:

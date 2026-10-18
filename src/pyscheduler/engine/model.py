@@ -172,20 +172,18 @@ def parse_run_id(run_id: str) -> tuple[str, date, int]:
         ValueError: If the id is not ``<job>.<YYYY-MM-DD>.<seq>``.
 
     """
+    malformed = f"malformed run id {run_id!r}"
     parts = run_id.rsplit(".", RUN_ID_PARTS - 1)
-    if len(parts) != RUN_ID_PARTS or not parts[0] or "." in parts[0]:
-        msg = f"malformed run id {run_id!r}"
-        raise ValueError(msg)
+    if len(parts) != RUN_ID_PARTS or not parts[2].isascii() or not parts[2].isdigit():
+        raise ValueError(malformed)
     job, day, seq_text = parts
-    if not seq_text.isdigit() or not seq_text.isascii():
-        msg = f"malformed run id {run_id!r}: bad sequence {seq_text!r}"
-        raise ValueError(msg)
     try:
         run_date = date.fromisoformat(day)
     except ValueError as exc:
-        msg = f"malformed run id {run_id!r}: bad date {day!r}"
-        raise ValueError(msg) from exc
-    if len(day) != len("YYYY-MM-DD"):
-        msg = f"malformed run id {run_id!r}: bad date {day!r}"
-        raise ValueError(msg)
-    return job, run_date, int(seq_text)
+        raise ValueError(malformed) from exc
+    seq = int(seq_text)
+    # Only the exact spelling make_run_id writes counts: no "01", no week
+    # dates such as "2026-W42-6", no sequence 0, no dots in the job.
+    if not job or "." in job or seq < 1 or make_run_id(job, run_date, seq) != run_id:
+        raise ValueError(malformed)
+    return job, run_date, seq

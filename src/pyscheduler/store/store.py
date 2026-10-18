@@ -80,7 +80,13 @@ class _Staged[K]:
 
 
 class Store:
-    """Hide PyDB behind a small typed API for the engine."""
+    """Hide PyDB behind a small typed API for the engine.
+
+    Every read takes PyDB's lock, so it can wait for a group commit that
+    is in flight on the writer's thread (an ``fsync`` away). The engine
+    must therefore call reads through ``run_in_thread``, never directly
+    on the event loop's thread.
+    """
 
     def __init__(self, db: Database) -> None:
         """Wrap an open database whose tables and indexes already exist."""
@@ -255,6 +261,8 @@ class Store:
 
     def events_for(self, run_id: str) -> list[Event]:
         """Return a run's events in the order they were written."""
+        if not run_id:  # empty text is how scheduler-wide events are stored
+            return []
         with self._db.lock:
             records = self._by_index(self._events, "events_run_id", run_id)
             return [event_from_row(r.data) for r in sorted(records, key=lambda r: r.record_id)]

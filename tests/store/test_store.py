@@ -121,6 +121,7 @@ class TestStore:
         assert ended.exit_code == EXIT_CODE
         assert ended.pid == PID
         assert store.events_for(run.run_id) == events[:2]
+        assert store.events_for("") == []
         store.close()
 
     def test_attempt_upsert(self, store: Store) -> None:
