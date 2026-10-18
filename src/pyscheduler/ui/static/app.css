@@ -1,0 +1,146 @@
+/* pyscheduler web UI. Every colour and size is a custom property here, so a
+   restyle touches only :root (light) and the dark block below. */
+:root {
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --size-base: 15px;
+  --size-small: 12px;
+  --size-title: 22px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --radius: 6px;
+  --max-width: 1400px;
+
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1c2430;
+  --muted: #5d6877;
+  --border: #d9dee5;
+  --accent: #2563eb;
+  --accent-text: #ffffff;
+  --topbar-bg: #1f2937;
+  --topbar-text: #e5e7eb;
+  --topbar-active: #ffffff;
+  --danger: #b42318;
+
+  --state-succeeded: #1a7f37;
+  --state-failed: #b42318;
+  --state-running: #1d6fdc;
+  --state-grey: #6b7280;
+  --state-amber: #b7791f;
+  --state-muted: #9ca3af;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11151b;
+    --surface: #1a2029;
+    --text: #e6e9ee;
+    --muted: #9aa5b4;
+    --border: #2d3644;
+    --accent: #5b92f5;
+    --accent-text: #0b1220;
+    --topbar-bg: #0b0e13;
+    --topbar-text: #aab3c0;
+    --topbar-active: #ffffff;
+    --danger: #f97066;
+
+    --state-succeeded: #4ac26b;
+    --state-failed: #f97066;
+    --state-running: #5b9bf8;
+    --state-grey: #8b95a5;
+    --state-amber: #f0b44c;
+    --state-muted: #6b7280;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: var(--size-base);
+  background: var(--bg);
+  color: var(--text);
+}
+
+a { color: var(--accent); }
+h1 { font-size: var(--size-title); margin: 0 0 var(--space-3); }
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--topbar-bg);
+  color: var(--topbar-text);
+}
+.topbar a { color: var(--topbar-text); text-decoration: none; }
+.topbar a:hover, .topbar a[aria-current="page"] { color: var(--topbar-active); }
+.topbar .brand { font-weight: 600; color: var(--topbar-active); }
+.topbar nav { display: flex; gap: var(--space-3); flex: 1; }
+.topbar nav a[aria-current="page"] { border-bottom: 2px solid var(--accent); }
+.who { display: flex; align-items: center; gap: var(--space-2); font-size: var(--size-small); }
+.who form { margin: 0; }
+
+.content {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: var(--space-3);
+  overflow-x: auto;
+}
+
+table { border-collapse: collapse; width: 100%; background: var(--surface); }
+th, td { text-align: left; padding: var(--space-2); border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-size: var(--size-small); font-weight: 600; }
+
+button, .button {
+  font: inherit;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.link { border: 0; background: none; color: inherit; padding: 0; text-decoration: underline; }
+input[type="text"], input[type="password"] {
+  font: inherit;
+  width: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius);
+  font-size: var(--size-small);
+  color: var(--accent-text);
+  background: var(--state-grey);
+}
+.badge.succeeded { background: var(--state-succeeded); }
+.badge.failed { background: var(--state-failed); }
+.badge.running { background: var(--state-running); }
+.badge.queued, .badge.waiting, .badge.scheduled { background: var(--state-grey); }
+.badge.retry_wait, .badge.held { background: var(--state-amber); }
+.badge.skipped, .badge.cancelled { background: var(--state-muted); }
+.critical::before { content: "\25B2 "; color: var(--danger); }
+
+.login-page { display: grid; place-items: center; min-height: 100vh; }
+.login-card {
+  width: min(360px, 92vw);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.login-card label { display: block; margin-bottom: var(--space-3); color: var(--muted); }
+.error { color: var(--danger); margin: 0 0 var(--space-3); }

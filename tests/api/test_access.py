@@ -4,6 +4,7 @@ import stat
 from pathlib import Path
 
 import pynet.loop
+import pytest
 from api_helpers import (
     DEV,
     FORBIDDEN,
@@ -24,8 +25,9 @@ from pyweb.auth import User
 from pyweb.messages import HttpRequest, Outcome
 from pyweb.testing import TestClient
 
-from pyscheduler.api.access import principal_of
-from pyscheduler.api.session_key import KEY_FILE, load_or_make_key
+from pyscheduler.api import TokenHolder, UserHolder, UserTable, build_app, config_actions
+from pyscheduler.api.access import build_access, needs_session_key, principal_of
+from pyscheduler.api.session_key import KEY_FILE, SessionKeyError, load_or_make_key
 from pyscheduler.api.support import actor_of, guarded, role_of
 from pyscheduler.engine.model import RunState
 
@@ -353,3 +355,39 @@ class TestSessionKey:
         assert len(first) >= MIN_SECRET
         assert load_or_make_key(state) == first
         assert load_or_make_key(tmp_path / "other") != first
+
+    def test_unusable_key_files_are_session_key_errors(self, tmp_path: Path) -> None:
+        """An empty, short or non-ASCII key file raises ``SessionKeyError``, not a traceback."""
+        for index, content in enumerate((b"", b"short\n", b"\xff\xfe" * MIN_SECRET)):
+            state = tmp_path / f"state{index}"
+            state.mkdir()
+            (state / KEY_FILE).write_bytes(content)
+            with pytest.raises(SessionKeyError):
+                load_or_make_key(state)
+
+    def test_no_half_written_key_is_left_behind(self, tmp_path: Path) -> None:
+        """A new key arrives whole, and no temporary file is left in the folder."""
+        state = tmp_path / "state"
+        load_or_make_key(state)
+        assert [entry.name for entry in state.iterdir()] == [KEY_FILE]
+
+    def test_build_app_with_a_key_does_no_file_work(self, api: MakeApi) -> None:
+        """Given a key, ``build_app`` reads and writes no file; without one, access refuses."""
+        h = api(tokens=False, users=users_yaml(ada="admin"))
+        state = h.config.settings.state_dir
+        (state / KEY_FILE).unlink(missing_ok=True)
+        holder = UserHolder(UserTable.load(h.tmp_path / "users.yaml"))
+        reload, validate = config_actions(h.engine, h.config_path, users=holder)
+        build_app(
+            h.engine,
+            tokens=None,
+            reload=reload,
+            validate=validate,
+            users=holder,
+            session_key="k" * MIN_SECRET,
+        )
+        assert not (state / KEY_FILE).exists()
+        with pytest.raises(ValueError, match="session key"):
+            build_access(App(), tokens=TokenHolder(None), users=holder, key=None, secure=False)
+        assert needs_session_key(TokenHolder(None), holder)
+        assert not needs_session_key(TokenHolder(None), UserHolder(None))

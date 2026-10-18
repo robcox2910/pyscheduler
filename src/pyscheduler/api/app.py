@@ -23,14 +23,16 @@ The routes, exactly as the design lists them:
 from pyweb.app import App
 
 from pyscheduler.alerts.dispatch import Dispatcher
-from pyscheduler.api.access import build_access
+from pyscheduler.api.access import build_access, needs_session_key
 from pyscheduler.api.admin import Reload, Validate, add_admin_routes
 from pyscheduler.api.alerts import add_alert_routes
 from pyscheduler.api.auth import TokenHolder, TokenTable
 from pyscheduler.api.jobs import add_job_routes
 from pyscheduler.api.runs import add_run_routes
+from pyscheduler.api.session_key import load_or_make_key
 from pyscheduler.api.users import UserHolder
 from pyscheduler.engine.core import Engine
+from pyscheduler.ui import add_ui
 
 __all__ = ["build_app"]
 
@@ -44,6 +46,7 @@ def build_app(
     dispatcher: Dispatcher | None = None,
     users: UserHolder | None = None,
     secure: bool = False,
+    session_key: str | None = None,
 ) -> App:
     """Return the API app for ``engine``.
 
@@ -60,22 +63,24 @@ def build_app(
             users the app is in development mode (everyone is ``dev``
             with the admin role; loopback hosts only).
         secure: Mark the session cookie ``Secure`` (off on loopback).
+        session_key: The session key (``load_or_make_key``). A running
+            service loads it on a helper thread and passes it in, so this
+            function does no file work and may run on the event loop. If
+            it is left out the key is loaded here (fine in tests).
 
-    Building it reads (or makes) ``state_dir/session.key`` unless in
-    development mode: in a running service, build it on a helper thread.
+    Besides the API this adds the web UI (``pyscheduler.ui``).
 
     """
     app = App()
     token_holder = tokens if isinstance(tokens, TokenHolder) else TokenHolder(tokens)
-    build_access(
-        app,
-        tokens=token_holder,
-        users=users or UserHolder(None),
-        state_dir=engine.config.settings.state_dir,
-        secure=secure,
-    )
+    people = users or UserHolder(None)
+    key = session_key
+    if key is None and needs_session_key(token_holder, people):
+        key = load_or_make_key(engine.config.settings.state_dir)
+    session = build_access(app, tokens=token_holder, users=people, key=key, secure=secure)
     add_admin_routes(app, engine, reload=reload, validate=validate)
     add_job_routes(app, engine)
     add_run_routes(app, engine)
     add_alert_routes(app, engine, dispatcher)
+    add_ui(app, engine, session_auth=session, users=people, dispatcher=dispatcher)
     return app

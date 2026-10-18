@@ -48,7 +48,8 @@ from pyscheduler.api import (
     build_app,
     config_actions,
 )
-from pyscheduler.api.session_key import SessionKeyError
+from pyscheduler.api.access import needs_session_key
+from pyscheduler.api.session_key import SessionKeyError, load_or_make_key
 from pyscheduler.config import Config, load_config
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.clock import SystemClock
@@ -292,17 +293,19 @@ async def serve(
             engine, config_path, tokens=tokens, users=users, on_failed=monitor.reload_failed
         )
         service.reload_task = lambda: reload_for_signal(reload)
-        try:  # building the app reads (or makes) the session key
-            app = await pynet.loop.run_in_thread(
-                lambda: build_app(
-                    engine,
-                    tokens=tokens,
-                    reload=reload,
-                    validate=validate,
-                    dispatcher=dispatcher,
-                    users=users,
-                    secure=not is_loopback(host),
-                )
+        try:  # the key file is read (or made) off the loop; the app is built on it
+            key = None
+            if needs_session_key(tokens, users):
+                key = await pynet.loop.run_in_thread(load_or_make_key, config.settings.state_dir)
+            app = build_app(
+                engine,
+                tokens=tokens,
+                reload=reload,
+                validate=validate,
+                dispatcher=dispatcher,
+                users=users,
+                secure=not is_loopback(host),
+                session_key=key,
             )
         except (SessionKeyError, OSError) as exc:
             raise ServiceError(str(exc)) from None

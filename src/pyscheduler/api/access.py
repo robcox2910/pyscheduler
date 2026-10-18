@@ -26,7 +26,6 @@ be JSON (the cross-site guard when there is no login).
 """
 
 from collections.abc import Callable
-from pathlib import Path
 from urllib.parse import quote
 
 from pyweb.app import App, CallNext, Middleware
@@ -44,7 +43,6 @@ from pyscheduler.api.auth import (
     allows,
     is_loopback_host,
 )
-from pyscheduler.api.session_key import load_or_make_key
 from pyscheduler.api.users import UserHolder
 
 __all__ = [
@@ -55,6 +53,7 @@ __all__ = [
     "SESSION_COOKIE",
     "STATIC_PREFIX",
     "build_access",
+    "needs_session_key",
     "principal_of",
 ]
 
@@ -198,8 +197,13 @@ def _access_middleware(session: SessionAuth, *, web_ui: bool) -> Middleware:
     return check
 
 
+def needs_session_key(tokens: TokenHolder, users: UserHolder) -> bool:
+    """Return whether ``build_access`` needs a session key (everything but development mode)."""
+    return tokens.table is not None or users.table is not None
+
+
 def build_access(
-    app: App, *, tokens: TokenHolder, users: UserHolder, state_dir: Path, secure: bool
+    app: App, *, tokens: TokenHolder, users: UserHolder, key: str | None, secure: bool
 ) -> SessionAuth | None:
     """Install the access layer on ``app``; return the ``SessionAuth`` the login pages use.
 
@@ -207,7 +211,9 @@ def build_access(
         app: The app to guard (call this before adding other middleware).
         tokens: The API tokens (``table`` ``None``: no tokens file).
         users: The web UI's users (``table`` ``None``: no users file).
-        state_dir: Where the session key lives (``session.key``, made if missing).
+        key: The session key (see ``load_or_make_key``, which reads a file:
+            load it on a helper thread and pass it in). Development mode
+            has no sessions and ignores it.
         secure: Mark the session cookie ``Secure`` (not on a loopback address).
 
     With neither tokens nor users this is development mode and returns
@@ -215,18 +221,18 @@ def build_access(
     middleware; it returns the ``SessionAuth`` when there is a users file
     (so there is a web UI to log in to), else ``None``.
 
-    The session key is read from (or written to) disk: in a running
-    service, call this from a helper thread.
-
     Raises:
-        SessionKeyError: If the session key file holds no usable key.
+        ValueError: If a key is needed (see ``needs_session_key``) but is ``None``.
 
     """
-    if tokens.table is None and users.table is None:
+    if not needs_session_key(tokens, users):
         app.middleware(_dev_middleware())
         return None
+    if key is None:
+        msg = "a session key is needed unless in development mode"
+        raise ValueError(msg)
     session = SessionAuth(
-        SessionSigner(load_or_make_key(state_dir)),
+        SessionSigner(key),
         users,
         cookie_name=SESSION_COOKIE,
         login_path=LOGIN_PATH,
