@@ -46,6 +46,14 @@ LATE = timedelta(seconds=2 * MAX_NAP)
 JUST_BEFORE = timedelta(microseconds=1)
 """How far before ``now`` the first firing search starts, so a firing due right now counts."""
 
+PUMP_BATCH = 32
+"""The most queued runs one pump starts; more wait for the next loop turn.
+
+Starting an attempt is quick, but two hundred in one go would hold the
+loop for tens of milliseconds. A batch per turn lets timers, endings and
+API requests in between.
+"""
+
 type _Due = tuple[datetime, str, Firing]
 
 
@@ -80,6 +88,7 @@ class Engine(Recovery):
         self._firing_due: datetime | None = None
         self._firings_stale = False
         self._stopped = False
+        self._pump_planned = False
 
     async def start(self) -> None:
         """Start the writer, recover, catch up, then start the firing task and prune.
@@ -271,12 +280,21 @@ class Engine(Recovery):
     # -- starting queued runs --------------------------------------------
 
     def _pump(self) -> None:
-        """Start every queued run that fits, best first."""
+        """Start the queued runs that fit, best first, at most ``PUMP_BATCH`` of them.
+
+        If the batch is used up, another pump is planned for the next loop
+        turn, so a burst of startable runs is spread over several turns.
+        """
         freed = True
+        taken = 0
         while freed and not self._stopping:  # go again if a slot was handed straight back
             freed = False
             force = frozenset(self._force)
-            for queued in self.ready.take_startable(self.admission, force=force):
+            batch = self.ready.take_startable(self.admission, force=force, limit=PUMP_BATCH - taken)
+            taken += len(batch)
+            if taken >= PUMP_BATCH:
+                self._pump_soon()
+            for queued in batch:
                 self._force.discard(queued.run_id)
                 self._held.add(queued.run_id)
                 current = self.book.get(queued.run_id)
@@ -285,6 +303,19 @@ class Engine(Recovery):
                     freed = True
                 elif not self._start_attempt(current):
                     freed = True
+
+    def _pump_soon(self) -> None:
+        """Plan a pump on the next loop turn (at most one is planned at a time)."""
+        if self._pump_planned:
+            return
+        self._pump_planned = True
+
+        async def pump() -> None:
+            """Pump once this task gets its turn."""
+            self._pump_planned = False
+            self._pump()
+
+        self._spawn(pump(), "engine-pump")
 
 
 async def _quietly(task: Task[None]) -> None:

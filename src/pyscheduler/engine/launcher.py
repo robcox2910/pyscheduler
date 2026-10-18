@@ -11,25 +11,55 @@ job ends. Tests use ``pyscheduler.testing.FakeLauncher`` instead.
 """
 
 import contextlib
+import functools
 import json
 import logging
 import signal
+import subprocess
 import sys
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
 
-from pynet.process import Process, create_process
+import pynet.loop
+from pynet.loop import EventLoop, Future, WorkerPool, get_child_watcher, get_running_loop
+from pynet.process import Process
 
-from pyscheduler.minder import utc_now, write_status
+from pyscheduler.minder import Note, utc_now, write_status
 
 CORRUPT_PREFIX = "corrupt status file: "
 
 logger = logging.getLogger("pyscheduler.engine.launcher")
 
 _LIVE_MINDERS: set[int] = set()
+
+LAUNCH_WORKERS = 1
+"""How many helper threads start minders (their own team, apart from the store's).
+
+One is enough and more is worse: ``fork`` holds Python's GIL while it
+copies the scheduler, so several launch threads forking at once keep the
+loop's own thread waiting for its turn. With one thread the loop always
+gets the GIL back between two forks (measured: 200 launches at once, the
+loop's worst lateness about 30 ms with one thread, 70-160 ms with four).
+"""
+
+_LAUNCH_POOL = WorkerPool(LAUNCH_WORKERS)
+_HOOKED_LOOPS: weakref.WeakSet[EventLoop] = weakref.WeakSet()
+
+
+def _launch_pool(loop: EventLoop) -> WorkerPool:
+    """Return the launch threads, telling ``loop`` they count as real work in flight.
+
+    They are a team of their own so a burst of launches never queues in
+    front of the store writer's commits on the loop's shared helper pool.
+    """
+    if loop not in _HOOKED_LOOPS:
+        _HOOKED_LOOPS.add(loop)
+        loop.add_busy_check(_LAUNCH_POOL.busy)
+    return _LAUNCH_POOL
 
 
 def live_minder_pids() -> frozenset[int]:
@@ -229,13 +259,16 @@ class MinderHandle:
         With no note, the result comes from the minder's own exit status: a
         signal that killed it, or a ``start_error`` explaining that it
         exited without writing one. Later calls return the same result.
+        The note is read on a helper thread: a file read is a blocking
+        call, and two hundred endings at once would add up on the loop.
         """
         if self._result is not None:
             return self._result
         code = await self._process.wait()
         _LIVE_MINDERS.discard(self._process.pid)
+        note = await pynet.loop.run_in_thread(read_status, self._status_path)
         if self._result is None:
-            self._result = read_status(self._status_path) or _synthesise(code)
+            self._result = note or _synthesise(code)
         return self._result
 
     def terminate(self) -> None:
@@ -281,33 +314,90 @@ class MinderLauncher:
         return [*argv, "--", *spec.argv]
 
     async def launch(self, spec: LaunchSpec) -> MinderHandle:
-        """Remove any old note and pid file, then start the minder in a new session.
+        """Start the minder in a new session on a helper thread and return its handle.
 
-        The ``.pid`` file is written here, by the scheduler, as soon as the
-        process exists and before anything else can run, so a scheduler
-        that dies right after the launch still leaves the pid behind for
-        recovery (the minder writes the same file again when it starts).
-        Only a crash between the fork and this write leaves no trace.
+        Starting a process is slow work for an event loop: ``fork`` and
+        ``exec`` take a few milliseconds, and the pid file is fsynced. Two
+        hundred launches in a row would freeze the loop for a second, so
+        the whole start (removing any old note and pid file, the fork, and
+        writing the ``.pid`` file) runs on one of the launch threads, and only the cheap hand-over to the child watcher runs on
+        the loop.
+
+        The ``.pid`` file is written by the scheduler as soon as the
+        process exists, so a scheduler that dies right after the launch
+        still leaves the pid behind for recovery (the minder writes the
+        same file again when it starts). Only a crash between the fork and
+        this write leaves no trace.
+
+        If the caller is cancelled while the thread is still starting the
+        minder, the minder is still handed to the child watcher (so it is
+        reaped and tracked until it exits); nobody waits for its note, and
+        recovery finds it on the next start.
 
         Raises:
             OSError: If the minder itself cannot be started.
+            RuntimeError: If the loop's child watcher is not installed.
 
         """
-        for stale in (spec.status_path, pid_path(spec.status_path)):
-            with contextlib.suppress(FileNotFoundError, NotADirectoryError):
-                stale.unlink()
-        process = await create_process(
-            self.command(spec),
-            cwd=spec.cwd,
-            env=spec.env,
-            stdout=False,
-            stderr=False,
-            new_session=True,
-        )
-        _LIVE_MINDERS.add(process.pid)
-        note = {"pid": process.pid, "started_at": utc_now()}
-        try:
-            write_status(pid_path(spec.status_path), note)
-        except OSError:  # the minder writes it too; recovery copes without it
-            logger.warning("cannot write the pid file of %s", spec.run_id, exc_info=True)
+        watcher = get_child_watcher()
+        if not watcher.is_installed():
+            message = "the child watcher is not installed"
+            raise RuntimeError(message)
+        loop = get_running_loop()
+        started: Future[Process] = Future(loop)
+        command = self.command(spec)
+
+        def adopt(popen: subprocess.Popen[bytes] | None, error: BaseException | None) -> None:
+            """On the loop: wrap the new process (tracking it) and hand it to the waiter."""
+            if error is not None or popen is None:
+                if not started.done():
+                    started.set_exception(error or RuntimeError("the minder did not start"))
+                return
+            process = Process(popen, loop, stdin=None, stdout=None, stderr=None, new_session=True)
+            _LIVE_MINDERS.add(process.pid)
+            if started.done():  # the launch was cancelled: nobody will wait for this one
+                pynet.loop.spawn(_forget_when_done(process), name=f"orphan-{spec.run_id}")
+            else:
+                started.set_result(process)
+
+        def deliver(popen: subprocess.Popen[bytes] | None, error: BaseException | None) -> None:
+            """On the helper thread: pass the outcome to the loop (if it is still open)."""
+            with contextlib.suppress(RuntimeError):  # the loop has closed: nobody to tell
+                loop.call_soon_threadsafe(functools.partial(adopt, popen, error))
+
+        _launch_pool(loop).submit(functools.partial(_start_minder, command, spec), deliver)
+        process = await started
         return MinderHandle(process, spec.status_path)
+
+
+def _start_minder(command: list[str], spec: LaunchSpec) -> subprocess.Popen[bytes]:
+    """Remove any old note and pid file, start the minder, and write its pid file (a thread).
+
+    Raises:
+        OSError: If the minder cannot be started.
+
+    """
+    for stale in (spec.status_path, pid_path(spec.status_path)):
+        with contextlib.suppress(FileNotFoundError, NotADirectoryError):
+            stale.unlink()
+    popen = subprocess.Popen(  # noqa: S603 -- running the job's command is the point
+        command,
+        cwd=spec.cwd,
+        env=dict(spec.env),
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    note: Note = {"pid": popen.pid, "started_at": utc_now()}
+    try:
+        write_status(pid_path(spec.status_path), note)
+    except OSError:  # the minder writes it too; recovery copes without it
+        logger.warning("cannot write the pid file of %s", spec.run_id, exc_info=True)
+    return popen
+
+
+async def _forget_when_done(process: Process) -> None:
+    """Wait for an orphaned minder to exit, then stop counting it as live."""
+    try:
+        await process.wait()
+    finally:
+        _LIVE_MINDERS.discard(process.pid)

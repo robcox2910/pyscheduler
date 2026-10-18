@@ -15,24 +15,56 @@ keeps waiting, then writes the status JSON atomically. Because the note is
 on disk, the scheduler can learn how an attempt ended even if the scheduler
 itself was down at the time. If the logs cannot be opened, the note says
 so in ``start_error`` and the minder exits 127.
+
+A minder starts for every attempt, so it travels light. Two hundred
+attempts starting at once means two hundred interpreters starting at
+once, and every millisecond of start-up is paid two hundred times over.
+So the minder uses only ``os``, ``signal``, ``sys`` and ``datetime``: it
+reads its own command line (no ``argparse``), starts the child with
+``os.posix_spawnp`` (no ``subprocess``), uses plain ``os`` paths (no
+``pathlib``) and writes its small JSON notes itself (no ``json``, which
+would pull in ``re``). That roughly halves its start-up cost.
 """
 
-import argparse
-import contextlib
-import json
 import os
 import signal
-import subprocess
 import sys
-from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from types import FrameType
-from typing import IO, Protocol
 
 START_ERROR_EXIT = 127
 SIGNAL_EXIT_BASE = 128
+USAGE_EXIT = 2
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+RESET_SIGNALS = (signal.SIGPIPE, signal.SIGXFSZ)
+"""Signals Python ignores that the child gets back at their defaults (as ``subprocess`` does)."""
+
+USAGE = (
+    "usage: python -I -m pyscheduler.minder --status PATH --stdout PATH [--stderr PATH] -- ARGV..."
+)
+LOG_MODE = 0o666
+"""The mode new log files are created with (before the umask)."""
+
+_OPTIONS = ("--status", "--stdout", "--stderr")
+_ASCII_TOP = 0x7E
+_SPACE = 0x20
+_BMP_TOP = 0xFFFF
+_PLANE = 0x10000
+_HIGH_SURROGATE = 0xD800
+_LOW_SURROGATE = 0xDC00
+_TEN_BITS = 0x3FF
+_ESCAPES = {
+    '"': '\\"',
+    "\\": "\\\\",
+    "\b": "\\b",
+    "\f": "\\f",
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+type PathLike = str | os.PathLike[str]
+type Note = dict[str, str | int | bool | None]
 
 
 def utc_now() -> str:
@@ -40,34 +72,81 @@ def utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def write_status(path: Path, status: Mapping[str, object]) -> None:
+def _json_string(text: str) -> str:
+    """Return ``text`` as a JSON string, escaped exactly as ``json.dumps`` does."""
+    parts = ['"']
+    for char in text:
+        code = ord(char)
+        if char in _ESCAPES:
+            parts.append(_ESCAPES[char])
+        elif _SPACE <= code <= _ASCII_TOP:
+            parts.append(char)
+        elif code <= _BMP_TOP:
+            parts.append(f"\\u{code:04x}")
+        else:  # outside the basic plane: a surrogate pair
+            code -= _PLANE
+            high = _HIGH_SURROGATE | (code >> 10)
+            low = _LOW_SURROGATE | (code & _TEN_BITS)
+            parts.append(f"\\u{high:04x}\\u{low:04x}")
+    parts.append('"')
+    return "".join(parts)
+
+
+def _json_value(value: object) -> str:
+    """Return one note value (a string, int, bool or None) as JSON.
+
+    Raises:
+        TypeError: For any other kind of value.
+
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return _json_string(value)
+    message = f"a status note holds strings, ints, bools and None, not {value!r}"
+    raise TypeError(message)
+
+
+def dumps(note: Note) -> str:
+    """Return ``note`` as a JSON object (the same text ``json.dumps`` gives)."""
+    items = (f"{_json_string(key)}: {_json_value(value)}" for key, value in note.items())
+    return "{" + ", ".join(items) + "}"
+
+
+def write_status(path: PathLike, status: Note) -> None:
     """Write ``status`` as JSON to ``path`` atomically.
 
     The JSON goes to a temp file in the same directory, is flushed and
     fsynced, then renamed over ``path``; the directory is fsynced too. A
     reader therefore sees either the old file or the whole new one, never
     half a note.
+
+    Raises:
+        OSError: If the note cannot be written.
+        TypeError: If a value is not a string, int, bool or None.
+
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(dict(status), f)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(path)
-    fd = os.open(path.parent, os.O_RDONLY)
+    target = os.fspath(path)
+    folder = os.path.dirname(target) or "."
+    os.makedirs(folder, exist_ok=True)
+    tmp = f"{target}.tmp-{os.getpid()}"
+    data = dumps(status).encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, LOG_MODE)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, target)
+    fd = os.open(folder, os.O_RDONLY)
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
-
-
-class _Signallable(Protocol):
-    """Anything that can be sent a signal, such as a ``subprocess.Popen``."""
-
-    def send_signal(self, sig: int) -> None:
-        """Send ``sig`` to the process."""
-        ...
 
 
 class _Forwarder:
@@ -75,7 +154,7 @@ class _Forwarder:
 
     def __init__(self) -> None:
         """Start with no child and no pending signals."""
-        self.child: _Signallable | None = None
+        self.child: int | None = None
         self.pending: list[int] = []
 
     def handle(self, signum: int, _frame: FrameType | None) -> None:
@@ -85,9 +164,9 @@ class _Forwarder:
         else:
             self.send(signum)
 
-    def adopt(self, child: _Signallable) -> None:
-        """Take charge of ``child`` and deliver any signals that came early."""
-        self.child = child
+    def adopt(self, pid: int) -> None:
+        """Take charge of the child ``pid`` and deliver any signals that came early."""
+        self.child = pid
         for signum in self.pending:
             self.send(signum)
         self.pending.clear()
@@ -95,31 +174,88 @@ class _Forwarder:
     def send(self, signum: int) -> None:
         """Send ``signum`` to the child, ignoring a child that has already gone.
 
-        ``Popen.send_signal`` checks whether the child has been reaped, so a
-        signal is never sent to a pid that now belongs to someone else.
+        The minder forgets the child (``child = None``) as soon as it has
+        reaped it, so a late signal is never sent to a pid that now belongs
+        to someone else.
         """
         if self.child is not None:
-            with contextlib.suppress(OSError):
-                self.child.send_signal(signum)
+            try:
+                os.kill(self.child, signum)
+            except OSError:
+                pass
 
 
-def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
-    """Parse the minder's command line."""
-    parser = argparse.ArgumentParser(prog="python -m pyscheduler.minder")
-    parser.add_argument("--status", required=True, type=Path)
-    parser.add_argument("--stdout", required=True, type=Path)
-    parser.add_argument("--stderr", type=Path)
-    parser.add_argument("command", nargs="+")
-    return parser.parse_args(argv)
+class MinderArgs:
+    """The minder's command line, read.
+
+    Attributes:
+        status: Where to write the status note.
+        stdout: The log file for the child's stdout.
+        stderr: The log file for its stderr, or None to share stdout's.
+        command: The child's command and arguments.
+
+    """
+
+    def __init__(self, status: str, stdout: str, stderr: str | None, command: list[str]) -> None:
+        """Hold the parsed options."""
+        self.status = status
+        self.stdout = stdout
+        self.stderr = stderr
+        self.command = command
 
 
-def _open_log(path: Path) -> IO[bytes]:
-    """Open a log file for appending, creating its directory."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path.open("ab")
+def _usage(problem: str) -> None:
+    """Print the usage and ``problem`` to stderr, then exit 2.
+
+    Raises:
+        SystemExit: Always, with code 2.
+
+    """
+    sys.stderr.write(f"{USAGE}\nminder: error: {problem}\n")
+    raise SystemExit(USAGE_EXIT)
 
 
-def _start_error(status_path: Path, message: str) -> int:
+def parse_args(argv: list[str] | None = None) -> MinderArgs:
+    """Read ``--status PATH --stdout PATH [--stderr PATH] -- ARGV...`` (``argv`` or ``sys.argv``).
+
+    The options come in any order, each once, and every word after ``--``
+    belongs to the command (which must not be empty).
+
+    Raises:
+        SystemExit: With code 2 for a bad command line (after printing the usage).
+
+    """
+    words = list(sys.argv[1:] if argv is None else argv)
+    options: dict[str, str] = {}
+    while words and words[0] != "--":
+        flag = words.pop(0)
+        if flag not in _OPTIONS:
+            _usage(f"unknown option {flag!r}")
+        if flag in options:
+            _usage(f"{flag} given twice")
+        if not words:
+            _usage(f"{flag} needs a value")
+        options[flag] = words.pop(0)
+    if not words:
+        _usage("the command must follow --")
+    command = words[1:]
+    for required in ("--status", "--stdout"):
+        if required not in options:
+            _usage(f"{required} is required")
+    if not command:
+        _usage("no command given after --")
+    return MinderArgs(options["--status"], options["--stdout"], options.get("--stderr"), command)
+
+
+def _open_log(path: str) -> int:
+    """Open a log file for appending (creating its folder) and return its descriptor."""
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    return os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, LOG_MODE)
+
+
+def _start_error(status_path: str, message: str) -> int:
     """Write a note saying the child never started, and return 127."""
     now = utc_now()
     write_status(
@@ -135,13 +271,31 @@ def _start_error(status_path: Path, message: str) -> int:
     return START_ERROR_EXIT
 
 
+def _spawn(command: list[str], out: int, err: int | None) -> int:
+    """Start ``command`` (searched on ``PATH``) with stdin from /dev/null; return its pid.
+
+    Raises:
+        OSError: If it cannot be started.
+
+    """
+    actions = [
+        (os.POSIX_SPAWN_OPEN, 0, os.devnull, os.O_RDONLY, 0),
+        (os.POSIX_SPAWN_DUP2, out, 1),
+        (os.POSIX_SPAWN_DUP2, out if err is None else err, 2),
+    ]
+    return os.posix_spawnp(
+        command[0], command, os.environ, file_actions=actions, setsigdef=RESET_SIGNALS
+    )
+
+
+def _wait(pid: int) -> int:
+    """Wait for ``pid`` and return its exit code, or minus the signal that killed it."""
+    _, status = os.waitpid(pid, 0)  # retried by Python if a signal interrupts it
+    return os.waitstatus_to_exitcode(status)
+
+
 def _run(
-    command: list[str],
-    status_path: Path,
-    out: IO[bytes],
-    err: IO[bytes] | None,
-    *,
-    restore_signals: bool,
+    command: list[str], status_path: str, out: int, err: int | None, *, restore_signals: bool
 ) -> int:
     """Start the child, wait for it with signals forwarded, and write the status.
 
@@ -152,21 +306,13 @@ def _run(
     previous = {sig: signal.signal(sig, forwarder.handle) for sig in FORWARDED_SIGNALS}
     try:
         started_at = utc_now()
-        write_status(
-            status_path.with_name(f"{status_path.name}.pid"),
-            {"pid": os.getpid(), "started_at": started_at},
-        )
+        write_status(f"{status_path}.pid", {"pid": os.getpid(), "started_at": started_at})
         try:
-            child = subprocess.Popen(  # noqa: S603
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=out,
-                stderr=subprocess.STDOUT if err is None else err,
-            )
+            pid = _spawn(command, out, err)
         except OSError as exc:
             return _start_error(status_path, str(exc))
-        forwarder.adopt(child)
-        returncode = child.wait()
+        forwarder.adopt(pid)
+        returncode = _wait(pid)
         # The child is reaped: late signals are now just noted, never sent to a
         # pid that may belong to someone else, and they cannot kill us before
         # the note is written.
@@ -188,7 +334,7 @@ def _run(
     return SIGNAL_EXIT_BASE + signum if signum is not None else returncode
 
 
-def main(argv: Sequence[str] | None = None, *, restore_signals: bool = True) -> int:
+def main(argv: list[str] | None = None, *, restore_signals: bool = True) -> int:
     """Run the minder and return its exit code.
 
     The code is the child's exit code, ``128 + n`` if signal ``n`` killed
@@ -196,18 +342,26 @@ def main(argv: Sequence[str] | None = None, *, restore_signals: bool = True) -> 
     could not be opened. ``restore_signals`` puts the caller's SIGTERM and
     SIGINT handlers back afterwards; the CLI passes false.
     """
-    args = _parse(argv)
-    status_path: Path = args.status
-    with contextlib.suppress(OSError):  # best effort; write_status tries again
-        status_path.parent.mkdir(parents=True, exist_ok=True)
-    stderr_path: Path | None = args.stderr
-    with contextlib.ExitStack() as stack:
+    args = parse_args(argv)
+    folder = os.path.dirname(args.status)
+    if folder:
+        try:  # best effort; write_status tries again
+            os.makedirs(folder, exist_ok=True)
+        except OSError:
+            pass
+    opened: list[int] = []
+    try:
         try:
-            out = stack.enter_context(_open_log(args.stdout))
-            err = None if stderr_path is None else stack.enter_context(_open_log(stderr_path))
+            opened.append(_open_log(args.stdout))
+            if args.stderr is not None:
+                opened.append(_open_log(args.stderr))
         except OSError as exc:
-            return _start_error(status_path, f"cannot open log: {exc}")
-        return _run(list(args.command), status_path, out, err, restore_signals=restore_signals)
+            return _start_error(args.status, f"cannot open log: {exc}")
+        err = opened[1] if len(opened) > 1 else None
+        return _run(args.command, args.status, opened[0], err, restore_signals=restore_signals)
+    finally:
+        for fd in opened:
+            os.close(fd)
 
 
 if __name__ == "__main__":

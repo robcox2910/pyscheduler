@@ -48,19 +48,6 @@ def wait_for(path: Path) -> None:
         time.sleep(0.01)
 
 
-class GoneChild:
-    """A stand-in child whose process has already disappeared."""
-
-    def __init__(self) -> None:
-        """Start with no signals sent."""
-        self.sent: list[int] = []
-
-    def send_signal(self, sig: int) -> None:
-        """Record the signal, then fail as a vanished process would."""
-        self.sent.append(sig)
-        raise ProcessLookupError
-
-
 class TestMinderProcess:
     """The minder run as `python -m pyscheduler.minder`."""
 
@@ -258,18 +245,18 @@ class TestForwarder:
         assert forwarder.pending == [signal.SIGTERM]
         child = subprocess.Popen(["sleep", "5"])  # noqa: S607
         try:
-            forwarder.adopt(child)
+            forwarder.adopt(child.pid)
             assert child.wait(timeout=RUN_TIMEOUT_SECONDS) == -signal.SIGTERM
         finally:
             child.kill()
         assert forwarder.pending == []
 
     def test_gone_child_is_ignored(self) -> None:
-        """A child that has gone (send_signal raises) is ignored, and nothing is queued."""
+        """A child that has gone (``kill`` fails) is ignored, and nothing is queued."""
         forwarder = _Forwarder()
         forwarder.send(signal.SIGTERM)  # no child yet: nothing happens
-        child = GoneChild()
-        forwarder.adopt(child)
+        child = subprocess.Popen(["true"])  # noqa: S607
+        child.wait(timeout=RUN_TIMEOUT_SECONDS)  # reaped: its pid is gone
+        forwarder.adopt(child.pid)
         forwarder.handle(signal.SIGTERM, None)
-        assert child.sent == [signal.SIGTERM]
         assert forwarder.pending == []

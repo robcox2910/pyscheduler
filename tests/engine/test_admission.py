@@ -220,3 +220,17 @@ class TestReadyQueue:
         adm.release(DB)
         assert ids(q.take_startable(adm)) == ["d1"]
         assert "d2" in q
+
+
+class TestTakeLimit:
+    """``take_startable`` can stop after a number of runs (the pump's batch)."""
+
+    def test_limit_stops_early(self) -> None:
+        """At most ``limit`` runs start; the rest stay queued, best first next time."""
+        adm = Admission(9, {})
+        q = ReadyQueue()
+        for i in range(THREE):
+            q.push(make_run(f"r{i}", i), Criticality.NORMAL, NO_NEEDS)
+        assert ids(q.take_startable(adm, limit=TWO)) == ["r0", "r1"]
+        assert adm.running == TWO
+        assert ids(q.take_startable(adm, limit=TWO)) == ["r2"]

@@ -152,23 +152,31 @@ class ReadyQueue:
         return self._live.pop(run_id, None) is not None
 
     def take_startable(
-        self, admission: Admission, *, force: frozenset[str] = frozenset()
+        self,
+        admission: Admission,
+        *,
+        force: frozenset[str] = frozenset(),
+        limit: int | None = None,
     ) -> list[Run]:
         """Start every queued run that fits, best first, acquiring as it goes.
 
         Runs that do not fit are skipped and stay queued; later runs may
         still start. Run ids in ``force`` go to the front of the line
-        but must still fit.
+        but must still fit. With ``limit``, stop once that many have
+        started (the rest wait, in order, for the next call).
         """
         started: list[Run] = []
+        room = limit if limit is not None else len(self._live)
         tried: set[str] = set()
         queued = [self._live.get(rid) for rid in force]
         forced: list[_Entry] = sorted((e for e in queued if e is not None), key=_entry_key)
         for entry in forced:
+            if len(started) >= room:
+                break
             tried.add(entry.run.run_id)
             self._try(entry, admission, started)
         skipped: list[tuple[tuple[int, float, str], int]] = []
-        while self._heap and admission.fits({}):
+        while self._heap and admission.fits({}) and len(started) < room:
             key, seq = heapq.heappop(self._heap)
             entry = self._live.get(key[2])
             if entry is None or entry.seq != seq:
