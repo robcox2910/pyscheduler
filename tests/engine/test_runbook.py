@@ -11,6 +11,7 @@ T0 = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 SEQ_THREE = 3
 SEQ_FIVE = 5
 EVICTED_COUNT = 2
+FAILED_COPIES = 2
 
 
 def make_run(
@@ -181,7 +182,7 @@ class TestRunBook:
         }
         assert book.published_runs(job="zzz") == []
         book.publish(replace(old, job="a", state=RunState.FAILED))
-        assert len(book.published_runs(job="a", state=RunState.FAILED)) == EVICTED_COUNT
+        assert len(book.published_runs(job="a", state=RunState.FAILED)) == FAILED_COPIES
 
     def test_evict(self) -> None:
         """Eviction drops old final runs from every index and view."""
@@ -206,3 +207,38 @@ class TestRunBook:
         assert book.get(new_done.run_id) == new_done
         assert book.published_runs(run_date=DAY, job="a") == [old_open]
         assert book.evict_final_before(date(2026, 10, 20)) == 0
+
+    def test_reopened_run_returns_to_indexes(self) -> None:
+        """A final run reopened comes back to open, active and overlap views."""
+        book = RunBook()
+        done = replace(make_run(), state=RunState.FAILED)
+        book.put(done)
+        assert book.open_runs() == []
+        sched = replace(done, state=RunState.SCHEDULED)
+        book.put(sched)
+        assert book.open_runs() == [sched]
+        queued = replace(done, state=RunState.QUEUED)
+        book.put(queued)
+        assert book.active_for("a") == [queued]
+        waiting = replace(done, state=RunState.WAITING, reason=OVERLAP_REASON)
+        book.put(waiting)
+        assert book.active_for("a") == []
+        assert book.overlap_waiting("a", DAY) == waiting
+
+    def test_open_and_active_sorted(self) -> None:
+        """Open and active lists come back in (scheduled_at, run_id) order."""
+        book = RunBook()
+        later = make_run(seq=1, state=RunState.RUNNING, scheduled_at=T0 + timedelta(hours=1))
+        early = make_run(seq=2, state=RunState.RUNNING)
+        book.put(later)
+        book.put(early)
+        assert book.open_runs() == [early, later]
+        assert book.active_for("a") == [early, later]
+
+    def test_evict_published_without_current(self) -> None:
+        """Final published copies with no current run are evicted too."""
+        book = RunBook()
+        orphan = replace(make_run(), state=RunState.SUCCEEDED)
+        book.publish(orphan)
+        assert book.evict_final_before(date(2026, 10, 20)) == 0
+        assert book.published(orphan.run_id) is None

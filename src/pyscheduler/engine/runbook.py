@@ -49,7 +49,12 @@ class RunBook:
     # -- current runs -------------------------------------------------
 
     def put(self, run: Run) -> None:
-        """Add ``run``, or replace the run with the same id, updating every index."""
+        """Add ``run``, or replace the run with the same id, updating every index.
+
+        The engine must keep these unique, because the indexes hold one run
+        each: ``(job, scheduled_at)`` for schedule, catch-up and backfill
+        runs, and one dependency run per ``(job, run_date)``.
+        """
         old = self._runs.get(run.run_id)
         if old is not None:
             self._unindex(old)
@@ -81,7 +86,7 @@ class RunBook:
 
     def active_for(self, job: str) -> list[Run]:
         """Return the queued or running runs of ``job``."""
-        return [self._runs[run_id] for run_id in self._active.get(job, ())]
+        return self._ordered(self._active.get(job, ()))
 
     def overlap_waiting(self, job: str, run_date: date) -> Run | None:
         """Return the run waiting for its job's previous run (the latest, if several)."""
@@ -103,7 +108,7 @@ class RunBook:
 
     def open_runs(self) -> list[Run]:
         """Return every run that is not in a final state."""
-        return [self._runs[run_id] for run_id in self._open]
+        return self._ordered(self._open)
 
     def evict_final_before(self, run_date: date) -> int:
         """Forget final runs dated before ``run_date``; return how many were removed."""
@@ -118,6 +123,10 @@ class RunBook:
             self._unindex(run)
             del self._runs[run.run_id]
             self._drop_published(run.run_id)
+        for day in [d for d in self._pub_by_date if d < run_date]:
+            for run_id in list(self._pub_by_date[day]):
+                if self._published[run_id].state in FINAL_STATES and run_id not in self._runs:
+                    self._drop_published(run_id)
         return len(doomed)
 
     # -- published views ----------------------------------------------
@@ -156,6 +165,12 @@ class RunBook:
         found.sort(key=lambda run: run.run_id)
         found.sort(key=lambda run: run.scheduled_at, reverse=True)
         return found
+
+    def _ordered(self, run_ids: Iterable[str]) -> list[Run]:
+        """Return the runs for ``run_ids`` sorted by ``(scheduled_at, run_id)``."""
+        runs = [self._runs[run_id] for run_id in run_ids]
+        runs.sort(key=lambda run: (run.scheduled_at, run.run_id))
+        return runs
 
     # -- index upkeep -------------------------------------------------
 
