@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pyscheduler.config import JobDef
-from pyscheduler.engine.base import EngineBase
+from pyscheduler.engine.base import EngineBase, EngineFailedError
 from pyscheduler.engine.clock import Cancel
 from pyscheduler.engine.launcher import AttemptHandle, AttemptResult, LaunchSpec
 from pyscheduler.engine.model import Attempt, Outcome, Run, RunState
@@ -159,7 +159,14 @@ class AttemptRunner(EngineBase):
     async def _attempt(
         self, running: Run, row: Attempt, spec: LaunchSpec | None, error: str | None
     ) -> None:
-        """Commit ``running``, launch, commit the pid, wait, then record the ending."""
+        """Commit ``running``, launch, commit the pid, wait, then record the ending.
+
+        If the pid commit fails, the engine has failed stop, but the
+        process is already running: the attempt stays tracked (task and
+        handle) until the process ends, so ``stop(kill_running=True)`` can
+        still kill it. Its ending is not recorded; recovery sorts it out.
+        """
+        task = self._attempt_tasks.get(running.run_id)
         if self.book.get(running.run_id) is not running:  # changed before our turn came
             self._attempt_tasks.pop(running.run_id, None)
             self._release(running.run_id)
@@ -178,8 +185,20 @@ class AttemptRunner(EngineBase):
             await self._finish(row, result, _Watch())
             return
         self._handles[running.run_id] = handle
+        if running.run_id in self._kill_requested:  # an operator kill came mid-launch
+            self._signal_kill(running.run_id, handle)
         row = replace(row, pid=handle.pid)
-        await self._transition([], attempts=[row])
+        try:
+            await self._transition([], attempts=[row])
+        except EngineFailedError:
+            if task is not None:
+                self._attempt_tasks[running.run_id] = task
+            try:
+                await self._idle_while(handle)
+            finally:
+                self._handles.pop(running.run_id, None)
+                self._attempt_tasks.pop(running.run_id, None)
+            raise
         watch = self._arm(running, handle)
         try:
             result = await self._idle_while(handle)
@@ -213,13 +232,29 @@ class AttemptRunner(EngineBase):
         watch.term = self.clock.call_at(self.clock.now() + job.timeout, self._guard(ring))
         return watch
 
+    def _signal_kill(self, run_id: str, handle: AttemptHandle) -> None:
+        """Ask the attempt to stop now (SIGTERM), and plan SIGKILL after ``kill_grace``."""
+        handle.terminate()
+        when = self.clock.now() + self.config.settings.kill_grace
+        self._kill_timers[run_id] = self.clock.call_at(when, self._guard(handle.kill))
+
     async def _finish(self, row: Attempt, result: AttemptResult, watch: _Watch) -> None:
-        """Record how the attempt ended, retry or end the run, then free the slots."""
+        """Record how the attempt ended, retry or end the run, then free the slots.
+
+        A killed attempt never retries, and neither does one whose job was
+        removed or disabled by a reload while it ran.
+        """
         run_id = row.run_id
         killed = run_id in self._kill_requested
         self._kill_requested.discard(run_id)
+        actor = self._kill_actors.pop(run_id, None)
+        timer = self._kill_timers.pop(run_id, None)
+        if timer is not None:
+            timer.cancel()
         self._attempt_tasks.pop(run_id, None)
         outcome, reason = classify(result, timed_out=watch.timed_out, killed=killed)
+        if outcome is Outcome.KILLED and actor is not None:
+            reason = f"killed by {actor}"
         now = self.clock.now()
         ended = replace(
             row,
@@ -239,8 +274,8 @@ class AttemptRunner(EngineBase):
             return
         job = self.config.jobs.get(run.job)
         tries = run.attempt - run.rerun
-        count = job.retries.count if job is not None else 0
-        if outcome not in _NO_RETRY and tries <= count and job is not None:
+        count = job.retries.count if job is not None and job.enabled else 0
+        if outcome not in _NO_RETRY and not killed and tries <= count and job is not None:
             delay = job.retries.delay_for(tries)
             when = now + delay
             waiting = self._changed(

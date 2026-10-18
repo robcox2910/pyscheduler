@@ -116,6 +116,35 @@ class TestFailStop:
         assert h.run("a").state is RunState.RUNNING
         assert h.run("b").state is RunState.WAITING
 
+    def test_pid_commit_fails_still_killable(
+        self, harness: MakeHarness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keep a launched attempt tracked when its pid commit fails, so stop can kill it."""
+        h = harness(CHAIN)
+        h.launcher.plan("a", FakeResult(duration=timedelta(hours=4)))
+        real = h.store.apply
+
+        def apply(batch: Batch) -> None:
+            """Fail the commit that records the pid."""
+            if any(attempt.pid is not None for attempt in batch.attempts):
+                raise OSError(DISK_FULL)
+            real(batch)
+
+        monkeypatch.setattr(h.store, "apply", apply)
+
+        async def body() -> None:
+            """Launch ``a``, then stop with kill."""
+            await h.advance_to(AT_1830)
+            assert isinstance(h.engine.error, OSError)
+            assert "a.2026-10-19.1" in h.engine._attempt_tasks
+            assert "a.2026-10-19.1" in h.launcher.running
+            await h.engine.stop(kill_running=True)
+
+        h.run_engine(body)
+        assert h.launcher.running == {}
+        assert h.engine._handles == {}
+        assert h.engine._attempt_tasks == {}
+
     def test_timer_callback_error_fails_engine(
         self, harness: MakeHarness, monkeypatch: pytest.MonkeyPatch
     ) -> None:

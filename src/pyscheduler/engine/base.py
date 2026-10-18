@@ -39,7 +39,7 @@ from pyscheduler.engine.clock import Cancel, Clock
 from pyscheduler.engine.launcher import AttemptHandle, Launcher
 from pyscheduler.engine.model import Attempt, Event, Run, RunState
 from pyscheduler.engine.runbook import RunBook
-from pyscheduler.store import Batch, Store, StoreWriter
+from pyscheduler.store import Batch, ConfigRecord, Store, StoreWriter
 
 ACTOR = "scheduler"
 """The actor named on events the engine itself records."""
@@ -103,6 +103,8 @@ class EngineBase(ABC):
         self._needs: dict[str, Mapping[str, int]] = {}
         self._force: set[str] = set()
         self._kill_requested: set[str] = set()
+        self._kill_actors: dict[str, str] = {}
+        self._kill_timers: dict[str, Cancel] = {}
         self._retry_timers: dict[str, Cancel] = {}
         self._held: set[str] = set()
         self._stopping = False
@@ -174,7 +176,7 @@ class EngineBase(ABC):
             "failing stop" if first else "already stopped",
             ", ".join(ids) or "none",
             exc,
-            exc_info=exc,
+            exc_info=exc if first else None,  # the traceback once; later ones repeat it
         )
         for run_id in ids:
             published = self.book.published(run_id)
@@ -215,6 +217,7 @@ class EngineBase(ABC):
         attempts: Iterable[Attempt] = (),
         events: Iterable[Event] = (),
         engine: Mapping[str, str] | None = None,
+        configs: Iterable[ConfigRecord] = (),
     ) -> None:
         """Put ``changes`` in the book, make them durable, publish them, then notify."""
         self._busy += 1
@@ -226,6 +229,7 @@ class EngineBase(ABC):
                 attempts=list(attempts),
                 events=list(events),
                 engine=dict(engine or {}),
+                configs=list(configs),
             )
             ids = [run.run_id for run in changes] + [a.run_id for a in batch.attempts]
             try:
@@ -263,7 +267,12 @@ class EngineBase(ABC):
             )
         self._flush_soon()
 
-    async def _flush(self, *, engine: Mapping[str, str] | None = None) -> None:
+    async def _flush(
+        self,
+        *,
+        engine: Mapping[str, str] | None = None,
+        configs: Iterable[ConfigRecord] = (),
+    ) -> None:
         """Commit the tray (with the book's current copy of each run), then start what fits.
 
         The tray is emptied before the first ``await``, so the order of
@@ -272,8 +281,9 @@ class EngineBase(ABC):
         ids, self._staged = list(self._staged), {}
         events, self._staged_events = self._staged_events, []
         runs = [run for run_id in ids if (run := self.book.get(run_id)) is not None]
-        if runs or events or engine:
-            await self._transition(runs, events=events, engine=engine)
+        configs = list(configs)
+        if runs or events or engine or configs:
+            await self._transition(runs, events=events, engine=engine, configs=configs)
         self._pump()
 
     def _flush_soon(self) -> None:
@@ -330,6 +340,15 @@ class EngineBase(ABC):
         self.ready.push(queued, job.criticality, job.pools)
         return queued
 
+    def _unqueue(self, run_id: str) -> None:
+        """Take ``run_id`` out of the ready queue, the force list and its retry wait."""
+        self.ready.remove(run_id)
+        self._release(run_id)
+        self._force.discard(run_id)
+        timer = self._retry_timers.pop(run_id, None)
+        if timer is not None:
+            timer.cancel()
+
     # -- parts provided by the other engine modules ----------------------
 
     @abstractmethod
@@ -343,3 +362,11 @@ class EngineBase(ABC):
     @abstractmethod
     def _reevaluate(self, job_names: Iterable[str]) -> None:
         """Re-check the open runs of ``job_names`` and of their dependents."""
+
+    @abstractmethod
+    def _signal_kill(self, run_id: str, handle: AttemptHandle) -> None:
+        """Ask the attempt to stop now (SIGTERM), and plan SIGKILL after ``kill_grace``."""
+
+    @abstractmethod
+    def _restart_firings(self) -> None:
+        """Rebuild the firing heap from now (after a reload)."""

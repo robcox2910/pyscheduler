@@ -14,9 +14,11 @@ State lives in memory (the run book) and is mirrored to the store
 write-ahead: a change is durable before it is shown or acted on.
 
 The work is split over a few modules: ``base`` (shared state and the
-write-ahead rule), ``creation`` (runs, dependencies, overlap) and
-``attempts`` (launching, timeouts, retries). ``Engine`` puts them
-together with the firing task and the pump that starts queued runs.
+write-ahead rule), ``creation`` (runs, dependencies, overlap),
+``attempts`` (launching, timeouts, retries), ``actions`` (operator
+actions on runs) and ``reload`` (trigger, backfill, reload). ``Engine``
+puts them together with the firing task and the pump that starts
+queued runs.
 """
 
 import heapq
@@ -29,9 +31,9 @@ from pyscheduler.config import Config
 from pyscheduler.engine.attempts import AttemptRunner
 from pyscheduler.engine.base import EngineFailedError, logger
 from pyscheduler.engine.clock import Clock
-from pyscheduler.engine.creation import RunCreation
 from pyscheduler.engine.launcher import Launcher
 from pyscheduler.engine.model import RunState, Trigger
+from pyscheduler.engine.reload import ConfigReload
 from pyscheduler.schedule.firings import Firing, next_firing
 from pyscheduler.store import Store
 
@@ -44,7 +46,7 @@ JUST_BEFORE = timedelta(microseconds=1)
 type _Due = tuple[datetime, str, Firing]
 
 
-class Engine(RunCreation, AttemptRunner):
+class Engine(ConfigReload, AttemptRunner):
     """Run jobs on time, in dependency order, within the slots, durably.
 
     Args:
@@ -71,6 +73,8 @@ class Engine(RunCreation, AttemptRunner):
         )
         self._firing_task: Task[None] | None = None
         self._firings_after: datetime | None = None
+        self._firing_asleep = False
+        self._firings_stale = False
         self._stopped = False
 
     async def start(self) -> None:
@@ -112,9 +116,10 @@ class Engine(RunCreation, AttemptRunner):
         if self._firing_task is not None:
             self._firing_task.cancel()
             await _quietly(self._firing_task)
-        for timer in self._retry_timers.values():
-            timer.cancel()
-        self._retry_timers.clear()
+        for timers in (self._retry_timers, self._kill_timers):
+            for timer in timers.values():
+                timer.cancel()
+            timers.clear()
         attempts = list(self._attempt_tasks.items())
         for run_id, task in attempts:
             handle = self._handles.get(run_id)
@@ -125,8 +130,12 @@ class Engine(RunCreation, AttemptRunner):
                 task.cancel()
         for _, task in attempts:
             await _quietly(task)
-        while self._tasks:  # flushes, including any the attempts above started
-            await _quietly(next(iter(self._tasks)))
+        # Flushes, including any the attempts above started. A finished task
+        # leaves ``_tasks`` in a done callback that may not have run yet, so
+        # only unfinished ones are awaited (awaiting a done one never yields).
+        while pending := [task for task in self._tasks if not task.done()]:
+            for task in pending:
+                await _quietly(task)
 
     # -- the firing task -------------------------------------------------
 
@@ -153,8 +162,17 @@ class Engine(RunCreation, AttemptRunner):
         """
         try:
             heap = self._first_firings()
-            while heap and not self._stopping:
+            while not self._stopping:
+                if self._firings_stale:  # a reload came while we were busy
+                    self._firings_stale = False
+                    heap = self._first_firings()
+                if not heap:
+                    return
+                self._firing_asleep = True
                 await self.clock.sleep_until(heap[0][0])
+                # Not in a ``finally``: a task cancelled by a reload must not
+                # touch the flag, which belongs to its replacement by then.
+                self._firing_asleep = False
                 if self._stopping:
                     return
                 self._busy += 1
@@ -168,6 +186,22 @@ class Engine(RunCreation, AttemptRunner):
             return  # already recorded by _fail
         except Exception as exc:  # noqa: BLE001 -- routed to the fail path
             self._fail(exc, ())
+
+    def _restart_firings(self) -> None:
+        """Rebuild the firing heap from now, for the config in force.
+
+        A firing task asleep (or finished) is replaced by a new one; one
+        busy creating runs rebuilds its heap when it is done.
+        """
+        task = self._firing_task
+        if task is None or self._stopping:
+            return
+        self._firings_after = None
+        if self._firing_asleep or task.done():
+            task.cancel()
+            self._firing_task = pynet.loop.spawn(self._fire_loop(), name="engine-firings")
+        else:
+            self._firings_stale = True
 
     def _fire_due(self, heap: list[_Due]) -> datetime | None:
         """Create the runs of every firing due now; return the latest instant handled."""

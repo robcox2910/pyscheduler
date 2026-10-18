@@ -15,6 +15,7 @@ from collections import deque
 from collections.abc import Iterable
 from datetime import date, datetime
 
+from pyscheduler.calendars import BusinessCalendar
 from pyscheduler.config import JobDef, Overlap
 from pyscheduler.engine.base import EngineBase
 from pyscheduler.engine.deps import Verdict, evaluate
@@ -36,6 +37,23 @@ _VERDICT_STATES = {
 }
 
 
+def downstream_date(upstream_date: date, offset: int, calendar: BusinessCalendar) -> date | None:
+    """Return the run date ``R`` whose dependency with ``offset`` points at ``upstream_date``.
+
+    ``R`` is the date with ``calendar.shift(R, offset) == upstream_date``,
+    or ``None`` if there is none (for example, the upstream date is not a
+    business day of ``calendar``).
+    """
+    if not offset:
+        return upstream_date
+    try:
+        run_date = calendar.shift(upstream_date, -offset)
+        back = calendar.shift(run_date, offset)
+    except ValueError:
+        return None
+    return run_date if back == upstream_date else None
+
+
 def _order(run: Run) -> tuple[date, datetime, str]:
     """Return the order runs of one job are looked at in: run date, due time, id."""
     return (run.run_date, run.scheduled_at, run.run_id)
@@ -50,8 +68,8 @@ class RunCreation(EngineBase):
         """Create a run of ``job`` (and its dependency-only downstream runs), staged.
 
         A schedule, catch-up or backfill run is unique by ``(job,
-        scheduled_at)`` and a dependency run by ``(job, run_date)``; a
-        duplicate returns ``None``. Manual runs are always new. The new
+        scheduled_at)``; a dependency run is made only if the job has no
+        run at all for ``run_date``. A duplicate returns ``None``. Manual runs are always new. The new
         runs are evaluated at once, so the returned copy may already be
         queued, waiting or even cancelled by the overlap rule.
         """
@@ -74,8 +92,10 @@ class RunCreation(EngineBase):
         """Stage a new ``scheduled`` run unless one already exists for that slot."""
         if trigger in _SCHEDULED_TRIGGERS and self.book.by_scheduled(job, scheduled_at):
             return None
-        if trigger is Trigger.DEPENDENCY and self.book.dependency_run(job, run_date):
-            return None
+        if trigger is Trigger.DEPENDENCY and (
+            self.book.dependency_run(job, run_date) or self.book.runs_for(job, run_date)
+        ):
+            return None  # one run per run date, even if a backfill or trigger made it
         now = self.clock.now()
         run = Run(
             run_id=make_run_id(job, run_date, self.book.next_seq(job, run_date)),
@@ -113,15 +133,9 @@ class RunCreation(EngineBase):
             for dep in down.depends_on:
                 if dep.job != upstream.job:
                     continue
-                run_date = upstream.run_date
-                if dep.run_date_offset:
-                    try:
-                        run_date = calendar.shift(upstream.run_date, -dep.run_date_offset)
-                        back = calendar.shift(run_date, dep.run_date_offset)
-                    except ValueError:
-                        continue
-                    if back != upstream.run_date:
-                        continue
+                run_date = downstream_date(upstream.run_date, dep.run_date_offset, calendar)
+                if run_date is None:
+                    continue
                 run = self._new_run(name, run_date, upstream.scheduled_at, Trigger.DEPENDENCY)
                 if run is not None:
                     made.append(run)

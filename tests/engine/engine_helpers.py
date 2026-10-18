@@ -1,6 +1,7 @@
 """The engine test harness: a config, a store, a fake clock, a fake launcher, an engine."""
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -39,7 +40,12 @@ class Harness:
     engine: Engine
 
     async def advance_to(self, when: datetime) -> None:
-        """Move the clock to ``when`` one timer at a time, settling the engine after each."""
+        """Move the clock to ``when`` one timer at a time, settling the engine after each.
+
+        The engine settles first too, so work an action just started (an
+        attempt being launched) has set its timers before time moves.
+        """
+        await self.engine.settle()
         for _ in range(MAX_STEPS):
             due = self.clock.next_due()
             if due is None or due > when:
@@ -69,6 +75,15 @@ class Harness:
                 await self.engine.stop()
 
         pynet.loop.run(main())
+
+    @contextmanager
+    def reopened(self) -> Generator[Store]:
+        """Open the (stopped) engine's store again for reading, closing it afterwards."""
+        store = Store.open(self.tmp_path / "state", sync=False)
+        try:
+            yield store
+        finally:
+            store.close()
 
     def run(self, job: str, run_date: date = TODAY) -> Run:
         """Return the latest run of ``job`` for ``run_date`` (it must exist)."""

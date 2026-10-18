@@ -28,3 +28,4 @@ something goes wrong.
 - [Pools and Limits (Only Two Kids on the Trampoline)](concepts/pools-and-limits.md)
 - [Retries and Backoff (Knock Again, but Wait a Bit Longer Each Time)](concepts/retries-and-backoff.md)
 - [The Scheduler Engine (The School Timetable)](concepts/scheduler.md)
+- [Operator Actions (The Train Controller's Desk)](concepts/operator-actions.md)
