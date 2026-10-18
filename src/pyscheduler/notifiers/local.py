@@ -17,6 +17,7 @@ from pynet.process import Process, create_process
 
 from pyscheduler.config.model import NotifierDef, Settings
 from pyscheduler.notifiers.base import NotifyError, check_options
+from pyscheduler.notifiers.threads import run_notifier_io
 from pyscheduler.values import format_duration
 
 SHELL = "/bin/sh"
@@ -44,7 +45,7 @@ class LogNotifier:
         """Append the alert as a line, creating the folders if needed."""
         line = json.dumps(alert, sort_keys=True) + "\n"
         try:
-            await pynet.loop.run_in_thread(self._append, line)
+            await run_notifier_io(lambda: self._append(line))
         except OSError as exc:
             message = f"cannot write {self.path}: {exc.strerror or exc}"
             raise NotifyError(message) from exc

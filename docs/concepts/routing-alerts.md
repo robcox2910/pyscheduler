@@ -90,9 +90,13 @@ tries in all) the delivery is `dead`. One send may take only the
 notifier's `timeout` (plus a second's grace); a send that takes longer
 counts as a failed try, "send timed out after 10s".
 
-Each notifier has its own pigeonhole, so a slow one never holds up the
-others: Slack can be down for an hour while the log notifier writes every
-alert straight away.
+Each notifier has its own pigeonhole, and at most four of its letters are
+out being sent at once. The slow part (the network, the disk) runs on a
+team of eight helpers that all notifiers share, apart from the scheduler's
+own helpers. So one broken notifier never holds up the others: Slack can
+hang for an hour, tying up at most four helpers, while the log notifier
+writes every alert straight away. Several notifiers stuck at once can make
+the others wait their turn, but never the scheduler itself.
 
 Here is a tiny PyMQ queue whose postman always fails. After two tries the
 letter lands in the dead letter box:

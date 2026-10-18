@@ -2,7 +2,9 @@
 
 import http.client
 import json
+import socket
 import threading
+import time
 import urllib.request
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -26,6 +28,9 @@ SERVER_ERROR = 500
 SLOW_LIMIT_SECONDS = 3.0
 TICK_SECONDS = 0.05
 MIN_TICKS = 5
+STUCK_SENDS = 4
+STUCK_TIMEOUT = "2s"
+SHARED_THREAD_LIMIT = 0.2
 
 
 @dataclass
@@ -189,6 +194,40 @@ def test_http_timeout(tmp_path: Path, server: tuple[str, Seen]) -> None:
     elapsed = pynet.loop.run(main())
     assert 0 < elapsed < SLOW_LIMIT_SECONDS
     assert ticks >= MIN_TICKS
+
+
+def test_stuck_sends_leave_the_shared_threads_free(tmp_path: Path) -> None:
+    """Four sends to a server that never answers do not hold up the loop's helper threads.
+
+    The store writer commits on those shared threads; notifiers have a team
+    of their own, so a trivial ``run_in_thread`` still returns at once.
+    """
+    with socket.socket() as silent:
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(STUCK_SENDS * 2)
+        port = silent.getsockname()[1]
+        notifier = build(
+            tmp_path,
+            f"{{type: webhook, timeout: {STUCK_TIMEOUT}, url: 'http://127.0.0.1:{port}/x'}}",
+        )
+
+        async def main() -> float:
+            """Start the stuck sends, then time a trivial shared-thread job."""
+
+            async def one() -> None:
+                """Send once and expect the timeout."""
+                with pytest.raises(NotifyError):
+                    await notifier.send(ALERT)
+
+            sends = [pynet.loop.spawn(one(), name=f"send-{i}") for i in range(STUCK_SENDS)]
+            await pynet.loop.sleep(TICK_SECONDS * 2)
+            started = time.monotonic()
+            await pynet.loop.run_in_thread(lambda: None)
+            waited = time.monotonic() - started
+            await pynet.loop.gather(*sends)
+            return waited
+
+        assert pynet.loop.run(main()) < SHARED_THREAD_LIMIT
 
 
 @pytest.mark.parametrize(

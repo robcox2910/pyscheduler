@@ -81,8 +81,11 @@ and `telegram` post one line, `[critical] load.2026-10-19.1 failed: exit 1`.
 A web address must start with `http://` or `https://`. Anything other than
 a 2xx answer fails the delivery as `HTTP <status>`, and **a redirect is
 never followed**: a 302 is a failure, so your secrets never get forwarded
-to a place you did not choose. The post runs off to the side, so a slow
-server cannot stall the scheduler; the `timeout` ends it.
+to a place you did not choose. The post runs on the notifiers' own team
+of helper threads, never on the scheduler's, so a slow server cannot stall
+the scheduler. After `timeout` the try counts as failed and the dispatcher
+moves on; the helper thread may stay stuck a little longer, until the
+network gives up, but nobody waits for it, not even a shutdown.
 
 ### email: the letter
 

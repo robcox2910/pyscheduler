@@ -2,7 +2,8 @@
 
 Each is a postcard dropped in someone else's letterbox: we write the JSON,
 post it, and only check that the post office said "delivered" (a 2xx).
-The post runs on a helper thread so the scheduler never waits on the network.
+The post runs on one of the notifiers' own helper threads, so the scheduler
+never waits on the network.
 """
 
 import http.client
@@ -12,11 +13,11 @@ import urllib.request
 from collections.abc import Mapping
 from typing import cast
 
-import pynet.loop
 from pynet.messaging import JsonValue
 
 from pyscheduler.config.model import NotifierDef, Settings
 from pyscheduler.notifiers.base import NotifyError, check_options, text_option
+from pyscheduler.notifiers.threads import run_notifier_io
 
 TELEGRAM_API = "https://api.telegram.org"
 HTTP_SCHEMES = ("http://", "https://")
@@ -69,7 +70,7 @@ async def post_json(
 
     """
     data = json.dumps(body, sort_keys=True).encode()
-    await pynet.loop.run_in_thread(_post, url, data, headers, timeout)
+    await run_notifier_io(lambda: _post(url, data, headers, timeout))
 
 
 def _plain(definition: NotifierDef, key: str, value: str, *, spaces: bool = False) -> str:

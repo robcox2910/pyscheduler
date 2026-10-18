@@ -12,11 +12,11 @@ from collections.abc import Mapping
 from email.message import EmailMessage
 from typing import cast
 
-import pynet.loop
 from pynet.messaging import JsonValue
 
 from pyscheduler.config.model import NotifierDef, Settings
 from pyscheduler.notifiers.base import NotifyError, check_options, text_option
+from pyscheduler.notifiers.threads import run_notifier_io
 
 DEFAULT_PORT = 587
 MAX_PORT = 65535
@@ -114,7 +114,7 @@ class EmailNotifier:
         """Email the alert: subject ``[pysched <criticality>] <message>``, body its JSON."""
         try:
             mail = self._compose(alert)
-            await pynet.loop.run_in_thread(self._deliver, mail)
+            await run_notifier_io(lambda: self._deliver(mail))
         except (smtplib.SMTPException, OSError) as exc:
             raise NotifyError(str(exc) or type(exc).__name__) from exc
         except ValueError as exc:
