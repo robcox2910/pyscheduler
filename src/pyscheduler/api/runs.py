@@ -195,7 +195,7 @@ def add_run_routes(app: App, engine: Engine) -> None:
     @app.get("/api/runs")
     @guarded
     async def list_runs(request: HttpRequest) -> JsonObject:
-        """List runs, filtered by ``run_date``, ``job`` and ``state``."""
+        """List runs, filtered by ``run_date``, ``job`` and ``state``, with their latest attempt."""
         state_text = request.query.get("state")
         try:
             state = None if state_text is None else RunState(state_text)
@@ -209,7 +209,9 @@ def add_run_routes(app: App, engine: Engine) -> None:
             state=state,
             limit=query_int(request, "limit", default=DEFAULT_LIMIT, low=1, high=MAX_LIMIT),
         )
-        return {"runs": [run_json(run) for run in runs]}
+        started = [run.run_id for run in runs if run.attempt]
+        latest = await run_in_thread(engine.store.latest_attempts, started)
+        return {"runs": [run_json(run, latest.get(run.run_id), with_attempt=True) for run in runs]}
 
     @app.get("/api/runs/<run_id>")
     @guarded

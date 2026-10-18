@@ -124,8 +124,13 @@ def schedules_text(job: JobDef) -> list[JsonValue]:
     return texts
 
 
-def run_json(run: Run, latest: Attempt | None = None) -> JsonObject:
-    """Return a run as JSON; with its ``latest`` attempt, add ``duration_seconds``."""
+def run_json(run: Run, latest: Attempt | None = None, *, with_attempt: bool = False) -> JsonObject:
+    """Return a run as JSON.
+
+    With its ``latest`` attempt (or ``with_attempt``, for a run that may
+    have none), add that attempt's ``started_at``, ``ended_at`` and
+    ``duration_seconds`` (``null`` when unknown or still running).
+    """
     out: JsonObject = {
         "run_id": run.run_id,
         "job": run.job,
@@ -141,8 +146,10 @@ def run_json(run: Run, latest: Attempt | None = None) -> JsonObject:
         "updated_at": instant(run.updated_at),
         "held_from": None if run.held_from is None else run.held_from.value,
     }
-    if latest is not None:
-        out["duration_seconds"] = _attempt_seconds(latest)
+    if latest is not None or with_attempt:
+        out["started_at"] = None if latest is None else instant(latest.started_at)
+        out["ended_at"] = None if latest is None else instant(latest.ended_at)
+        out["duration_seconds"] = None if latest is None else _attempt_seconds(latest)
     return out
 
 

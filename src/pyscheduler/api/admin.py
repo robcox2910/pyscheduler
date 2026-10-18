@@ -88,11 +88,17 @@ def add_admin_routes(app: App, engine: Engine, *, reload: Reload, validate: Vali
 
     @app.get(HEALTH_PATH)
     async def health(request: HttpRequest) -> HttpResponse:
-        """Say whether the engine is working (no token needed, no details given)."""
+        """Say whether the engine is working, with its time zone and today's date there.
+
+        No token is needed, so nothing more is given (and nothing at all
+        once the engine has failed).
+        """
         del request
         if engine.error is not None:
             return json({"status": "failed"}, UNAVAILABLE)
-        return json({"status": "ok"})
+        zone = engine.config.settings.timezone
+        today = engine.clock.now().astimezone(zone).date()
+        return json({"status": "ok", "timezone": zone.key, "today": today.isoformat()})
 
     @app.post("/api/reload")
     @guarded

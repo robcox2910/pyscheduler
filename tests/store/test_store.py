@@ -130,6 +130,15 @@ class TestStore:
         assert store.events_for("") == []
         store.close()
 
+    def test_latest_attempts(self, store: Store) -> None:
+        """Return each run's newest attempt, leaving out runs with none."""
+        run, other = make_run(seq=1), make_run(seq=2)
+        first = make_attempt(run.run_id, 1, took=MINUTE, outcome=Outcome.FAILED)
+        second = make_attempt(run.run_id, 2, started_at=T0 + MINUTE)
+        store.apply(Batch(runs=[run, other], attempts=[second, first]))
+        assert store.latest_attempts([run.run_id, other.run_id]) == {run.run_id: second}
+        store.close()
+
     def test_attempt_upsert(self, store: Store) -> None:
         """Replace an attempt with the same run id and number."""
         run = make_run()

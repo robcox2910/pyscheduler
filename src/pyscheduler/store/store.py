@@ -309,6 +309,17 @@ class Store:
             attempts = [attempt_from_row(r.data) for r in records]
         return sorted(attempts, key=lambda a: a.attempt)
 
+    def latest_attempts(self, run_ids: Iterable[str]) -> dict[str, Attempt]:
+        """Return the newest attempt of each run in ``run_ids`` that has one."""
+        latest: dict[str, Attempt] = {}
+        with self._db.lock:
+            for run_id in run_ids:
+                records = self._by_index(self._attempts, "attempts_run_id", run_id)
+                attempts = [attempt_from_row(r.data) for r in records]
+                if attempts:
+                    latest[run_id] = max(attempts, key=lambda a: a.attempt)
+        return latest
+
     def events_for(self, run_id: str) -> list[Event]:
         """Return a run's events in the order they were written."""
         with self._db.lock:

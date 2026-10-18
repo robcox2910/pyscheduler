@@ -4,11 +4,12 @@ A table is a list of rows of text; ``table`` pads each column to its
 widest cell so the columns line up, like a printed timetable.
 """
 
+import unicodedata
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-__all__ = ["RUN_HEADER", "detail", "duration", "elapsed", "run_rows", "table", "text"]
+__all__ = ["RUN_HEADER", "detail", "duration", "elapsed", "run_rows", "table", "text", "width"]
 
 type JsonObject = dict[str, Any]
 
@@ -29,12 +30,17 @@ def text(value: object) -> str:
     return str(value)
 
 
+def width(cell: str) -> int:
+    """Return how many terminal columns ``cell`` takes (wide East Asian characters take 2)."""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in cell)
+
+
 def table(header: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
     """Return ``header`` and ``rows`` as aligned columns (no trailing spaces)."""
     cells = [list(header), *([text(cell) for cell in row] for row in rows)]
-    widths = [max(len(row[i]) for row in cells) for i in range(len(header))]
+    widths = [max(width(row[i]) for row in cells) for i in range(len(header))]
     lines = [
-        GAP.join(cell.ljust(width) for cell, width in zip(row, widths, strict=True))
+        GAP.join(cell + " " * (size - width(cell)) for cell, size in zip(row, widths, strict=True))
         for row in cells
     ]
     return "\n".join(line.rstrip() for line in lines)

@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pynet.loop
+from pydb.errors import PyDBError
 
 from pyscheduler.cli_commands import (
     CLIENT_COMMANDS,
@@ -50,6 +51,9 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 """How each line of the scheduler's own log looks."""
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+
+INTERRUPTED = 130
+"""The exit code for Ctrl-C before ``serve`` could take it over (128 + SIGINT)."""
 
 type AddParser = Callable[..., argparse.ArgumentParser]
 """``add_parser`` of the subcommands: add one subcommand and return its parser."""
@@ -137,17 +141,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-@contextmanager
-def _logging(level: str, file: Path | None) -> Generator[None]:
-    """Send log lines to stderr (and ``file``) while serving, then take the handlers away."""
-    root = logging.getLogger()
+def _log_handlers(file: Path | None) -> list[logging.Handler]:
+    """Return the stderr handler (and one for ``file``) with the log format.
+
+    Raises:
+        OSError: If ``file`` cannot be opened.
+
+    """
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
     if file is not None:
         handlers.append(logging.FileHandler(file, encoding="utf-8"))
     formatter = logging.Formatter(LOG_FORMAT)
-    before = root.level
     for handler in handlers:
         handler.setFormatter(formatter)
+    return handlers
+
+
+@contextmanager
+def _logging(level: str, handlers: list[logging.Handler]) -> Generator[None]:
+    """Attach ``handlers`` to the root logger at ``level`` while serving, then take them away."""
+    root = logging.getLogger()
+    before = root.level
+    for handler in handlers:
         root.addHandler(handler)
     root.setLevel(level)
     try:
@@ -160,9 +175,20 @@ def _logging(level: str, file: Path | None) -> Generator[None]:
 
 
 def _serve(args: argparse.Namespace) -> int:
-    """Run ``serve`` until it is stopped; turn its refusals into exit codes."""
+    """Run ``serve`` until it is stopped; turn its refusals into one line and an exit code.
+
+    Usage errors (2): a config with errors, an unsafe address, a busy
+    port, a bad tokens file or log file. Failures (1): the store cannot
+    be opened (locked, another layout, no folder) or the engine failed.
+    Ctrl-C before the signal handlers are hooked exits 130.
+    """
     try:
-        with _logging(args.log_level, args.log_file):
+        handlers = _log_handlers(args.log_file)
+    except OSError as exc:
+        warn(f"pysched serve: cannot open log file: {exc}")
+        return USAGE
+    try:
+        with _logging(args.log_level, handlers):
             pynet.loop.run(serve(args.file))
     except ConfigError as exc:
         for problem in exc.problems:
@@ -171,12 +197,12 @@ def _serve(args: argparse.Namespace) -> int:
     except ServiceError as exc:
         warn(f"pysched serve: {exc}")
         return USAGE
-    except (StoreSchemaError, SchedulerFailedError) as exc:
+    except (PyDBError, StoreSchemaError, SchedulerFailedError, OSError) as exc:
         warn(f"pysched serve: {exc}")
         return SERVER_ERROR
-    except OSError as exc:
-        warn(f"pysched serve: {exc}")
-        return USAGE
+    except KeyboardInterrupt:
+        warn("pysched serve: interrupted")
+        return INTERRUPTED
     return OK
 
 

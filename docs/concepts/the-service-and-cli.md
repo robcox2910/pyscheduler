@@ -21,6 +21,11 @@ customers already inside finish, then send the staff home.
    and remembers the config version if the files changed;
 4. it opens the **HTTP API** on `listen` (default `127.0.0.1:8470`).
 
+The door is actually unlocked a little early: the port is taken right
+after the store opens, so a busy port stops `serve` before any job is
+started. Until the engine is ready, every request gets
+`503 scheduler is starting`.
+
 Closing (Ctrl-C or `SIGTERM`) turns the sign round: the API stops taking
 new requests, requests already inside get 5 seconds to finish, and the
 engine stops. Jobs that are running are **not** killed: their minders
@@ -58,7 +63,10 @@ The rest send a request to the API:
 Point it at the scheduler with `--url` (or `PYSCHED_URL`) and prove who
 you are with `--token` (or `PYSCHED_TOKEN`). It answers with an **exit
 code**: `0` it worked, `1` the scheduler said no (or could not be
-reached), `2` you typed something wrong or the config has errors.
+reached, or for `serve`: the state folder is in use by another
+scheduler), `2` you typed something wrong or the config has errors.
+`status` shows today's runs, where "today" is the scheduler's date in
+its own time zone.
 
 ## Try It
 

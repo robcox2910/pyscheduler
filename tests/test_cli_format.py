@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from pyscheduler.cli_format import detail, duration, elapsed, table
+from pyscheduler.cli_format import detail, duration, elapsed, table, width
 from pyscheduler.client import ApiClient, ApiError
 
 TEN_SECONDS = 10.0
@@ -39,6 +39,15 @@ class TestTable:
             "A    BB",
             "xyz  -",
             "q    1",
+        ]
+
+    def test_wide_characters(self) -> None:
+        """Wide East Asian characters take two columns."""
+        assert width("日本") == 2 * len("日本")
+        assert table(("A", "B"), [["日本", "x"], ["ab", "y"]]).splitlines() == [
+            "A     B",
+            "日本  x",
+            "ab    y",
         ]
 
     def test_detail_without_attempts(self) -> None:

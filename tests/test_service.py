@@ -45,11 +45,11 @@ class TestServeEndToEnd:
         def body(url: str) -> int:
             """Trigger a, wait for both runs, then print the status table."""
             client = ApiClient(url, None)
-            assert client.health() == {"status": "ok"}
+            assert client.health() == {"status": "ok", "timezone": "UTC", "today": today()}
             run = client.trigger("a")["run"]
             assert run["run_id"] == f"a.{today()}.1"
             wait_for_states(client, {"a": "succeeded", "b": "succeeded"})
-            return main(["status", "--url", url, "--date", today()])
+            return main(["status", "--url", url])  # the server's today
 
         assert with_service(path, body) == 0
         out = capsys.readouterr().out

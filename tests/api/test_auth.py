@@ -92,7 +92,7 @@ class TestMiddleware:
             """Ask for the health check with no Authorization header."""
             response = await h.client.get("/api/health")
             assert response.status == OK
-            assert body_of(response)["status"] == "ok"
+            assert body_of(response) == {"status": "ok", "timezone": "UTC", "today": "2026-10-19"}
 
         h.run(body)
 

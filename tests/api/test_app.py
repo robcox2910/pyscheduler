@@ -63,6 +63,10 @@ class TestListRuns:
             assert body_of(empty)["runs"] == []
             one = await h.client.get("/api/runs", query={"limit": "1"}, headers=VIEWER)
             assert len(body_of(one)["runs"]) == 1
+            shown = {run["run_id"]: run for run in everything}
+            assert shown[EXTRACT_RUN]["started_at"] == "2026-10-19T18:30:00Z"
+            assert shown[EXTRACT_RUN]["duration_seconds"] == ONE_MINUTE_SECONDS
+            assert shown[EXTRACT_RUN]["ended_at"] == "2026-10-19T18:31:00Z"
 
         h.run(body)
 

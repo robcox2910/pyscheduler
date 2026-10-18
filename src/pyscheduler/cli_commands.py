@@ -11,7 +11,7 @@ import hashlib
 import secrets
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -27,7 +27,6 @@ from pyscheduler.cli_format import (
 from pyscheduler.client import RUN_ACTIONS, ApiClient
 from pyscheduler.config import Config, ConfigError, Problem, load_config
 from pyscheduler.schedule.forecast import forecast
-from pyscheduler.values import parse_date
 
 __all__ = ["CLIENT_COMMANDS", "OFFLINE_COMMANDS", "OK", "SERVER_ERROR", "USAGE", "local_today"]
 
@@ -93,15 +92,17 @@ def validate(args: argparse.Namespace) -> int:
 def _instant(value: str, zone: ZoneInfo, *, end: bool) -> datetime:
     """Return a ``--from``/``--to`` value as an aware instant.
 
-    A date means midnight in ``zone`` (for ``--to``: the end of that day);
-    an ISO instant without an offset is read in ``zone``.
+    A value without a time part (any ISO date form, such as
+    ``2026-10-19`` or ``20261019``) is a date: midnight in ``zone``, or
+    for ``--to`` the end of that day. Anything else is an ISO instant; one
+    without an offset is read in ``zone``.
 
     Raises:
-        ValueError: If it is neither a date nor an ISO instant.
+        ValueError: If it is neither an ISO date nor an ISO instant.
 
     """
     try:
-        day = parse_date(value)
+        day = date.fromisoformat(value)
     except ValueError:
         moment = datetime.fromisoformat(value)
         return moment if moment.tzinfo is not None else moment.replace(tzinfo=zone)
@@ -160,25 +161,30 @@ OFFLINE_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
 # -- against the server ------------------------------------------------
 
 
+def _server_today(client: ApiClient) -> str:
+    """Return today's date where the scheduler is (this machine's date for an older one)."""
+    today = client.health().get("today")
+    return today if isinstance(today, str) else local_today()
+
+
 def status(client: ApiClient, args: argparse.Namespace) -> int:
-    """Print one run date's runs: job, run id, state, attempt, started, duration."""
-    runs = client.runs(run_date=args.date or local_today(), limit=STATUS_LIMIT)["runs"]
+    """Print one run date's runs: job, run id, state, attempt, started, duration.
+
+    The run date defaults to today in the scheduler's time zone.
+    """
+    run_date = args.date or _server_today(client)
+    runs = client.runs(run_date=run_date, limit=STATUS_LIMIT)["runs"]
     rows: list[list[object]] = []
     for run in sorted(runs, key=lambda r: (r["job"], r["run_id"])):
-        started: str | None = None
-        seconds: float | None = None
-        shown = duration(None)
-        if run["attempt"]:
-            answer = client.run(run["run_id"])
-            attempts = answer["attempts"]
-            if attempts:
-                started = attempts[-1]["started_at"]
-            seconds = answer["run"].get("duration_seconds")
-            shown = duration(seconds)
-            if seconds is None and run["state"] == "running":
-                shown = duration(elapsed(started)) + "+"
+        started = run.get("started_at")
+        seconds = run.get("duration_seconds")
+        shown = duration(seconds)
+        if seconds is None and started and run["state"] == "running":
+            shown = duration(elapsed(started)) + "+"
         rows.append([run["job"], run["run_id"], run["state"], run["attempt"], started, shown])
     say(table(("JOB", "RUN", "STATE", "ATTEMPT", "STARTED", "DURATION"), rows))
+    if len(runs) >= STATUS_LIMIT:
+        warn(f"(only the newest {STATUS_LIMIT} runs of {run_date} are shown; use runs --job)")
     return OK
 
 

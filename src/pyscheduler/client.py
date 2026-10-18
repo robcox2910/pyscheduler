@@ -12,6 +12,7 @@ Example::
     print(client.run(run["run_id"])["run"]["state"])
 """
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -20,7 +21,16 @@ from typing import Any, cast
 
 from pynet.messaging import JsonValue
 
-__all__ = ["DEFAULT_TIMEOUT", "DEFAULT_URL", "ApiClient", "ApiError"]
+__all__ = [
+    "BAD_ANSWER",
+    "DEFAULT_TIMEOUT",
+    "DEFAULT_URL",
+    "RUN_ACTIONS",
+    "UNREACHABLE",
+    "ApiClient",
+    "ApiError",
+    "safe_url",
+]
 
 DEFAULT_URL = "http://127.0.0.1:8470"
 """Where the client looks for the scheduler when no URL is given."""
@@ -29,6 +39,15 @@ DEFAULT_TIMEOUT = 30.0
 """How many seconds a call may take before it gives up."""
 
 type JsonObject = dict[str, Any]
+
+UNREACHABLE = 0
+"""The ``ApiError`` status when the scheduler cannot be reached (or did not answer in time)."""
+
+BAD_ANSWER = -1
+"""The ``ApiError`` status when the answer is not HTTP with a JSON object."""
+
+REDIRECT_LOW = 300
+REDIRECT_HIGH = 400
 
 RUN_ACTIONS = (
     "rerun",
@@ -47,7 +66,9 @@ class ApiError(Exception):
     """Raised when the scheduler answers with an error, or cannot be reached.
 
     Attributes:
-        status: The HTTP status (0 when the scheduler could not be reached).
+        status: The HTTP status; ``UNREACHABLE`` (0) when the scheduler could
+            not be reached or did not answer in time, ``BAD_ANSWER`` (-1) when
+            its answer made no sense.
         message: The ``error`` text of the answer.
         problems: Config problems, for a reload or validate that failed.
 
@@ -55,10 +76,46 @@ class ApiError(Exception):
 
     def __init__(self, status: int, message: str, problems: list[JsonObject] | None = None) -> None:
         """Remember the status, the message and any problems."""
-        super().__init__(message if status == 0 else f"{status}: {message}")
+        super().__init__(message if status <= UNREACHABLE else f"{status}: {message}")
         self.status = status
         self.message = message
         self.problems = problems or []
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect, so the bearer token is never sent anywhere else."""
+
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        """Refuse every redirect (the 3xx answer then becomes an ``HTTPError``)."""
+        del args, kwargs
+
+
+_OPENER = urllib.request.build_opener(_NoRedirects)
+"""The opener every call uses: urllib's usual handlers, minus redirects."""
+
+
+def safe_url(url: str) -> str:
+    """Return ``url`` without any ``user:password@`` part (for messages)."""
+    parts = urllib.parse.urlsplit(url)
+    host = parts.netloc.rpartition("@")[2]
+    return urllib.parse.urlunsplit(parts._replace(netloc=host))
+
+
+def _http_error(exc: urllib.error.HTTPError) -> ApiError:
+    """Turn an error status (or a refused redirect) into an ``ApiError``."""
+    try:
+        with exc:
+            answer = _decode(exc.read(), strict=False)
+    except OSError, http.client.HTTPException:
+        answer = {}
+    if REDIRECT_LOW <= exc.code < REDIRECT_HIGH:
+        target = safe_url(exc.headers.get("Location") or "elsewhere")
+        msg = f"the scheduler redirected to {target}; not followed (the token stays here)"
+        return ApiError(exc.code, msg)
+    message = str(answer.get("error") or exc.reason or "error")
+    problems = answer.get("problems")
+    listed = cast("list[JsonObject]", problems) if isinstance(problems, list) else None
+    return ApiError(exc.code, message, listed)
 
 
 def _quote(segment: str) -> str:
@@ -89,7 +146,9 @@ class ApiClient:
 
         Raises:
             ApiError: For an error status (with the answer's ``error`` and
-                ``problems``), or status 0 if the scheduler cannot be reached.
+                ``problems``), a refused redirect (its 3xx status),
+                ``UNREACHABLE`` if the scheduler cannot be reached or times
+                out, or ``BAD_ANSWER`` if the answer is not a JSON object.
 
         """
         target = self.url + path
@@ -97,7 +156,8 @@ class ApiClient:
         if params:
             target += "?" + urllib.parse.urlencode(params)
         if not target.startswith(("http://", "https://")):
-            raise ApiError(0, f"the scheduler URL must start with http:// or https://: {self.url}")
+            msg = f"the scheduler URL must start with http:// or https://: {safe_url(self.url)}"
+            raise ApiError(UNREACHABLE, msg)
         headers = {"Accept": "application/json"}
         data = None
         if body is not None or method != "GET":
@@ -106,19 +166,29 @@ class ApiClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         request = urllib.request.Request(target, data=data, headers=headers, method=method)  # noqa: S310 -- checked above
+        where = safe_url(self.url)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
+            with _OPENER.open(request, timeout=self.timeout) as response:
                 return _decode(response.read())
         except urllib.error.HTTPError as exc:
-            with exc:
-                answer = _decode(exc.read(), strict=False)
-            message = str(answer.get("error") or exc.reason or "error")
-            problems = answer.get("problems")
-            listed = cast("list[JsonObject]", problems) if isinstance(problems, list) else None
-            raise ApiError(exc.code, message, listed) from None
-        except (urllib.error.URLError, OSError) as exc:
-            del exc
-            raise ApiError(0, f"cannot reach scheduler at {self.url}") from None
+            raise _http_error(exc) from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise self._timed_out(where) from None
+            raise ApiError(UNREACHABLE, f"cannot reach scheduler at {where}") from None
+        except TimeoutError:
+            raise self._timed_out(where) from None
+        except http.client.HTTPException as exc:
+            msg = f"bad answer from scheduler at {where}: {type(exc).__name__}"
+            raise ApiError(BAD_ANSWER, msg) from None
+        except OSError:
+            raise ApiError(UNREACHABLE, f"cannot reach scheduler at {where}") from None
+
+    def _timed_out(self, where: str) -> ApiError:
+        """Return the error for a call that took longer than ``timeout``."""
+        return ApiError(
+            UNREACHABLE, f"scheduler at {where} did not answer within {self.timeout:g}s"
+        )
 
     # -- reads -----------------------------------------------------------
 
@@ -225,5 +295,5 @@ def _decode(raw: bytes, *, strict: bool = True) -> JsonObject:
     if isinstance(value, dict):
         return cast("JsonObject", value)
     if strict:
-        raise ApiError(0, "the scheduler did not answer with a JSON object")
+        raise ApiError(BAD_ANSWER, "the scheduler did not answer with a JSON object")
     return {}

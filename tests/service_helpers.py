@@ -114,12 +114,18 @@ def idle(url: str) -> None:
     del url
 
 
-def reachable(client: ApiClient) -> bool:
-    """Return whether the scheduler answers ``/api/health`` (status 0 means nobody is there)."""
+def reachable(client: ApiClient, *, allow_errors: bool = False) -> bool:
+    """Return whether the scheduler answers ``/api/health`` (status 0 means nobody is there).
+
+    An error answer (such as 503 once the engine failed) is raised, or
+    with ``allow_errors`` counts as reachable.
+    """
     try:
         client.health()
     except ApiError as exc:
         if exc.status != 0:
+            if allow_errors:
+                return True
             raise
         return False
     return True
