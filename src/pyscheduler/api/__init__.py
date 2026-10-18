@@ -1,4 +1,4 @@
-"""The JSON HTTP API: bearer-token auth in front of the engine's reads and actions."""
+"""The JSON HTTP API: one access layer (tokens, sessions) in front of the engine."""
 
 from pyscheduler.api.admin import Reload, Validate, config_actions
 from pyscheduler.api.app import build_app
@@ -8,8 +8,8 @@ from pyscheduler.api.auth import (
     TokenFileError,
     TokenHolder,
     TokenTable,
-    token_middleware,
 )
+from pyscheduler.api.users import UserHolder, UsersFileError, UserTable
 
 __all__ = [
     "DEV_PRINCIPAL",
@@ -18,8 +18,10 @@ __all__ = [
     "TokenFileError",
     "TokenHolder",
     "TokenTable",
+    "UserHolder",
+    "UserTable",
+    "UsersFileError",
     "Validate",
     "build_app",
     "config_actions",
-    "token_middleware",
 ]

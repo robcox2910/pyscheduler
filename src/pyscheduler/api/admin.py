@@ -4,8 +4,8 @@
 not need to know where the config files live. ``config_actions`` makes
 the usual pair: both read the files on disk on a helper thread;
 ``reload`` then swaps the new config into the engine (and re-reads the
-tokens file, so a revoked token stops working), ``validate`` only
-reports.
+tokens file and the users file, so a revoked token or a removed user
+stops working), ``validate`` only reports.
 """
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -19,6 +19,7 @@ from pyweb.messages import HttpRequest, HttpResponse, json
 from pyscheduler.api.auth import HEALTH_PATH, TokenFileError, TokenHolder, TokenTable
 from pyscheduler.api.serialize import problem_json
 from pyscheduler.api.support import BAD_REQUEST, ApiError, actor_of, guarded
+from pyscheduler.api.users import UserHolder, UsersFileError, UserTable
 from pyscheduler.config import Config, ConfigError, Problem, load_config
 from pyscheduler.engine.core import Engine
 
@@ -51,12 +52,29 @@ def _reread_tokens(
         return None, [Problem(str(path), 1, f"api_tokens_file: {exc}")]
 
 
+def _reread_users(
+    config: Config, path: Path, holder: UserHolder
+) -> tuple[UserTable | None, list[Problem]]:
+    """Read the new config's users file; return the table or the problem with it."""
+    users_file = config.settings.users_file
+    if (users_file is None) != (holder.table is None):
+        message = "users_file: switching the web UI on or off needs a restart"
+        return None, [Problem(str(path), 1, message)]
+    if users_file is None:
+        return None, []
+    try:
+        return UserTable.load(users_file), []
+    except UsersFileError as exc:
+        return None, [Problem(str(path), 1, f"users_file: {exc}")]
+
+
 def config_actions(
     engine: Engine,
     path: Path,
     *,
     env: Mapping[str, str] | None = None,
     tokens: TokenHolder | None = None,
+    users: UserHolder | None = None,
     on_failed: Callable[[Sequence[Problem]], None] | None = None,
 ) -> tuple[Reload, Validate]:
     """Return ``(reload, validate)`` callables for the config at ``path``.
@@ -70,9 +88,10 @@ def config_actions(
     With ``tokens``, ``reload`` also re-reads the new config's
     ``api_tokens_file`` and swaps it into the holder once the config is
     in. A tokens file that cannot be read, or a change between
-    development mode and tokens, fails the whole reload.
+    development mode and tokens, fails the whole reload. ``users`` works
+    the same way for the ``users_file``.
 
-    A reload that comes back with errors (the files, or the tokens file)
+    A reload that comes back with errors (the files, the tokens or the users)
     calls ``on_failed`` with those error problems, whoever asked for it.
     """
 
@@ -91,22 +110,33 @@ def config_actions(
             return None, list(exc.problems)
         return config, list(config.warnings)
 
+    def reread(config: Config) -> tuple[TokenTable | None, UserTable | None, list[Problem]]:
+        """Read the tokens and users files the new config names (on a helper thread)."""
+        token_table, user_table, trouble = None, None, list[Problem]()
+        if tokens is not None:
+            token_table, found = _reread_tokens(config, path, tokens)
+            trouble += found
+        if users is not None:
+            user_table, found = _reread_users(config, path, users)
+            trouble += found
+        return token_table, user_table, trouble
+
     async def reload(actor: str) -> list[Problem]:
-        """Load the files (and the tokens) and, if they are valid, swap them in."""
+        """Load the files (and the tokens and users) and, if they are valid, swap them in."""
         config, problems = await load()
         if config is None:
             _failed(problems)
             return problems
-        table = None
-        if tokens is not None:
-            loaded, holder = config, tokens
-            table, trouble = await run_in_thread(lambda: _reread_tokens(loaded, path, holder))
-            if trouble:
-                _failed(trouble)
-                return trouble + problems
+        loaded = config
+        token_table, user_table, trouble = await run_in_thread(lambda: reread(loaded))
+        if trouble:
+            _failed(trouble)
+            return trouble + problems
         await engine.reload(config, actor=actor)
         if tokens is not None:
-            tokens.table = table
+            tokens.table = token_table
+        if users is not None:
+            users.table = user_table
         return problems
 
     async def validate() -> list[Problem]:

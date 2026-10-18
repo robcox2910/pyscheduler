@@ -151,6 +151,14 @@ class TestRefusals:
             pynet.loop.run(serve(path))
         assert not (tmp_path / "state").exists()
 
+    def test_bad_users_file(self, tmp_path: Path) -> None:
+        """A users file that cannot be read is refused before the store opens."""
+        missing = tmp_path / "missing-users.yaml"
+        path = write_config(tmp_path, extra=f"  users_file: {missing}\n")
+        with pytest.raises(ServiceError, match="users file"):
+            pynet.loop.run(serve(path))
+        assert not (tmp_path / "state").exists()
+
     def test_main_exit_codes(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """``pysched serve`` exits 2 with the problems for a bad config or a refused address."""
         bad = write_config(tmp_path, "jobs:\n  a:\n    schedule: manual\n")

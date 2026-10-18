@@ -12,6 +12,7 @@ from pynet.messaging import JsonValue
 from pyweb.app import App
 from pyweb.messages import HttpRequest
 
+from pyscheduler.api.auth import allows
 from pyscheduler.api.runs import merged_runs
 from pyscheduler.api.serialize import (
     definition_json,
@@ -126,7 +127,8 @@ def add_job_routes(app: App, engine: Engine) -> None:
         upcoming = await run_in_thread(next_firings, config, job, now, NEXT_FIRINGS)
         runs = await merged_runs(engine, job=name, limit=RECENT_RUNS)
         out = job_json(config, job, upcoming[0] if upcoming else None)
-        out["definition"] = definition_json(config, job, show_alerts=role_of(request) == "operator")
+        show_alerts = allows(role_of(request), "operator")
+        out["definition"] = definition_json(config, job, show_alerts=show_alerts)
         out["next_firings"] = [instant(f) for f in upcoming]
         out["recent_runs"] = [run_json(run) for run in runs]
         return out

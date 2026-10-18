@@ -37,6 +37,7 @@ scheduler:
   max_running: 32                # global cap on running attempts
   listen: 127.0.0.1:8470         # HTTP API (and UI from phase 3)
   api_tokens_file: tokens.yaml   # bearer tokens for the API (see API)
+  users_file: users.yaml         # web UI logins (phase 3)
   kill_grace: 10s                # SIGTERM -> SIGKILL wait
 
 calendars:
@@ -146,6 +147,7 @@ class TestFullExample:
         assert settings.max_running == MAX_RUNNING
         assert settings.kill_grace == timedelta(seconds=10)
         assert settings.api_tokens_file == path.parent / "tokens.yaml"
+        assert settings.users_file == path.parent / "users.yaml"
 
     def test_calendars_and_digest(self, write_yaml: WriteYaml) -> None:
         """Calendars merge included holidays; the digest hashes the source."""

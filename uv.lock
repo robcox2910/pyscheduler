@@ -746,7 +746,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3.1" },
-    { name = "pyweb", git = "https://github.com/robcox2910/pyweb?tag=v0.2.0" },
+    { name = "pyweb", git = "https://github.com/robcox2910/pyweb?tag=v0.3.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.3" },
 ]
 provides-extras = ["dev"]
@@ -807,8 +807,8 @@ wheels = [
 
 [[package]]
 name = "pyweb"
-version = "0.2.0"
-source = { git = "https://github.com/robcox2910/pyweb?tag=v0.2.0#ce05d2b09feec26feecc35b68dbb7a7d1bb658ce" }
+version = "0.3.0"
+source = { git = "https://github.com/robcox2910/pyweb?tag=v0.3.0#2d35d70e411c70b203df189da067d55614cd5087" }
 dependencies = [
     { name = "pycrypt" },
     { name = "pynet" },

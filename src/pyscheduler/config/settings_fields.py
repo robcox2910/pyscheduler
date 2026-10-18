@@ -23,7 +23,8 @@ from pyscheduler.yamlish import Map, Node
 
 SCHEDULER_KEYS = (
     "name", "timezone", "state_dir", "log_dir", "max_running", "listen",
-    "api_tokens_file", "kill_grace", "retention", "memory_days", "watch_limit",
+    "api_tokens_file", "users_file", "kill_grace", "retention", "memory_days",
+    "watch_limit",
 )  # fmt: skip
 _PORT = re.compile(r"\d{1,5}", re.ASCII)
 MAX_PORT = 65535
@@ -76,6 +77,7 @@ def read_settings(r: Reader, node: Map, main: Path) -> Settings:
         max_running=count("max_running", DEFAULT_MAX_RUNNING),
         listen=listen or DEFAULT_LISTEN,
         api_tokens_file=path("api_tokens_file"),
+        users_file=path("users_file"),
         kill_grace=_duration(r, items, "kill_grace") or DEFAULT_KILL_GRACE,
         retention=_duration(r, items, "retention") or DEFAULT_RETENTION,
         memory_days=count("memory_days", DEFAULT_MEMORY_DAYS),

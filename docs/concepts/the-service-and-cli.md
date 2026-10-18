@@ -39,8 +39,8 @@ in if they are valid. If they are not, it writes the problems in its log
 and carries on with the old config.
 
 !!! warning "Development mode is for your own computer only"
-    With no `api_tokens_file`, everyone who can reach the API is an
-    operator. That is why `serve` refuses to start in that mode unless
+    With no `api_tokens_file` and no `users_file`, everyone who can
+    reach the API is an admin. That is why `serve` refuses to start in that mode unless
     `listen` is a loopback address (`127.0.0.1`, `::1` or `localhost`).
     Use `pysched hash-token` to make a token for the tokens file.
 
@@ -53,7 +53,9 @@ scheduler switched off, because they only read files on your computer:
   `file:line: message` each; warnings on stderr);
 - `pysched forecast FILE --from 2026-10-19 --to 2026-10-20`: which jobs
   should start when;
-- `pysched hash-token`: a new random token and its SHA-256.
+- `pysched hash-token`: a new random token and its SHA-256;
+- `pysched hash-password`: asks for a password twice (it is not shown)
+  and prints the `password_hash:` line for the users file.
 
 The rest send a request to the API:
 

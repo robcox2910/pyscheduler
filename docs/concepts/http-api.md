@@ -59,8 +59,8 @@ post, but not a JSON one without asking the server first, so this
 stops a page you happen to visit from pressing buttons. The `pysched`
 command always sends the header.
 
-**Development mode.** With no tokens file, everyone is `dev` with the
-operator role. The server then refuses to listen anywhere but a
+**Development mode.** With no tokens file and no users file, everyone
+is `dev` with the admin role. The server then refuses to listen anywhere but a
 loopback address such as `127.0.0.1`, so other machines cannot reach
 it. That is *not* the same as private: every program on *this* machine
 can, including your web browser while it shows some other site. So in

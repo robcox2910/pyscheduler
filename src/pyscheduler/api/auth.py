@@ -15,8 +15,8 @@ Callers send ``Authorization: Bearer <token>``. Reads (``GET``) need a
 viewer or operator; everything else needs an operator. ``/api/health``
 needs no token at all.
 
-With no tokens file the API is in **development mode**: every caller is
-``dev`` with the operator role. ``serve`` only allows that on a loopback
+With no tokens file and no users file the API is in **development
+mode**: every caller is ``dev`` with the admin role. ``serve`` only allows that on a loopback
 address, but loopback is *not* private: every program on this machine,
 including a web browser visiting some other site, can send it requests.
 Two guards keep a web page from steering the scheduler:
@@ -30,7 +30,9 @@ Two guards keep a web page from steering the scheduler:
   is refused too.
 
 The tokens can be swapped while the API runs (``TokenHolder.table``),
-so a reload can revoke a token without a restart.
+so a reload can revoke a token without a restart. The checks themselves
+live in ``pyscheduler.api.access``, which serves tokens and web sessions
+alike.
 """
 
 import hashlib
@@ -40,25 +42,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pyweb.app import CallNext, Middleware
-from pyweb.messages import HttpRequest, Outcome, json
-
 from pyscheduler.values import check_name
 from pyscheduler.yamlish import Map, Node, Scalar, Seq, YamlError, parse
 
 __all__ = [
     "DEV_PRINCIPAL",
     "HEALTH_PATH",
+    "READ_METHODS",
+    "ROLE_RANK",
     "Principal",
     "Role",
     "TokenFileError",
     "TokenHolder",
     "TokenTable",
+    "allows",
     "is_loopback_host",
-    "token_middleware",
 ]
 
-type Role = Literal["viewer", "operator"]
+type Role = Literal["viewer", "operator", "admin"]
+
+ROLE_RANK: dict[Role, int] = {"viewer": 0, "operator": 1, "admin": 2}
+"""How far up the ladder each role stands: ``admin`` >= ``operator`` >= ``viewer``."""
 
 HEALTH_PATH = "/api/health"
 """The one path that needs no token."""
@@ -69,11 +73,6 @@ READ_METHODS = frozenset({"GET", "HEAD"})
 _FIELDS = ("name", "token_sha256", "role")
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _SHA256_HEX_LEN = 64
-_UNAUTHORISED = 401
-_FORBIDDEN = 403
-_UNSUPPORTED_MEDIA = 415
-_BEARER = "bearer"
-_JSON_TYPE = "application/json"
 
 
 @dataclass(frozen=True)
@@ -84,8 +83,13 @@ class Principal:
     role: Role
 
 
-DEV_PRINCIPAL = Principal("dev", "operator")
-"""The caller of every request in development mode (no tokens file)."""
+DEV_PRINCIPAL = Principal("dev", "admin")
+"""The caller of every request in development mode (no tokens file, no users file)."""
+
+
+def allows(role: Role, needed: Role) -> bool:
+    """Return whether ``role`` may do what needs ``needed`` (a higher role may do more)."""
+    return ROLE_RANK[role] >= ROLE_RANK[needed]
 
 
 class TokenFileError(ValueError):
@@ -230,74 +234,3 @@ def is_loopback_host(header: str | None) -> bool:
         return ipaddress.ip_address(name).is_loopback
     except ValueError:
         return False
-
-
-def _is_json(request: HttpRequest) -> bool:
-    """Return whether the request says its body is JSON (a charset may follow)."""
-    content_type = request.headers.get("Content-Type") or ""
-    return content_type.partition(";")[0].strip().lower() == _JSON_TYPE
-
-
-def _bearer(request: HttpRequest) -> str | None:
-    """Return the token of an ``Authorization: Bearer`` header, or ``None``."""
-    header = request.headers.get("Authorization") or ""
-    scheme, _, token = header.strip().partition(" ")
-    token = token.strip()
-    if scheme.lower() != _BEARER or not token:
-        return None
-    return token
-
-
-def _unauthorised() -> Outcome:
-    """Build the 401 answer that asks for a bearer token."""
-    response = json({"error": "unauthorised"}, _UNAUTHORISED)
-    response.headers.set("WWW-Authenticate", "Bearer")
-    return response
-
-
-def token_middleware(tokens: TokenTable | TokenHolder | None) -> Middleware:
-    """Return middleware that sets ``request.user`` to a ``Principal`` or refuses.
-
-    Args:
-        tokens: The known tokens (or a holder whose table may change), or
-            ``None`` for development mode (every request is ``DEV_PRINCIPAL``).
-
-    In order: in development mode a ``Host`` that is not loopback is
-    answered 403 ``{"error": "forbidden host"}``; a missing or unknown
-    token is answered 401 ``{"error": "unauthorised"}`` with
-    ``WWW-Authenticate: Bearer``; a viewer using a method other than GET
-    or HEAD is answered 403 ``{"error": "forbidden"}``; a ``POST``
-    without ``Content-Type: application/json`` is answered 415
-    ``{"error": "use Content-Type: application/json"}``.
-
-    """
-    holder = tokens if isinstance(tokens, TokenHolder) else TokenHolder(tokens)
-
-    async def check(request: HttpRequest, call_next: CallNext) -> Outcome:
-        """Check the host, find the caller, check their role and the body type, and go on."""
-        table = holder.table
-        if table is None and not is_loopback_host(request.headers.get("Host")):
-            return json({"error": "forbidden host"}, _FORBIDDEN)
-        if request.path == HEALTH_PATH:
-            return await call_next(request)
-        if table is None:
-            request.user = DEV_PRINCIPAL
-            return await _typed(request, call_next)
-        token = _bearer(request)
-        found = table.lookup(token) if token is not None else None
-        if found is None:
-            return _unauthorised()
-        principal = Principal(*found)
-        if principal.role != "operator" and request.method not in READ_METHODS:
-            return json({"error": "forbidden"}, _FORBIDDEN)
-        request.user = principal
-        return await _typed(request, call_next)
-
-    return check
-
-
-async def _typed(request: HttpRequest, call_next: CallNext) -> Outcome:
-    """Refuse a ``POST`` whose body is not declared JSON (415); otherwise go on."""
-    if request.method == "POST" and not _is_json(request):
-        return json({"error": "use Content-Type: application/json"}, _UNSUPPORTED_MEDIA)
-    return await call_next(request)

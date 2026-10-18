@@ -13,8 +13,8 @@ engine adopts them again on the next start.
 ``serve`` does exactly that. Signals from the operating system steer it:
 
 - ``SIGTERM`` or ``SIGINT`` (Ctrl-C): close gracefully;
-- ``SIGHUP``: reload the config files and the tokens file (problems go
-  to the log).
+- ``SIGHUP``: reload the config files, the tokens file and the users
+  file (problems go to the log).
 
 Example::
 
@@ -38,7 +38,17 @@ from pyweb.aserver import AsyncServer
 
 from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.alerts.monitor import AlertMonitor
-from pyscheduler.api import TokenFileError, TokenHolder, TokenTable, build_app, config_actions
+from pyscheduler.api import (
+    TokenFileError,
+    TokenHolder,
+    TokenTable,
+    UserHolder,
+    UsersFileError,
+    UserTable,
+    build_app,
+    config_actions,
+)
+from pyscheduler.api.session_key import SessionKeyError
 from pyscheduler.config import Config, load_config
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.clock import SystemClock
@@ -60,7 +70,7 @@ CLOSE_GRACE = 5.0
 
 
 class ServiceError(Exception):
-    """Raised when ``serve`` refuses to start (unsafe address, bad tokens file, busy port)."""
+    """Raised when ``serve`` refuses to start (unsafe address, bad tokens or users, busy port)."""
 
 
 class SchedulerFailedError(Exception):
@@ -82,28 +92,36 @@ def is_loopback(host: str) -> bool:
         return False
 
 
-def _tokens(config: Config) -> TokenTable | None:
-    """Return the token table, or ``None`` for development mode on a loopback address.
+def _access(config: Config) -> tuple[TokenTable | None, UserTable | None]:
+    """Return the token table and the users table (``None`` for a file not set).
+
+    With neither file the scheduler is in development mode, which is only
+    allowed on a loopback address.
 
     Raises:
-        ServiceError: If there is no tokens file and the address is not
-            loopback, or the tokens file cannot be read.
+        ServiceError: If there is neither file and the address is not
+            loopback, or a file cannot be read.
 
     """
     settings = config.settings
     host, _ = settings.listen
-    if settings.api_tokens_file is None:
+    if settings.api_tokens_file is None and settings.users_file is None:
         if not is_loopback(host):
             msg = (
-                f"refusing to listen on {host} without api_tokens_file: development mode "
-                "(no tokens) is only allowed on a loopback address such as 127.0.0.1"
+                f"refusing to listen on {host} without api_tokens_file or users_file: "
+                "development mode (no tokens, no users) is only allowed on a loopback "
+                "address such as 127.0.0.1"
             )
             raise ServiceError(msg)
-        return None
+        return None, None
     try:
-        return TokenTable.load(settings.api_tokens_file)
-    except TokenFileError as exc:
+        tokens = (
+            None if settings.api_tokens_file is None else TokenTable.load(settings.api_tokens_file)
+        )
+        users = None if settings.users_file is None else UserTable.load(settings.users_file)
+    except (TokenFileError, UsersFileError) as exc:
         raise ServiceError(str(exc)) from None
+    return tokens, users
 
 
 async def _open_engine(config: Config) -> tuple[Engine, ConfigRecord | None]:
@@ -233,7 +251,7 @@ async def serve(
 ) -> None:
     """Run the scheduler for the config at ``config_path`` until told to stop.
 
-    In order: load the config; check the tokens; hook the signals; open
+    In order: load the config; read the tokens and users; hook the signals; open
     the store; take the port (requests get 503 ``scheduler is starting``
     for now); start the engine; record the config version (when its
     digest is new); start the alert dispatcher and monitor; open the gate
@@ -259,7 +277,8 @@ async def serve(
 
     """
     config = await pynet.loop.run_in_thread(load_config, config_path)
-    tokens = TokenHolder(_tokens(config))
+    token_table, user_table = await pynet.loop.run_in_thread(_access, config)
+    tokens, users = TokenHolder(token_table), UserHolder(user_table)
     host, port = config.settings.listen
     service = _Service()
     service.signals = SignalHooks(service.wake.set, service.on_reload)
@@ -270,12 +289,23 @@ async def serve(
         dispatcher = service.dispatcher = Dispatcher(engine)
         monitor = service.monitor = AlertMonitor(engine, dispatcher)  # hears recovery too
         reload, validate = config_actions(
-            engine, config_path, tokens=tokens, on_failed=monitor.reload_failed
+            engine, config_path, tokens=tokens, users=users, on_failed=monitor.reload_failed
         )
         service.reload_task = lambda: reload_for_signal(reload)
-        app = build_app(
-            engine, tokens=tokens, reload=reload, validate=validate, dispatcher=dispatcher
-        )
+        try:  # building the app reads (or makes) the session key
+            app = await pynet.loop.run_in_thread(
+                lambda: build_app(
+                    engine,
+                    tokens=tokens,
+                    reload=reload,
+                    validate=validate,
+                    dispatcher=dispatcher,
+                    users=users,
+                    secure=not is_loopback(host),
+                )
+            )
+        except (SessionKeyError, OSError) as exc:
+            raise ServiceError(str(exc)) from None
         app.middleware(service.gate.middleware())
         service.server = AsyncServer(app)
         try:

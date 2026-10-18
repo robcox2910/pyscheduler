@@ -282,6 +282,7 @@ class Settings:
     max_running: int
     listen: tuple[str, int]
     api_tokens_file: Path | None
+    users_file: Path | None
     kill_grace: timedelta
     retention: timedelta
     memory_days: int

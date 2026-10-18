@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from pyweb.security import verify_password
 
 from pyscheduler import cli_commands
 from pyscheduler.cli import main
@@ -15,6 +16,7 @@ SERVER_ERROR = 1
 USAGE = 2
 TOKEN_BYTES = 32
 SHA256_HEX = 64
+PROMPTS = 2
 
 FORECAST_JOBS = """
 jobs:
@@ -94,6 +96,35 @@ class TestOfflineMisc:
         assert len(lines["token"]) >= TOKEN_BYTES
         assert len(lines["token_sha256"]) == SHA256_HEX
         assert hashlib.sha256(lines["token"].encode()).hexdigest() == lines["token_sha256"]
+
+    def test_hash_password_cli(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Matching entries print a hash ``verify_password`` accepts; a mismatch exits 2."""
+        answers = iter(["s3cret pass", "s3cret pass"])
+        prompts: list[str] = []
+
+        def fake_getpass(prompt: str = "Password: ") -> str:
+            """Answer the next scripted entry and remember the prompt."""
+            prompts.append(prompt)
+            return next(answers)
+
+        monkeypatch.setattr("getpass.getpass", fake_getpass)
+        assert main(["hash-password"]) == OK
+        out = capsys.readouterr().out
+        label, _, digest = out.strip().partition(": ")
+        assert label == "password_hash"
+        assert digest.startswith("pbkdf2_sha256$")
+        assert verify_password("s3cret pass", digest)
+        assert len(prompts) == PROMPTS
+        answers = iter(["one", "two"])
+        assert main(["hash-password"]) == USAGE
+        captured = capsys.readouterr()
+        assert "passwords do not match" in captured.err
+        assert captured.out == ""
+        answers = iter(["", ""])
+        assert main(["hash-password"]) == USAGE
+        assert "empty" in capsys.readouterr().err
 
     def test_no_command_is_usage(self, capsys: pytest.CaptureFixture[str]) -> None:
         """No subcommand exits 2."""

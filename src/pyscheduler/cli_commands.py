@@ -1,12 +1,13 @@
 """The ``pysched`` subcommands: each takes the parsed arguments and returns an exit code.
 
-Offline commands (``validate``, ``forecast``, ``hash-token``) read files
-on this machine. The rest ring the scheduler's API through an
+Offline commands (``validate``, ``forecast``, ``hash-token``,
+``hash-password``) work on this machine alone. The rest ring the scheduler's API through an
 ``ApiClient``; an ``ApiError`` they raise is turned into exit code 1 by
 ``cli.main``.
 """
 
 import argparse
+import getpass
 import hashlib
 import secrets
 import sys
@@ -14,6 +15,8 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from pyweb.security import hash_password as pbkdf2_hash
 
 from pyscheduler.cli_format import (
     RUN_HEADER,
@@ -151,10 +154,26 @@ def hash_token(args: argparse.Namespace) -> int:
     return OK
 
 
+def hash_password(args: argparse.Namespace) -> int:
+    """Ask for a password twice (not echoed) and print its hash for the users file."""
+    del args
+    password = getpass.getpass("Password: ")
+    again = getpass.getpass("Password again: ")
+    if password != again:
+        warn("pysched hash-password: passwords do not match")
+        return USAGE
+    if not password:
+        warn("pysched hash-password: the password is empty")
+        return USAGE
+    say(f"password_hash: {pbkdf2_hash(password)}")
+    return OK
+
+
 OFFLINE_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "validate": validate,
     "forecast": forecast_offline,
     "hash-token": hash_token,
+    "hash-password": hash_password,
 }
 
 
