@@ -70,6 +70,7 @@ class TestEtlExample:
     def test_header_matches_readme(self) -> None:
         """The example's header shows the README's trigger commands, with their dates."""
         readme = (EXAMPLES.parent / "README.md").read_text(encoding="utf-8")
+        readme = readme.split("## Phase 2")[0]  # the Quick Start belongs to the ETL example
         header = ETL.read_text(encoding="utf-8")
 
         def triggers(text: str) -> list[str]:
@@ -83,3 +84,46 @@ class TestEtlExample:
 
         assert triggers(header) == triggers(readme)
         assert all("--run-date" in command for command in triggers(header))
+
+
+ALERTS = EXAMPLES / "alerts.yaml"
+"""The example alert-routing config."""
+
+
+class TestAlertsExample:
+    """``examples/alerts.yaml`` and its scripts."""
+
+    def test_alerts_example_validates(self) -> None:
+        """The alert-routing example loads with no errors or warnings."""
+        config = load_config(ALERTS, env={})
+        assert not config.warnings
+        assert {"alert-log", "say-kind"} <= set(config.notifiers)
+        assert config.routes
+        assert config.jobs["inbox"].watch is not None
+
+    def test_validate_command_says_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """``pysched validate`` accepts it."""
+        assert main(["validate", str(ALERTS)]) == 0
+        assert capsys.readouterr().out.startswith("ok:")
+
+    def test_say_kind_prints_the_alert_kind(self) -> None:
+        """The command notifier script reads alert JSON on stdin and prints its kind."""
+        result = subprocess.run(  # noqa: S603 -- our own example script
+            [str(EXAMPLES / "scripts" / "say-kind.sh")],
+            input='{"kind": "failed", "job": "nightly"}',
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=RUN_SECONDS,
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == "ALERT failed"
+
+    @pytest.mark.parametrize("name", ["say-kind.sh", "fail.sh", "slow.sh", "consume.sh"])
+    def test_scripts_are_executable(self, name: str) -> None:
+        """Every alert-example script can be run directly."""
+        assert os.access(EXAMPLES / "scripts" / name, os.X_OK)
+
+    def test_inbox_folder_exists(self) -> None:
+        """The watched folder is in the repository."""
+        assert (EXAMPLES / "inbox").is_dir()
