@@ -21,14 +21,12 @@ classifiers = [
 keywords = ["scheduler", "cron", "jobs", "education"]
 dependencies = [
     "pynet",
-    "pymq",
     "pyweb",
     "pydb",
 ]
 
 [tool.uv.sources]
 pynet = { git = "https://github.com/robcox2910/pynet", tag = "v0.1.0" }
-pymq = { git = "https://github.com/robcox2910/pymq", tag = "v0.2.0" }
 pyweb = { git = "https://github.com/robcox2910/pyweb", tag = "v0.2.0" }
 pydb = { git = "https://github.com/robcox2910/pydb", tag = "v0.4.0" }
 
