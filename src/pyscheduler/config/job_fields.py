@@ -30,6 +30,7 @@ from pyscheduler.config.fields import (
     read_str,
     read_str_list,
     read_str_map,
+    read_template,
     read_zone,
 )
 from pyscheduler.config.model import (
@@ -110,12 +111,12 @@ class JobFields:
 def _read_command(r: Reader, node: Node) -> str | tuple[str, ...] | None:
     """Read ``command``: a shell string or a non-empty list of arguments."""
     if isinstance(node, Scalar):
-        text = read_str(r, node, "command")
+        text = read_template(r, node, "command")
         if text is not None and not text.strip():
             r.add(node.line, "command must not be empty")
             return None
         return text
-    args = read_str_list(r, node, "command")
+    args = read_str_list(r, node, "command", template=True)
     if args is not None and not args:
         r.add(node.line, "command must not be an empty list")
         return None
@@ -213,7 +214,7 @@ def _ignore_what(read: Callable[[Reader, Node], object]) -> KeyReader:
 
 _KEY_READERS: dict[str, KeyReader] = {
     "command": _ignore_what(_read_command),
-    "env": read_str_map,
+    "env": lambda r, node, what: read_str_map(r, node, what, template=True),
     "schedule": _ignore_what(read_schedule),
     "timezone": read_zone,
     "run_date": _enum(RunDateRule),
@@ -228,9 +229,8 @@ _KEY_READERS: dict[str, KeyReader] = {
     "enabled": read_bool,
     **dict.fromkeys(("timeout", "min_runtime", "max_runtime"), read_duration),
     **dict.fromkeys(("agent_tags", "tags"), read_str_list),
-    **dict.fromkeys(
-        ("cwd", "calendar", "stdout", "stderr", "agent", "description", "owner"), read_str
-    ),
+    **dict.fromkeys(("cwd", "stdout", "stderr"), read_template),  # rendered per attempt
+    **dict.fromkeys(("calendar", "agent", "description", "owner"), read_str),
 }
 
 

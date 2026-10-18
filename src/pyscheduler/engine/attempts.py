@@ -163,7 +163,7 @@ class AttemptRunner(EngineBase):
             argv = tuple(render(word, values) for word in job.command)
         env = {
             **os.environ,
-            **job.env,
+            **{key: render(value, values) for key, value in job.env.items()},
             "PYSCHED_JOB": job.name,
             "PYSCHED_RUN_DATE": run.run_date.isoformat(),
             "PYSCHED_RUN_ID": run.run_id,
@@ -174,7 +174,7 @@ class AttemptRunner(EngineBase):
             run_id=run.run_id,
             attempt=run.attempt,
             argv=argv,
-            cwd=job.cwd,
+            cwd=None if job.cwd is None else render(job.cwd, values),
             env=env,
             stdout_path=Path(render(job.stdout, values)),
             stderr_path=stderr,

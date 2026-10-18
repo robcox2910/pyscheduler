@@ -62,10 +62,16 @@ class TestScheduleForms:
         assert not job.manual
 
     def test_list(self, write_yaml: WriteYaml) -> None:
-        """A list holds several schedules, and may include ``manual``."""
-        job = self._schedules(write_yaml, '["@daily", {at: "09:00"}, manual]')
-        assert len(job.schedules) == TWO_SCHEDULES
-        assert job.manual
+        """A list holds several schedules; ``manual`` among them only earns a warning."""
+        assert (
+            len(self._schedules(write_yaml, '["@daily", {at: "09:00"}]').schedules) == TWO_SCHEDULES
+        )
+        path = write_yaml("s.yaml", _job("j", 'command: x\nschedule: ["@daily", manual]'))
+        config, problems = build_config(path, env={})
+        assert [(p.severity, p.message) for p in problems] == [
+            ("warning", "manual has no effect alongside other schedules")
+        ]
+        assert config.jobs["j"].manual
 
     def test_every(self, write_yaml: WriteYaml) -> None:
         """``every`` repeats within a window."""

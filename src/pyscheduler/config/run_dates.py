@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 from pyscheduler.calendars import BusinessCalendar
 from pyscheduler.config.model import Config, JobDef
-from pyscheduler.schedule.firings import firings_between, firings_on
+from pyscheduler.schedule.firings import firings_between, run_date_on
 
 __all__ = [
     "MAX_CHECKED_OFFSET",
@@ -86,11 +86,11 @@ class RunDateIndex:
         if cal is not None:
             first = self.today - timedelta(days=PAD_DAYS)
             days = (first + timedelta(days=i) for i in range(WAIT_HORIZON_DAYS + 2 * PAD_DAYS))
-            try:
+            try:  # one run date per landing day, worked out without the shared day cache
                 pairs = tuple(
                     (day, run_date)
                     for day in days
-                    for run_date in sorted({f.run_date for f in firings_on(job, day, cal)})
+                    if (run_date := run_date_on(job, day, cal)) is not None
                 )
             except ValueError:
                 pairs = None

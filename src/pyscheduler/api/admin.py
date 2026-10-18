@@ -105,17 +105,21 @@ def config_actions(
     return reload, validate
 
 
-def _answer(problems: list[Problem]) -> JsonObject:
+def _answer(problems: list[Problem], engine: Engine) -> JsonObject:
     """Return ``{"ok": true, "warnings": [...]}``, or raise if any problem is an error.
+
+    Messages hide the running config's expanded values too (the loader
+    already hid the new config's).
 
     Raises:
         ApiError: 400 ``config has problems`` with every problem.
 
     """
+    expansions = engine.config.expansions
+    listed: list[JsonValue] = [problem_json(p, expansions) for p in problems]
     if any(p.severity == "error" for p in problems):
-        listed: list[JsonValue] = [problem_json(p) for p in problems]
         raise ApiError(BAD_REQUEST, "config has problems", problems=listed)
-    return {"ok": True, "warnings": [problem_json(p) for p in problems]}
+    return {"ok": True, "warnings": listed}
 
 
 def add_admin_routes(app: App, engine: Engine, *, reload: Reload, validate: Validate) -> None:
@@ -139,11 +143,11 @@ def add_admin_routes(app: App, engine: Engine, *, reload: Reload, validate: Vali
     @guarded
     async def reload_config(request: HttpRequest) -> JsonObject:
         """Reload the config files from disk."""
-        return _answer(await reload(actor_of(request)))
+        return _answer(await reload(actor_of(request)), engine)
 
     @app.get("/api/config/validate")
     @guarded
     async def validate_config(request: HttpRequest) -> JsonObject:
         """Check the config files on disk without loading them."""
         del request
-        return _answer(await validate())
+        return _answer(await validate(), engine)

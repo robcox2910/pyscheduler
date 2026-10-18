@@ -105,6 +105,19 @@ class TestRetries:
         h.run_engine(body)
         assert h.run("r").reason == f"start error: {RUN_ID}"
 
+    def test_cwd_and_env_are_rendered(self, harness: MakeHarness) -> None:
+        """``cwd`` and ``env`` values fill their placeholders, like the command."""
+        h = harness(job("command: work\ncwd: '/srv/{job}'\nenv: {DAY: '{run_date:%Y%m%d}'}"))
+
+        async def body() -> None:
+            """Fire the job."""
+            await h.advance_to(AT_0100)
+
+        h.run_engine(body)
+        spec = h.launcher.launched[0]
+        assert spec.cwd == "/srv/r"
+        assert spec.env["DAY"] == "20261019"
+
     @pytest.mark.parametrize("error", [ValueError, TypeError])
     def test_launch_value_error_is_start_error(
         self, harness: MakeHarness, monkeypatch: pytest.MonkeyPatch, error: type[Exception]

@@ -247,6 +247,11 @@ class _Unhashable:
         del tz, calendar
         return [datetime.combine(day, time(12), tzinfo=UTC)]
 
+    def lands_on(self, day: date, tz: ZoneInfo, calendar: BusinessCalendar) -> bool:
+        """Return True: noon lands on every day."""
+        del day, tz, calendar
+        return True
+
 
 def _random_job(rng: random.Random) -> _Job:
     """Return a job with a random cron or every schedule in a random zone."""

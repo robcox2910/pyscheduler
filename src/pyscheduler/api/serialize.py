@@ -22,6 +22,7 @@ from typing import cast
 from pynet.messaging import JsonValue
 
 from pyscheduler.config import Config, JobDef, Problem
+from pyscheduler.config.redaction import redact_text, redactor
 from pyscheduler.engine.model import Attempt, Event, Run
 from pyscheduler.schedule.forecast import ForecastEntry
 from pyscheduler.schedule.specs import (
@@ -194,12 +195,17 @@ def event_json(event: Event) -> JsonObject:
     }
 
 
-def problem_json(problem: Problem) -> JsonObject:
-    """Return a config problem as JSON."""
+def problem_json(problem: Problem, expansions: Mapping[str, str] | None = None) -> JsonObject:
+    """Return a config problem as JSON, hiding ``expansions`` values in its message.
+
+    The loader already hides the values of the config it loaded; passing
+    the running config's ``expansions`` hides those as well.
+    """
+    message = problem.message if expansions is None else redact_text(problem.message, expansions)
     return {
         "file": problem.file,
         "line": problem.line,
-        "message": problem.message,
+        "message": message,
         "job": problem.job,
         "severity": problem.severity,
     }
@@ -220,32 +226,19 @@ def forecast_json(entry: ForecastEntry) -> JsonObject:
     }
 
 
-MIN_REDACTED = 4
-"""The shortest expanded ``${NAME}`` value that is hidden again (shorter ones would
-mangle ordinary text; do not keep secrets that short)."""
-
-
 def redact(value: JsonValue, expansions: Mapping[str, str]) -> JsonValue:
     """Replace every expanded ``${NAME}`` value in the strings of ``value`` with ``${NAME}``.
 
-    Walks lists and objects (keys too). Longer values are replaced first,
-    so a value that contains another is hidden whole. Values shorter than
-    ``MIN_REDACTED`` are left alone.
+    Walks lists and objects (keys too), using ``config.redaction``: longer
+    values first, the brace-doubled form of a value too, and values
+    shorter than ``MIN_REDACTED`` left alone.
     """
-    pairs = sorted(
-        ((text, name) for text, name in expansions.items() if len(text) >= MIN_REDACTED),
-        key=lambda pair: len(pair[0]),
-        reverse=True,
-    )
-    if not pairs:
-        return value
+    hide = redactor(expansions)
 
     def walk(item: JsonValue) -> JsonValue:
         """Redact one value, recursing into lists and objects."""
         if isinstance(item, str):
-            for text, name in pairs:
-                item = item.replace(text, f"${{{name}}}")
-            return item
+            return hide(item)
         if isinstance(item, list):
             return [walk(child) for child in item]
         if isinstance(item, dict):

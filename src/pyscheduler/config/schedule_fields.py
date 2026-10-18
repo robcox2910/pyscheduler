@@ -6,7 +6,7 @@ module is the clerk who knows all three handwritings.
 """
 
 from collections.abc import Callable
-from datetime import time
+from datetime import time, timedelta
 
 from pyscheduler.config.fields import (
     Reader,
@@ -31,21 +31,25 @@ from pyscheduler.yamlish import Map, Node, Scalar, Seq
 
 MANUAL = "manual"
 SCHEDULE_KEYS = ("every", "between", "at", "business_day", "days", "months")
+MIN_EVERY = timedelta(minutes=1)
+"""The shortest ``every`` step: a job firing every few seconds would swamp the scheduler."""
 
 
 def read_schedule(r: Reader, node: Node) -> tuple[tuple[Schedule, ...], bool]:
     """Return a job's schedules and whether ``manual`` was among them."""
     items = node.items if isinstance(node, Seq) else [node]
     schedules: list[Schedule] = []
-    manual = False
+    manual: Node | None = None
     for item in items:
         if isinstance(item, Scalar) and item.value == MANUAL:
-            manual = True
+            manual = item
             continue
         schedule = _read_one(r, item)
         if schedule is not None:
             schedules.append(schedule)
-    return tuple(schedules), manual
+    if manual is not None and len(items) > 1:  # any job can be triggered by hand anyway
+        r.add(manual.line, "manual has no effect alongside other schedules", "warning")
+    return tuple(schedules), manual is not None
 
 
 def _read_one(r: Reader, node: Node) -> Schedule | None:
@@ -117,6 +121,9 @@ def _every(r: Reader, node: Map, days: Filter, months: Filter) -> Schedule | Non
     if "at" in items:
         r.add(node.key_lines["at"], "schedule: every cannot be combined with at")
     step = read_duration(r, items["every"], "every")
+    if step is not None and step < MIN_EVERY:
+        r.add(node.key_lines["every"], "every must be at least 1m")
+        step = None
     if "between" not in items:
         r.add(node.line, 'every needs between, for example between: "08:00-18:00"')
         return None

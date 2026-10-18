@@ -6,7 +6,8 @@ a follower is expected to start when its slowest upstream is expected to
 finish, using the *typical* (median) duration from past runs.
 
 The forecast assumes the happy path: every upstream succeeds, so the ``on:``
-kind of a dependency is ignored and failure-only jobs still show up. A
+kind of a dependency is ignored and failure-only jobs still show up. Loops
+through earlier run dates (a job needing its own yesterday) are fine. A
 dependency-only job appears for every run date that has an upstream entry in
 the window, even if its expected start lands after ``end``.
 """
@@ -63,15 +64,26 @@ def _end_of(entry: ForecastEntry) -> datetime:
     return entry.expected_start + (entry.expected_duration or timedelta(0))
 
 
+def _same_day(job: JobDef) -> set[str]:
+    """Return the jobs ``job`` depends on for its own run date (offset 0)."""
+    return {d.job for d in job.depends_on if d.run_date_offset == 0}
+
+
 def _order(followers: list[JobDef]) -> list[JobDef]:
-    """Return the dependency-only jobs, upstreams first; cycles are dropped."""
+    """Return the dependency-only jobs, upstreams first; same-day cycles are dropped.
+
+    Only offset-0 dependencies order the jobs. One on an earlier run date
+    (``run_date: -1``, even on the job itself) looks at a run that is
+    already over, so it never makes a loop: ``load`` needing its own
+    yesterday is forecast like any other follower.
+    """
     names = {job.name for job in followers}
     waiting = {
-        job.name: {d.job for d in job.depends_on if d.job in names and d.job != job.name}
+        job.name: {up for up in _same_day(job) if up in names and up != job.name}
         for job in followers
     }
-    # A self-dependency is a cycle too.
-    cyclic = {job.name for job in followers if any(d.job == job.name for d in job.depends_on)}
+    # A same-day self-dependency is a cycle too.
+    cyclic = {job.name for job in followers if job.name in _same_day(job)}
     ready = deque(job for job in followers if not waiting[job.name] and job.name not in cyclic)
     ordered: list[JobDef] = []
     while ready:

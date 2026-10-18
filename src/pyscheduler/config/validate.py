@@ -273,6 +273,9 @@ class _Checker:
                     "use 0 (the same run date) or a negative number"
                 )
                 self.add(dep.source, message, job.name)
+            elif dep.run_date_offset < -MAX_CHECKED_OFFSET:
+                limit = f"-{MAX_CHECKED_OFFSET} and 0"
+                self.add(dep.source, f"run_date offset must be between {limit}", job.name)
             up = self.config.jobs.get(dep.job)
             if up is None:
                 if dep.job not in self.broken:

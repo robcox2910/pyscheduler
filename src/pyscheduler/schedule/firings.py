@@ -35,12 +35,14 @@ __all__ = [
     "firings_on",
     "next_firing",
     "resolve_local",
+    "run_date_on",
 ]
 
 MAX_SEARCH_DAYS = 1464
 ONE_DAY = timedelta(days=1)
 LATEST = datetime.max.replace(tzinfo=UTC)
-DAY_CACHE_SIZE = 4096
+DAY_CACHE_SIZE = 64
+"""How many days of firings are remembered (a busy schedule has thousands a day)."""
 
 
 class RunDateRule(StrEnum):
@@ -130,6 +132,27 @@ def firings_on(job: Timed, day: date, calendar: BusinessCalendar) -> list[Firing
     landing day's run date.
     """
     return list(_day(job, day, calendar))
+
+
+def run_date_on(job: Timed, day: date, calendar: BusinessCalendar) -> date | None:
+    """Return the run date of the firings landing on ``day``, or ``None`` if none land.
+
+    Every firing of one landing day has the same run date, so this is all
+    a run-date analysis needs. It never lists the instants and never
+    touches the day cache, so even an every-minute job costs little per day.
+
+    Raises:
+        ValueError: If the calendar has no business day before ``day``
+            (``previous_business_day``).
+
+    """
+    if not calendar.is_business_day(day):
+        return None
+    if not any(s.lands_on(day, job.timezone, calendar) for s in job.schedules):
+        return None
+    if job.run_date_rule is RunDateRule.PREVIOUS_BUSINESS_DAY:
+        return calendar.previous(day)
+    return day
 
 
 def _require_aware(name: str, value: datetime) -> None:

@@ -58,13 +58,16 @@ The output lists all three problems together:
   hint); a **cycle** where jobs wait for each other on the same run date,
   shown as a path like `a -> b -> a` (a `run_date: -1` dependency breaks
   the loop, because yesterday's run is already done); a positive run-date
-  offset (you can't wait for tomorrow).
+  offset (you can't wait for tomorrow); an offset further back than
+  `-260` (about a year of business days: "run_date offset must be
+  between -260 and 0").
 - **Calendars:** two jobs linked by a dependency must share one calendar.
   A UK job waiting on a US job would get stuck on every day that is a
   holiday in one country but not the other.
 - **Schedules:** `business_day` without a calendar or beyond 31; a schedule
   that never fires in the next four years (like 30 February); a calendar
-  with no business days at all; an unknown time zone.
+  with no business days at all; an unknown time zone; an `every` step
+  shorter than one minute (`every must be at least 1m`).
 - **Resources:** an unknown calendar or pool; a job needing more pool
   slots than the pool has; calendars that `include` each other in a loop.
 - **Placeholders:** anything in `command`, `cwd`, `env`, `stdout` or
@@ -114,6 +117,9 @@ Warnings end up on `config.warnings`:
 - **`overlap: allow` with pools:** many copies of the job may pile up and
   hog the pool.
 - **Depends on a disabled job:** it will never get a run while disabled.
+- **`manual` next to other schedules:** `schedule: [manual, "0 9 * * *"]`
+  is the same as the cron alone, because any job can be triggered by
+  hand anyway ("manual has no effect alongside other schedules").
 
 ## Not Saying the Same Thing Twice
 

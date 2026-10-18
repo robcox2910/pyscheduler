@@ -83,8 +83,12 @@ def render(template: str, values: Mapping[str, object]) -> str:
     return "".join(parts)
 
 
-def expand_env(text: str, env: Mapping[str, str]) -> str:
+def expand_env(text: str, env: Mapping[str, str], *, template: bool = False) -> str:
     """Expand ``${NAME}`` from ``env``; ``$$`` becomes ``$``.
+
+    With ``template``, every brace in an expanded value is doubled (``{``
+    becomes ``{{``), so when the text is later rendered as a template the
+    value comes back exactly as it was, and is never read as a placeholder.
 
     Raises:
         KeyError: With the variable name, if it is not in ``env``.
@@ -93,6 +97,9 @@ def expand_env(text: str, env: Mapping[str, str]) -> str:
 
     def replace(match: re.Match[str]) -> str:
         name = match.group(1)
-        return "$" if name is None else env[name]
+        if name is None:
+            return "$"
+        value = env[name]
+        return value.replace("{", "{{").replace("}", "}}") if template else value
 
     return _ENV.sub(replace, text)

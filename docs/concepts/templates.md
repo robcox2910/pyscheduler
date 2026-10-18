@@ -31,10 +31,22 @@ Passwords do not belong in a config file. Write `${DB_PASSWORD}` and the
 value is taken from the environment when the file is loaded. Write `$$` for
 a real dollar sign. A missing variable is an error, not an empty string.
 
+The template fields are `command` (and each item of a command list),
+`cwd`, the values of `env`, `stdout` and `stderr`: their blanks are filled
+in for every attempt. A password may well contain `{` or `}`, so when a
+`${NAME}` lands in a template field its braces are doubled first, and the
+value comes out exactly as it went in (it is never mistaken for a blank).
+
+The scheduler never shows an expanded value back: in a problem message or
+in the API, each one (4 characters or longer) is put back as `${NAME}`.
+
 ```python
 from pyscheduler.templates import expand_env
 
 print(expand_env("pass=${DB_PASSWORD} cost=$$5", {"DB_PASSWORD": "hunter2"}))
+# pass=hunter2 cost=$5
+print(expand_env("pass=${DB_PASSWORD}", {"DB_PASSWORD": "a{b}c"}, template=True))
+# pass=a{{b}}c, which a template renders back as pass=a{b}c
 ```
 
 ## Labels That Must Look Right

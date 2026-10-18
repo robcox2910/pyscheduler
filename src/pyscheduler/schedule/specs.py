@@ -31,6 +31,10 @@ class Schedule(Protocol):
         """
         ...
 
+    def lands_on(self, day: date, tz: ZoneInfo, calendar: BusinessCalendar) -> bool:
+        """Return whether any instant lands on ``day``, without listing them (cheap)."""
+        ...
+
     @property
     def crosses_midnight(self) -> bool:
         """Return whether firings may land after the landing day's own midnight."""
@@ -93,6 +97,11 @@ class CronSchedule(_Filtered):
             return []
         return _at_times(day, self.cron.times(), tz)
 
+    def lands_on(self, day: date, tz: ZoneInfo, calendar: BusinessCalendar) -> bool:
+        """Return whether the cron fires on ``day`` (every day it matches has a time)."""
+        del tz, calendar
+        return self._lands(day) and self.cron.matches_day(day) and bool(self.cron.times())
+
 
 @dataclass(frozen=True)
 class AtSchedule(_Filtered):
@@ -106,6 +115,11 @@ class AtSchedule(_Filtered):
         if not self._lands(day):
             return []
         return _at_times(day, self.times, tz)
+
+    def lands_on(self, day: date, tz: ZoneInfo, calendar: BusinessCalendar) -> bool:
+        """Return whether ``day`` passes the filters (there is always a time)."""
+        del tz, calendar
+        return self._lands(day) and bool(self.times)
 
 
 @dataclass(frozen=True)
@@ -148,6 +162,14 @@ class EverySchedule(_Filtered):
             current += self.step
         return out
 
+    def lands_on(self, day: date, tz: ZoneInfo, calendar: BusinessCalendar) -> bool:
+        """Return whether the window opened on ``day`` holds at least its first instant."""
+        del calendar
+        if not self._lands(day):
+            return False
+        end_day = day + timedelta(days=1) if self.crosses_midnight else day
+        return resolve_local(day, self.start, tz) <= resolve_local(end_day, self.end, tz)
+
 
 @dataclass(frozen=True)
 class BusinessDaySchedule(_Filtered):
@@ -172,3 +194,10 @@ class BusinessDaySchedule(_Filtered):
         if not self._lands(day) or calendar.nth_of_month(day.year, day.month, self.n) != day:
             return []
         return _at_times(day, self.times, tz)
+
+    def lands_on(self, day: date, tz: ZoneInfo, calendar: BusinessCalendar) -> bool:
+        """Return whether ``day`` is the n-th business day and passes the filters."""
+        del tz
+        if not self._lands(day) or not self.times:
+            return False
+        return calendar.nth_of_month(day.year, day.month, self.n) == day

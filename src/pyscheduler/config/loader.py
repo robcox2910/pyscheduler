@@ -9,30 +9,29 @@ once instead of fixing them one reload at a time.
 import hashlib
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pyscheduler.calendars import BusinessCalendar, merge_calendars
+from pyscheduler.config.calendar_fields import RawCalendar, reachable, read_calendar
 from pyscheduler.config.calendar_inheritance import resolve_calendars
 from pyscheduler.config.fields import (
     Reader,
     RecordingEnv,
     check_keys,
-    read_date,
     read_duration,
     read_int,
-    read_list,
     read_map,
     read_seq,
     read_str,
-    read_weekday,
     read_zone,
 )
 from pyscheduler.config.job_fields import JobFields, build_job, merge_fields, read_job_fields
 from pyscheduler.config.model import Config, ConfigError, JobDef, Problem, Settings, SourceRef
+from pyscheduler.config.redaction import redactor
 from pyscheduler.config.validate import validate_config
 from pyscheduler.values import check_name
 from pyscheduler.yamlish import Map, Node, YamlError, parse
@@ -43,7 +42,6 @@ SCHEDULER_KEYS = (
     "name", "timezone", "state_dir", "log_dir", "max_running", "listen",
     "api_tokens_file", "kill_grace", "retention", "memory_days",
 )  # fmt: skip
-CALENDAR_KEYS = ("weekdays", "holidays", "extra_days", "include")
 GLOB_CHARS = frozenset("*?[")
 _PORT = re.compile(r"\d{1,5}", re.ASCII)
 MAX_PORT = 65535
@@ -53,7 +51,6 @@ DEFAULT_LISTEN = ("127.0.0.1", 8470)
 DEFAULT_KILL_GRACE = timedelta(seconds=10)
 DEFAULT_RETENTION = timedelta(days=90)
 DEFAULT_MEMORY_DAYS = 7
-DEFAULT_WEEKDAYS = frozenset(range(5))
 UTC_ZONE = ZoneInfo("UTC")
 
 
@@ -63,15 +60,6 @@ class _Doc:
 
     path: Path
     root: Map
-
-
-@dataclass(frozen=True)
-class _RawCalendar:
-    """A calendar as written, before its includes are merged in."""
-
-    calendar: BusinessCalendar
-    includes: tuple[tuple[str, int], ...]
-    source: SourceRef
 
 
 class _Loader:
@@ -165,26 +153,24 @@ class _Loader:
             return _settings(self.r, Map({}, {}, 1), self.main)
         return _settings(*found, self.main)
 
-    def calendars(self) -> tuple[dict[str, BusinessCalendar], dict[str, _RawCalendar]]:
+    def calendars(self) -> tuple[dict[str, BusinessCalendar], dict[str, RawCalendar]]:
         """Read every calendar, then merge each one's included holidays."""
-        raw: dict[str, _RawCalendar] = {}
+        raw: dict[str, RawCalendar] = {}
         seen: dict[str, SourceRef] = {}
         for r, section in self.readers("calendars"):
             for name, node in section.items.items():
                 line = section.key_lines[name]
                 if _named(r, name, line, seen.get(name), "calendar"):
                     seen[name] = SourceRef(r.file, line)
-                    cal = _calendar(r, name, node, line)
+                    cal = read_calendar(r, name, node, line)
                     if cal is not None:
                         raw[name] = cal
         merged: dict[str, BusinessCalendar] = {}
         for name, cal in raw.items():
-            included: list[BusinessCalendar] = []
             for other, line in cal.includes:
-                if other in raw:
-                    included.append(raw[other].calendar)
-                else:
+                if other not in raw:
                     self.r.for_file(cal.source.file).add(line, f"unknown calendar {other!r}")
+            included = [raw[other].calendar for other in reachable(name, raw)]
             merged[name] = merge_calendars(name, cal.calendar, included)
         return merged, raw
 
@@ -304,33 +290,6 @@ def _duration(r: Reader, items: Mapping[str, Node], key: str) -> timedelta | Non
     return read_duration(r, items[key], key) if key in items else None
 
 
-def _calendar(r: Reader, name: str, node: Node, line: int) -> _RawCalendar | None:
-    """Read one calendar definition."""
-    mapping = read_map(r, node, f"calendar {name}")
-    if mapping is None:
-        return None
-    check_keys(r, mapping, CALENDAR_KEYS, f"calendar {name}")
-    items = mapping.items
-    weekdays = DEFAULT_WEEKDAYS
-    if "weekdays" in items:
-        weekdays = frozenset(read_list(r, items["weekdays"], "weekdays", read_weekday) or ())
-
-    def dates(key: str) -> frozenset[date]:
-        """Read a list of ISO dates."""
-        if key not in items:
-            return frozenset()
-        return frozenset(read_list(r, items[key], key, read_date) or ())
-
-    includes: list[tuple[str, int]] = []
-    if "include" in items:
-        for item in read_seq(r, items["include"], "include") or []:
-            other = read_str(r, item, "include")
-            if other is not None:
-                includes.append((other, item.line))
-    cal = BusinessCalendar(name, weekdays, dates("holidays"), dates("extra_days"))
-    return _RawCalendar(cal, tuple(includes), SourceRef(r.file, line))
-
-
 def _digest(sources: Mapping[str, str]) -> str:
     """Return a sha256 over each source's path and text, in load order.
 
@@ -349,7 +308,8 @@ def build_config(
     """Load ``path`` and its includes, checking each field.
 
     Only field-level problems are found here; ``load_config`` adds the
-    checks that need the whole config. When there are errors, the returned
+    checks that need the whole config. No problem message shows a value a
+    ``${NAME}`` expanded to: each is put back as ``${NAME}``. When there are errors, the returned
     ``Config`` is partial and must not be used.
 
     Args:
@@ -369,7 +329,10 @@ def build_config(
     pools = loader.pools()
     jobs = loader.jobs(settings.timezone)
     order = {name: i for i, name in enumerate(loader.sources)}
-    problems = sorted(loader.r.problems, key=lambda p: (order.get(p.file, -1), p.line))
+    expansions = {value: name for name, value in loader.env.used.items()}
+    problems = sorted(
+        _redacted(loader.r.problems, expansions), key=lambda p: (order.get(p.file, -1), p.line)
+    )
     digest = _digest(loader.sources)
     config = Config(
         settings=settings,
@@ -382,9 +345,15 @@ def build_config(
         calendar_includes={n: tuple(i for i, _ in c.includes) for n, c in raw.items()},
         calendar_sources={n: c.source for n, c in raw.items()},
         effective_calendars=resolve_calendars(jobs).effective,
-        expansions={value: name for name, value in loader.env.used.items()},
+        expansions=expansions,
     )
     return config, problems
+
+
+def _redacted(problems: Iterable[Problem], expansions: Mapping[str, str]) -> list[Problem]:
+    """Return ``problems`` with every expanded value put back as ``${NAME}`` (ruling R29)."""
+    hide = redactor(expansions)
+    return [replace(p, message=hide(p.message)) for p in problems]
 
 
 def load_config(
@@ -410,8 +379,9 @@ def load_config(
     config, problems = build_config(path, env=env)
     broken = frozenset(p.job for p in problems if p.job is not None and p.severity == "error")
     order = {name: i for i, name in enumerate(config.sources)}
+    checked = validate_config(config, today=today, broken_jobs=broken)
     problems = sorted(
-        [*problems, *validate_config(config, today=today, broken_jobs=broken)],
+        [*problems, *_redacted(checked, config.expansions)],
         key=lambda p: (order.get(p.file, -1), p.line),
     )
     errors = tuple(p for p in problems if p.severity == "error")

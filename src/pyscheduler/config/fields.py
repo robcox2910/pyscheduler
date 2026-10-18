@@ -138,13 +138,17 @@ def read_seq(r: Reader, node: Node, what: str) -> list[Node] | None:
     return None
 
 
-def read_str(r: Reader, node: Node, what: str) -> str | None:
-    """Return a scalar's text with ``${NAME}`` expanded, or ``None`` on a problem."""
+def read_str(r: Reader, node: Node, what: str, *, template: bool = False) -> str | None:
+    """Return a scalar's text with ``${NAME}`` expanded, or ``None`` on a problem.
+
+    ``template`` marks a field that is later rendered as a template: the
+    braces of expanded values are doubled so they render back literally.
+    """
     if not isinstance(node, Scalar):
         r.add(node.line, f"{what} must be text, got {_describe(node)}")
         return None
     try:
-        return expand_env(node.value, r.env)
+        return expand_env(node.value, r.env, template=template)
     except KeyError as exc:
         r.add(node.line, f"{what}: environment variable {exc.args[0]!r} is not set")
         return None
@@ -267,10 +271,17 @@ def read_list[T](
     return [v for v in values if v is not None]
 
 
-def read_str_list(r: Reader, node: Node, what: str) -> tuple[str, ...] | None:
-    """Return a list of text values as a tuple."""
-    values = read_list(r, node, what, read_str)
+def read_str_list(
+    r: Reader, node: Node, what: str, *, template: bool = False
+) -> tuple[str, ...] | None:
+    """Return a list of text values as a tuple (``template``: see ``read_str``)."""
+    values = read_list(r, node, what, lambda r, n, w: read_str(r, n, w, template=template))
     return None if values is None else tuple(values)
+
+
+def read_template(r: Reader, node: Node, what: str) -> str | None:
+    """Return a template field's text (expanded values have their braces doubled)."""
+    return read_str(r, node, what, template=True)
 
 
 def read_weekday(r: Reader, node: Node, what: str) -> int | None:
@@ -284,14 +295,16 @@ def read_weekday(r: Reader, node: Node, what: str) -> int | None:
     return WEEKDAYS.index(text)
 
 
-def read_str_map(r: Reader, node: Node, what: str) -> dict[str, str] | None:
-    """Return a mapping of names to text values."""
+def read_str_map(
+    r: Reader, node: Node, what: str, *, template: bool = False
+) -> dict[str, str] | None:
+    """Return a mapping of names to text values (``template``: see ``read_str``)."""
     mapping = read_map(r, node, what)
     if mapping is None:
         return None
     out: dict[str, str] = {}
     for key, child in mapping.items.items():
-        value = read_str(r, child, f"{what}.{key}")
+        value = read_str(r, child, f"{what}.{key}", template=template)
         if value is not None:
             out[key] = value
     return out

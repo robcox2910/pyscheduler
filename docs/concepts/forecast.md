@@ -61,7 +61,7 @@ for entry in forecast(config, start, end, durations=past):
 - The forecast assumes the happy path: every upstream succeeds. The `on:`
   kind of a dependency is ignored, so a job that only runs on failure still
   appears.
-- Jobs caught in a dependency cycle are skipped.
+- Jobs caught in a same-run-date dependency cycle are skipped. A loop through an earlier run date (`load` needing its own `run_date: -1`) is not a cycle: it looks at a run that is already over.
 
 The API (`GET /api/forecast`), `pysched forecast` and the
 timeline's ghost bars all use this one function.
