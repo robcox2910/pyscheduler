@@ -1,0 +1,268 @@
+"""Run one attempt of a run: start it, watch it, and decide what happens next.
+
+An attempt is one go on the trampoline. Before a kid climbs on, the
+teacher writes "on the trampoline" in the register (durable), and only
+then blows the whistle (launch). A stopwatch runs (the timeout): when it
+rings the kid is asked to get off (SIGTERM), and if they ignore it, they
+are lifted off (SIGKILL) a little later.
+
+When the attempt ends, its outcome decides the run's fate: succeeded,
+another try after a growing wait (``retry_wait``), or failed. Either way
+the slot is given back and the next queued runs are started.
+"""
+
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+from pyscheduler.config import JobDef
+from pyscheduler.engine.base import EngineBase
+from pyscheduler.engine.clock import Cancel
+from pyscheduler.engine.launcher import AttemptHandle, AttemptResult, LaunchSpec
+from pyscheduler.engine.model import Attempt, Outcome, Run, RunState
+from pyscheduler.templates import render
+
+SHELL = ("/bin/sh", "-c")
+"""How a command written as one string is run."""
+
+MERGED = "stdout"
+"""The ``stderr`` value that sends standard error to the stdout file."""
+
+_NO_RETRY = frozenset({Outcome.SUCCEEDED, Outcome.KILLED})
+
+
+@dataclass
+class _Watch:
+    """The timers and flags of one running attempt."""
+
+    timed_out: bool = False
+    term: Cancel | None = None
+    kill: Cancel | None = None
+
+    def cancel(self) -> None:
+        """Call off both timers."""
+        for timer in (self.term, self.kill):
+            if timer is not None:
+                timer.cancel()
+
+
+def classify(result: AttemptResult, *, timed_out: bool, killed: bool) -> tuple[Outcome, str]:
+    """Return the outcome of an attempt and the reason to show for it."""
+    if result.start_error is not None:
+        return Outcome.START_ERROR, f"start error: {result.start_error}"
+    if result.succeeded:
+        return Outcome.SUCCEEDED, ""
+    if timed_out:
+        return Outcome.TIMEOUT, "timeout"
+    if killed:
+        return Outcome.KILLED, "killed"
+    if result.signal is not None:
+        return Outcome.FAILED, f"signal {result.signal}"
+    return Outcome.FAILED, f"exit {result.exit_code}"
+
+
+class AttemptRunner(EngineBase):
+    """Start attempts, arm their timeouts, and turn their endings into run states."""
+
+    def _start_attempt(self, run: Run) -> None:
+        """Mark ``run`` running (in memory now), then commit and launch it in a task.
+
+        The slots were already acquired by the ready queue.
+        """
+        job = self.config.jobs.get(run.job)
+        if job is None:  # removed by a reload while queued: nothing to start
+            self._release(run.run_id)
+            return
+        now = self.clock.now()
+        number = run.attempt + 1
+        running = replace(
+            run,
+            state=RunState.RUNNING,
+            reason="",
+            attempt=number,
+            config_version=self.config_version,
+            updated_at=now,
+        )
+        spec: LaunchSpec | None = None
+        error: str | None = None
+        try:
+            spec = self._launch_spec(running, job)
+        except (KeyError, ValueError) as exc:
+            error = f"bad template: {exc}"
+        stdout = str(spec.stdout_path) if spec else ""
+        stderr = str(spec.stderr_path or spec.stdout_path) if spec else ""
+        row = Attempt(
+            run_id=run.run_id,
+            attempt=number,
+            started_at=now,
+            ended_at=None,
+            exit_code=None,
+            signal=None,
+            outcome=None,
+            pid=None,
+            stdout_path=stdout,
+            stderr_path=stderr,
+            status_path=str(self._status_path(run.run_id, number)),
+            reason="",
+        )
+        self.book.put(running)
+        task = self._spawn(self._attempt(running, row, spec, error), f"attempt-{run.run_id}")
+        self._attempt_tasks[run.run_id] = task
+
+    def _status_path(self, run_id: str, attempt: int) -> Path:
+        """Return where the minder writes the status note of this attempt."""
+        return self.config.settings.state_dir / "status" / f"{run_id}.{attempt}.json"
+
+    def _launch_spec(self, run: Run, job: JobDef) -> LaunchSpec:
+        """Render the command and log paths of ``run``'s current attempt.
+
+        Raises:
+            KeyError: If a template names an unknown value.
+            ValueError: If a template is malformed.
+
+        """
+        values: Mapping[str, object] = {
+            "job": job.name,
+            "run_date": run.run_date,
+            "run_id": run.run_id,
+            "attempt": run.attempt,
+            "scheduled_at": run.scheduled_at,
+            "log_dir": str(self.config.settings.log_dir),
+        }
+        if isinstance(job.command, str):
+            argv = (*SHELL, render(job.command, values))
+        else:
+            argv = tuple(render(word, values) for word in job.command)
+        env = {
+            **os.environ,
+            **job.env,
+            "PYSCHED_JOB": job.name,
+            "PYSCHED_RUN_DATE": run.run_date.isoformat(),
+            "PYSCHED_RUN_ID": run.run_id,
+            "PYSCHED_ATTEMPT": str(run.attempt),
+        }
+        stderr = None if job.stderr == MERGED else Path(render(job.stderr, values))
+        return LaunchSpec(
+            run_id=run.run_id,
+            attempt=run.attempt,
+            argv=argv,
+            cwd=job.cwd,
+            env=env,
+            stdout_path=Path(render(job.stdout, values)),
+            stderr_path=stderr,
+            status_path=self._status_path(run.run_id, run.attempt),
+        )
+
+    async def _attempt(
+        self, running: Run, row: Attempt, spec: LaunchSpec | None, error: str | None
+    ) -> None:
+        """Commit ``running``, launch, commit the pid, wait, then record the ending."""
+        started = self._event(running.run_id, "attempt_started", attempt=row.attempt)
+        await self._transition([running], attempts=[row], events=[started])
+        handle: AttemptHandle | None = None
+        if spec is not None:
+            try:
+                handle = await self.launcher.launch(spec)
+            except OSError as exc:
+                error = str(exc)
+        if handle is None:
+            result = AttemptResult(None, None, None, self.clock.now(), error)
+            await self._finish(row, result, _Watch())
+            return
+        self._handles[running.run_id] = handle
+        row = replace(row, pid=handle.pid)
+        await self._transition([], attempts=[row])
+        watch = self._arm(running, handle)
+        try:
+            result = await self._idle_while(handle)
+        finally:
+            watch.cancel()
+            self._handles.pop(running.run_id, None)
+        await self._finish(row, result, watch)
+
+    async def _idle_while(self, handle: AttemptHandle) -> AttemptResult:
+        """Wait for ``handle`` without counting as busy (the process may take hours)."""
+        self._busy -= 1
+        try:
+            return await handle.wait()
+        finally:
+            self._busy += 1
+
+    def _arm(self, run: Run, handle: AttemptHandle) -> _Watch:
+        """Arm the job's timeout: SIGTERM when it rings, SIGKILL after the grace."""
+        watch = _Watch()
+        job = self.config.jobs.get(run.job)
+        if job is None or job.timeout is None:
+            return watch
+        grace = self.config.settings.kill_grace
+
+        def ring() -> None:
+            """Ask the attempt to stop, and plan the kill."""
+            watch.timed_out = True
+            handle.terminate()
+            watch.kill = self.clock.call_at(self.clock.now() + grace, handle.kill)
+
+        watch.term = self.clock.call_at(self.clock.now() + job.timeout, ring)
+        return watch
+
+    async def _finish(self, row: Attempt, result: AttemptResult, watch: _Watch) -> None:
+        """Record how the attempt ended, retry or end the run, then free the slots."""
+        run_id = row.run_id
+        killed = run_id in self._kill_requested
+        self._kill_requested.discard(run_id)
+        self._attempt_tasks.pop(run_id, None)
+        outcome, reason = classify(result, timed_out=watch.timed_out, killed=killed)
+        now = self.clock.now()
+        ended = replace(
+            row,
+            ended_at=result.ended_at,
+            exit_code=result.exit_code,
+            signal=result.signal,
+            outcome=outcome,
+            reason=reason,
+        )
+        events = [
+            self._event(
+                run_id, "attempt_ended", attempt=row.attempt, outcome=outcome.value, reason=reason
+            )
+        ]
+        run = self.book.get(run_id)
+        if run is None:  # pragma: no cover -- runs are never dropped while running
+            return
+        job = self.config.jobs.get(run.job)
+        tries = run.attempt - run.rerun
+        count = job.retries.count if job is not None else 0
+        if outcome not in _NO_RETRY and tries <= count and job is not None:
+            delay = job.retries.delay_for(tries)
+            when = now + delay
+            waiting = self._changed(
+                run, RunState.RETRY_WAIT, f"retry {tries}/{count} after {reason}"
+            )
+            events.append(self._event(run_id, "retry_scheduled", attempt=row.attempt, at=when))
+            await self._transition([waiting], attempts=[ended], events=events)
+            self._release(run_id)
+            if not self._stopping:
+                self._retry_timers[run_id] = self.clock.call_at(when, lambda: self._retry(run_id))
+            self._pump()
+            return
+        state = RunState.SUCCEEDED if outcome is Outcome.SUCCEEDED else RunState.FAILED
+        final = self._changed(run, state, reason)
+        events.append(self._event(run_id, "finished", state=state.value, reason=reason))
+        await self._transition([final], attempts=[ended], events=events)
+        self._release(run_id)
+        self._reevaluate([run.job])
+        await self._flush()
+
+    def _release(self, run_id: str) -> None:
+        """Give back the slots ``run_id`` held."""
+        self.admission.release(self._needs.pop(run_id, {}))
+
+    def _retry(self, run_id: str) -> None:
+        """Queue a run whose retry wait is over (if it is still waiting)."""
+        self._retry_timers.pop(run_id, None)
+        run = self.book.get(run_id)
+        job = self.config.jobs.get(run.job) if run else None
+        if run is None or job is None or run.state is not RunState.RETRY_WAIT:
+            return
+        self._queue(run, job)

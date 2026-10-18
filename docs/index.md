@@ -26,3 +26,5 @@ something goes wrong.
 - [Group Commit (One Trip to the Post Box for Many Letters)](concepts/group-commit.md)
 - [Dependencies (You Can't Ice the Cake Before It's Baked)](concepts/dependencies.md)
 - [Pools and Limits (Only Two Kids on the Trampoline)](concepts/pools-and-limits.md)
+- [Retries and Backoff (Knock Again, but Wait a Bit Longer Each Time)](concepts/retries-and-backoff.md)
+- [The Scheduler Engine (The School Timetable)](concepts/scheduler.md)

@@ -208,6 +208,18 @@ class TestRunBook:
         assert book.published_runs(run_date=DAY, job="a") == [old_open]
         assert book.evict_final_before(date(2026, 10, 20)) == 0
 
+    def test_open_for_lists_one_job(self) -> None:
+        """List only the open runs of the asked-for job."""
+        book = RunBook()
+        mine = make_run()
+        done = replace(make_run(seq=2, trigger=Trigger.MANUAL), state=RunState.SUCCEEDED)
+        book.put(mine)
+        book.put(done)
+        assert book.open_for("a") == [mine]
+        assert book.open_for("nobody") == []
+        book.put(replace(mine, state=RunState.FAILED))
+        assert book.open_for("a") == []
+
     def test_reopened_run_returns_to_indexes(self) -> None:
         """A final run reopened comes back to open, active and overlap views."""
         book = RunBook()

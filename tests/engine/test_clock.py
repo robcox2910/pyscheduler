@@ -178,6 +178,21 @@ class TestFakeClock:
         pynet.loop.run(main())
         assert clock.now() == START
 
+    def test_next_due_skips_cancelled(self) -> None:
+        """Report the earliest live timer, ignoring cancelled ones."""
+        clock = FakeClock(START)
+        later = START + timedelta(seconds=SLEEP_SECONDS)
+
+        async def main() -> None:
+            """Add two timers, cancel the first, and look."""
+            assert clock.next_due() is None
+            first = clock.call_at(START + timedelta(seconds=1), lambda: None)
+            clock.call_at(later, lambda: None)
+            first.cancel()
+            assert clock.next_due() == later
+
+        pynet.loop.run(main())
+
     def test_rejects_naive_start(self) -> None:
         """Refuse a start time with no time zone."""
         with pytest.raises(ValueError, match="aware"):

@@ -184,6 +184,12 @@ class FakeClock:
         """Pause the current task until the clock reaches ``when``."""
         await _sleep_until(self, when)
 
+    def next_due(self) -> datetime | None:
+        """Return when the earliest live callback is due, or ``None`` if none waits."""
+        while self._timers and self._timers[0].cancelled:
+            heapq.heappop(self._timers)
+        return self._timers[0].when if self._timers else None
+
     async def advance(self, by: timedelta) -> None:
         """Move the clock forward by ``by``, firing callbacks on the way."""
         await self.advance_to(self._now + by)

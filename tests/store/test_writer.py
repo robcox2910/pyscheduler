@@ -94,7 +94,9 @@ class TestStoreWriter:
         async def main() -> None:
             """Save one run, check it, and save an empty batch."""
             await writer.start()
+            assert writer.idle
             await writer.save(Batch(runs=[run]))
+            assert writer.idle
             assert store.get_run(run.run_id) == run
             await writer.save(Batch())
             await writer.close()

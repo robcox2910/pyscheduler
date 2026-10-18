@@ -40,6 +40,7 @@ class RunBook:
         self._active: dict[str, set[str]] = {}
         self._overlap: dict[_Slot, set[str]] = {}
         self._open: set[str] = set()
+        self._open_by_job: dict[str, set[str]] = {}
         self._by_date: dict[date, set[str]] = {}
         self._max_seq: dict[_Slot, int] = {}
         self._published: dict[str, Run] = {}
@@ -109,6 +110,10 @@ class RunBook:
     def open_runs(self) -> list[Run]:
         """Return every run that is not in a final state."""
         return self._ordered(self._open)
+
+    def open_for(self, job: str) -> list[Run]:
+        """Return the open (not final) runs of ``job``."""
+        return self._ordered(self._open_by_job.get(job, ()))
 
     def evict_final_before(self, run_date: date) -> int:
         """Forget final runs dated before ``run_date``; return how many were removed."""
@@ -189,6 +194,7 @@ class RunBook:
             self._overlap.setdefault(slot, set()).add(run.run_id)
         if run.state not in FINAL_STATES:
             self._open.add(run.run_id)
+            self._open_by_job.setdefault(run.job, set()).add(run.run_id)
         try:
             seq = parse_run_id(run.run_id)[2]
         except ValueError:
@@ -212,6 +218,7 @@ class RunBook:
         _discard(self._active, run.job, run.run_id)
         _discard(self._overlap, slot, run.run_id)
         self._open.discard(run.run_id)
+        _discard(self._open_by_job, run.job, run.run_id)
 
     def _drop_published(self, run_id: str) -> None:
         """Remove the published copy of ``run_id``, if any, from the published indexes."""

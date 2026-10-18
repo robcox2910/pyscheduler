@@ -54,6 +54,11 @@ class StoreWriter:
         self._task: Task[None] | None = None
         self.commits = 0
 
+    @property
+    def idle(self) -> bool:
+        """Return whether no save is waiting or being committed."""
+        return not self._pending and not self._in_flight
+
     async def start(self) -> None:
         """Start the writer task (once)."""
         if self._task is None and not self._closed:
