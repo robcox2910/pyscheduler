@@ -1,9 +1,13 @@
-"""Helpers for the web UI tests: parse HTML, add a probe page, sign in through the form."""
+"""Helpers for the web UI tests: parse HTML, add a probe page, sign in, open event streams."""
 
+from collections.abc import Mapping
 from html.parser import HTMLParser
 
 from api_helpers import PHRASE, ApiHarness
-from pyweb.messages import HttpRequest, HttpResponse
+from pynet.loop import timeout
+from pyweb.http1 import split_target
+from pyweb.messages import Headers, HttpRequest, HttpResponse, QueryParams
+from pyweb.sse import EventStream, ServerEvent
 from pyweb.testing import TestResponse
 
 from pyscheduler.api.auth import Principal
@@ -15,6 +19,9 @@ HOSTILE = '<script>alert("x")</script>&'
 
 SHELL_PATH = "/shell"
 """A probe page the tests add: it renders the real shell around a small body."""
+
+EVENT_WAIT = 5.0
+"""The longest a test waits for one event (real seconds)."""
 
 VOID = frozenset({"br", "hr", "input", "link", "meta"})
 
@@ -100,3 +107,30 @@ def csrf_of(text: str) -> str:
     """Return the CSRF token in the page's ``<meta name="csrf-token">``."""
     (meta,) = find(text, "meta", name="csrf-token")
     return meta[1].get("content") or ""
+
+
+async def open_stream(
+    h_: ApiHarness, path: str, headers: Mapping[str, str] | None = None
+) -> EventStream:
+    """GET ``path`` through the app (with the client's cookies) and return its ``EventStream``.
+
+    Unlike ``TestClient.stream`` this hands back the open stream, so a test
+    can read one event, change something, and read the next.
+    """
+    target, pairs = split_target(path)
+    sent = Headers([("Host", "testserver")])
+    if h_.client.cookies:
+        sent.set("Cookie", "; ".join(f"{k}={v}" for k, v in h_.client.cookies.items()))
+    for name, value in (headers or {}).items():
+        sent.set(name, value)
+    outcome = await h_.client.app.handle(
+        HttpRequest("GET", target, QueryParams(pairs), sent, b"", ("testclient", 0))
+    )
+    assert isinstance(outcome, EventStream), outcome.status
+    return outcome
+
+
+async def next_event(stream: EventStream) -> ServerEvent:
+    """Return the stream's next event, failing the test if none comes within ``EVENT_WAIT``."""
+    async with timeout(EVENT_WAIT):
+        return await anext(stream.source)

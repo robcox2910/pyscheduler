@@ -63,6 +63,7 @@ from pyscheduler.service_parts import (
     reload_for_signal,
 )
 from pyscheduler.store import Batch, ConfigRecord, Store
+from pyscheduler.ui.live import LiveFeed
 
 __all__ = ["CLOSE_GRACE", "SchedulerFailedError", "ServiceError", "is_loopback", "serve"]
 
@@ -193,6 +194,7 @@ class _Service:
         self.watchers: list[Task[None]] = []
         self.reloads: set[Task[None]] = set()
         self.reload_task: Callable[[], Coroutine[Any, Any, None]] | None = None
+        self.detach_live: Callable[[], None] | None = None
 
     def on_reload(self) -> None:
         """Start a reload for SIGHUP (ignored until the engine is up)."""
@@ -209,6 +211,8 @@ class _Service:
 
     async def shut_down(self) -> None:
         """Close the server, let reloads end, stop the alerts and the engine, then restore signals.
+
+        Once the server is closed the live feed is detached from the engine.
 
         The dispatcher stops first: alerts raised after that stay
         ``pending`` in the store and are sent at the next start. The
@@ -227,6 +231,8 @@ class _Service:
             if self.reloads:
                 await pynet.loop.gather(*self.reloads, return_exceptions=True)
         finally:
+            if self.detach_live is not None:  # the streams are closed: stop the news
+                self.detach_live()
             try:
                 await self._stop_alerts()
             finally:
@@ -252,11 +258,11 @@ async def serve(
 ) -> None:
     """Run the scheduler for the config at ``config_path`` until told to stop.
 
-    In order: load the config; read the tokens and users; hook the signals; open
-    the store; take the port (requests get 503 ``scheduler is starting``
-    for now); start the engine; record the config version (when its
-    digest is new); start the alert dispatcher and monitor; open the gate
-    and call ``ready(port)``. It ends when ``stop`` is set, on SIGTERM or
+    In order: load the config; read the tokens and users; hook the signals;
+    open the store (and attach the live feed); take the port (requests get
+    503 ``scheduler is starting`` for now); start the engine; record the
+    config version (when its digest is new); start the alert dispatcher and
+    monitor; open the gate and call ``ready(port)``. It ends when ``stop`` is set, on SIGTERM or
     SIGINT (also during start-up: it stops once the engine is up), or
     when the engine fails. SIGHUP reloads the config (a reload that finds
     errors raises a ``reload_failed`` alert). Signals are only hooked on
@@ -287,6 +293,8 @@ async def serve(
     try:
         engine, record = await _open_engine(config)
         service.engine = engine
+        live = LiveFeed()
+        service.detach_live = live.attach(engine)  # before start: recovery's changes too
         dispatcher = service.dispatcher = Dispatcher(engine)
         monitor = service.monitor = AlertMonitor(engine, dispatcher)  # hears recovery too
         reload, validate = config_actions(
@@ -306,6 +314,7 @@ async def serve(
                 users=users,
                 secure=not is_loopback(host),
                 session_key=key,
+                live=live,
             )
         except (SessionKeyError, OSError) as exc:
             raise ServiceError(str(exc)) from None

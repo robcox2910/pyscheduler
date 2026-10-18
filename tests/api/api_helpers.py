@@ -20,11 +20,14 @@ from pyscheduler.engine.clock import FakeClock
 from pyscheduler.engine.core import Engine
 from pyscheduler.store import Store
 from pyscheduler.testing import FakeLauncher
+from pyscheduler.ui.live import LiveFeed
 
 START = datetime(2026, 10, 19, tzinfo=UTC)
 """Where every harness clock starts: midnight UTC on Monday 19 October 2026."""
 
 TODAY = date(2026, 10, 19)
+BOOT = "boot"
+"""The boot id of a harness's live feed, so event ids read ``boot-1``, ``boot-2``..."""
 AT_1830 = START.replace(hour=18, minute=30)
 AFTER_CHAIN = AT_1830 + timedelta(minutes=5)
 """When ``extract`` (18:30, one minute) and then ``load`` have both succeeded."""
@@ -131,6 +134,7 @@ class ApiHarness:
     launcher: FakeLauncher
     engine: Engine
     client: TestClient
+    live: LiveFeed | None = None
 
     async def advance_to(self, when: datetime) -> None:
         """Move the clock to ``when`` one timer at a time, settling the engine after each."""
@@ -169,9 +173,11 @@ class MakeApi(Protocol):
         tokens: bool = True,
         env: dict[str, str] | None = None,
         users: str | None = None,
+        live: bool = False,
     ) -> ApiHarness:
         """Return a harness; ``tokens=False`` is development mode; ``env`` feeds ``${NAME}``.
 
         ``users`` is the text of a users file (normal mode, with web sessions).
+        ``live`` attaches a ``LiveFeed`` (boot id ``BOOT``) and serves ``/events``.
         """
         ...

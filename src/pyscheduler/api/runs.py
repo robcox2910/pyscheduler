@@ -32,7 +32,15 @@ from pyscheduler.api.support import (
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Attempt, Event, Run, RunState
 
-__all__ = ["add_run_routes", "find_run", "merged_runs", "read_tail"]
+__all__ = [
+    "DEFAULT_TAIL",
+    "add_run_routes",
+    "find_run",
+    "log_path",
+    "log_query",
+    "merged_runs",
+    "read_tail",
+]
 
 type JsonObject = dict[str, JsonValue]
 
@@ -96,13 +104,14 @@ async def find_run(engine: Engine, run_id: str) -> Run:
     return run
 
 
-def read_tail(path: Path, count: int) -> tuple[list[str], bool] | None:
+def read_tail(path: Path, count: int, *, end: int | None = None) -> tuple[list[str], bool] | None:
     """Return the last ``count`` lines of ``path`` and whether earlier text was left out.
 
     The file is read backwards in ``BLOCK``-sized steps, never more than
     ``MAX_TAIL_BYTES``, so a huge log costs no more than its tail. Bytes
-    that are not UTF-8 become U+FFFD. Returns ``None`` if the file does
-    not exist.
+    that are not UTF-8 become U+FFFD. With ``end`` only the first ``end``
+    bytes count (what a live tail has seen so far). Returns ``None`` if
+    the file does not exist.
     """
     try:
         handle = path.open("rb")
@@ -110,6 +119,8 @@ def read_tail(path: Path, count: int) -> tuple[list[str], bool] | None:
         return None
     with handle:
         pos = handle.seek(0, os.SEEK_END)
+        if end is not None:
+            pos = min(pos, end)
         data = b""
         while pos > 0 and len(data) < MAX_TAIL_BYTES:
             body = data[:-1] if data.endswith(b"\n") else data
@@ -149,6 +160,41 @@ def _pick_attempt(attempts: list[Attempt], number: int | None) -> Attempt:
             return attempt
     msg = f"run has no attempt {number}"
     raise not_found(msg)
+
+
+def log_query(request: HttpRequest) -> tuple[str, int | None]:
+    """Return the ``stream`` (stdout or stderr) and ``attempt`` (``None``: latest) asked for.
+
+    Raises:
+        ApiError: 400 if either is not valid.
+
+    """
+    stream = request.query.get("stream", "stdout")
+    if stream not in STREAMS:
+        raise ApiError(BAD_REQUEST, "stream must be stdout or stderr")
+    number = query_int(request, "attempt", default=0, low=1, high=MAX_ATTEMPT) or None
+    return stream, number
+
+
+async def log_path(
+    engine: Engine, run_id: str, stream: str, number: int | None
+) -> tuple[Attempt, str]:
+    """Return attempt ``number`` of ``run_id`` (or its latest) and its ``stream`` log path.
+
+    The path is ``""`` if the attempt has none recorded.
+
+    Raises:
+        ApiError: 404 if there is no such run or attempt, or ``stream`` is
+            ``stderr`` but stderr goes into the stdout file.
+
+    """
+    await find_run(engine, run_id)
+    attempts = await run_in_thread(engine.store.attempts_for, run_id)
+    attempt = _pick_attempt(attempts, number)
+    if stream == "stderr" and attempt.stderr_path == attempt.stdout_path:
+        msg = "stderr is merged into stdout: ask for stream=stdout"
+        raise not_found(msg)
+    return attempt, attempt.stdout_path if stream == "stdout" else attempt.stderr_path
 
 
 type _Action = Callable[[Engine, str, str, dict[str, JsonValue]], Awaitable[JsonObject]]
@@ -239,18 +285,9 @@ def add_run_routes(app: App, engine: Engine) -> None:
     @guarded
     async def show_log(request: HttpRequest, run_id: str) -> JsonObject:
         """Return the last ``tail`` lines of an attempt's stdout or stderr."""
-        stream = request.query.get("stream", "stdout")
-        if stream not in STREAMS:
-            raise ApiError(BAD_REQUEST, "stream must be stdout or stderr")
+        stream, number = log_query(request)
         tail = query_int(request, "tail", default=DEFAULT_TAIL, low=1, high=MAX_TAIL)
-        number = query_int(request, "attempt", default=0, low=1, high=MAX_ATTEMPT) or None
-        await find_run(engine, run_id)
-        attempts = await run_in_thread(engine.store.attempts_for, run_id)
-        attempt = _pick_attempt(attempts, number)
-        if stream == "stderr" and attempt.stderr_path == attempt.stdout_path:
-            msg = "stderr is merged into stdout: ask for stream=stdout"
-            raise not_found(msg)
-        path = attempt.stdout_path if stream == "stdout" else attempt.stderr_path
+        _, path = await log_path(engine, run_id, stream, number)
         found = await run_in_thread(read_tail, Path(path), tail) if path else None
         if found is None:
             msg = "no log yet"

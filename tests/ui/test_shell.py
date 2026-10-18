@@ -325,6 +325,8 @@ class TestLogout:
             "import pyscheduler.ui.html; import pyscheduler.ui",
             "import pyscheduler.ui.layout",
             "import pyscheduler.ui.login",
+            "import pyscheduler.ui.live",
+            "import pyscheduler.ui.logtail",
             "import pyscheduler.api; import pyscheduler.ui",
         ):
             run = subprocess.run(  # noqa: S603 - fixed arguments

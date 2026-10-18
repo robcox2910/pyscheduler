@@ -4,7 +4,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from api_helpers import JOBS, START, TODAY, ApiHarness, MakeApi, tokens_yaml
+from api_helpers import BOOT, JOBS, START, TODAY, ApiHarness, MakeApi, tokens_yaml
 from pyweb.testing import TestClient
 
 from pyscheduler.api import TokenHolder, TokenTable, build_app, config_actions
@@ -14,6 +14,7 @@ from pyscheduler.engine.clock import FakeClock
 from pyscheduler.engine.core import Engine
 from pyscheduler.store import Store
 from pyscheduler.testing import FakeLauncher
+from pyscheduler.ui.live import LiveFeed
 
 
 @pytest.fixture
@@ -26,6 +27,7 @@ def api(tmp_path: Path) -> MakeApi:
         tokens: bool = True,
         env: dict[str, str] | None = None,
         users: str | None = None,
+        live: bool = False,
     ) -> ApiHarness:
         """Write the config, tokens and users, then build the store, fakes, engine and app."""
         header = (
@@ -54,7 +56,14 @@ def api(tmp_path: Path) -> MakeApi:
         launcher = FakeLauncher(clock)
         engine = Engine(config, store, clock=clock, launcher=launcher)
         reload, validate = config_actions(engine, path, env=env or {}, tokens=holder, users=people)
-        app = build_app(engine, tokens=holder, reload=reload, validate=validate, users=people)
-        return ApiHarness(tmp_path, path, config, store, clock, launcher, engine, TestClient(app))
+        feed = None
+        if live:
+            feed = LiveFeed(boot=BOOT)
+            feed.attach(engine)  # before the engine starts, as the service does
+        app = build_app(
+            engine, tokens=holder, reload=reload, validate=validate, users=people, live=feed
+        )
+        client = TestClient(app)
+        return ApiHarness(tmp_path, path, config, store, clock, launcher, engine, client, feed)
 
     return make
