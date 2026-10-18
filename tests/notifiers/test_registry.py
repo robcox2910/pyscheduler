@@ -99,10 +99,54 @@ def test_option_types_are_checked(tmp_path: Path) -> None:
     assert "must be text or a list of text" in check_notifier(definition, settings)[0]
 
 
-def test_unregistered_http_types_are_accepted(tmp_path: Path) -> None:
-    """Types Task 4 registers pass for now, whatever their options."""
+def test_http_types_are_checked(tmp_path: Path) -> None:
+    """The network types are registered: their options are validated."""
     definition, settings = definition_and_settings(tmp_path, {"type": "slack", "anything": 1})
-    assert check_notifier(definition, settings) == []
+    assert check_notifier(definition, settings) == [
+        "missing required option 'webhook_url' for slack notifier"
+    ]
+
+
+class BrokenEntryPoint:
+    """Stand-in for an entry point whose ``load`` raises."""
+
+    name = "broken"
+
+    def load(self) -> NotifierFactory:
+        """Fail like a missing module."""
+        message = "no module named oops"
+        raise ImportError(message)
+
+
+class NotCallableEntryPoint:
+    """Stand-in for an entry point that loads to something that is not a function."""
+
+    name = "plain"
+
+    def load(self) -> object:
+        """Return a non-callable."""
+        return 5
+
+
+def test_plugin_load_failures_are_config_problems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plug-in that cannot load, or loads to a non-callable, is a problem and not a traceback."""
+
+    def fake(*, group: str) -> list[BrokenEntryPoint | NotCallableEntryPoint]:
+        """Return the two bad entry points."""
+        assert group == "pyscheduler.notifiers"
+        return [BrokenEntryPoint(), NotCallableEntryPoint()]
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake)
+    definition, settings = definition_and_settings(tmp_path, {"type": "broken"})
+    assert check_notifier(definition, settings) == [
+        "cannot load notifier type 'broken': no module named oops"
+    ]
+    definition, settings = definition_and_settings(tmp_path, {"type": "plain"})
+    assert check_notifier(definition, settings) == [
+        "cannot load notifier type 'plain': not a callable factory"
+    ]
 
 
 def test_build_unknown_type_raises(tmp_path: Path) -> None:

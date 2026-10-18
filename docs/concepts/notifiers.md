@@ -26,13 +26,10 @@ loads, at the notifier's line, long before an alert needs it.
 | --- | --- | --- |
 | `log` | Appends the alert as one JSON line to a file. | `path` (required) |
 | `command` | Runs a program and gives it the alert JSON on stdin. | `command` (required) |
-| `webhook` | Posts the alert JSON to a web address. | `url` |
-| `slack` | Posts a message to a Slack incoming webhook. | `webhook_url` |
-| `telegram` | Sends a message through a Telegram bot. | `bot_token`, `chat_id` |
-| `email` | Sends an email over SMTP. | `host`, `to`, ... |
-
-The `webhook`, `slack`, `telegram` and `email` types talk over the
-network; their details are covered further down.
+| `webhook` | Posts the alert JSON to a web address. | `url` (required), `headers` |
+| `slack` | Posts a message to a Slack incoming webhook. | `webhook_url` (required) |
+| `telegram` | Sends a message through a Telegram bot. | `bot_token`, `chat_id` (required), `api_url` |
+| `email` | Sends an email over SMTP. | `host`, `from`, `to` (required), `port`, `username`, `password`, `starttls` |
 
 ### log: the notice board
 
@@ -60,6 +57,51 @@ notifiers:
 If it exits with anything but 0 the delivery fails, and the last line it
 wrote to stderr is kept as the reason. If it is still running when the
 `timeout` ends, it and everything it started are stopped.
+
+### webhook, slack and telegram: the postcards
+
+```yaml
+notifiers:
+  ops-hook:
+    type: webhook
+    url: "https://example.org/alerts"
+    headers: {Authorization: "Bearer ${OPS_TOKEN}"}
+  chat:
+    type: slack
+    webhook_url: "${SLACK_URL}"
+  phone:
+    type: telegram
+    bot_token: "${BOT_TOKEN}"
+    chat_id: "42"
+```
+
+Each one posts a little JSON note to a web address and checks that the
+answer starts with 2 (success). `webhook` posts the whole alert; `slack`
+and `telegram` post one line, `[critical] load.2026-10-19.1 failed: exit 1`.
+A web address must start with `http://` or `https://`. Anything other than
+a 2xx answer fails the delivery as `HTTP <status>`, and **a redirect is
+never followed**: a 302 is a failure, so your secrets never get forwarded
+to a place you did not choose. The post runs off to the side, so a slow
+server cannot stall the scheduler; the `timeout` ends it.
+
+### email: the letter
+
+```yaml
+notifiers:
+  mail-ops:
+    type: email
+    host: smtp.example.org
+    from: scheduler@example.org
+    to: [ops@example.org, boss@example.org]   # or a single address
+    username: scheduler
+    password: "${SMTP_PASSWORD}"
+```
+
+The mail server is spoken to on `port` (default `587`), upgraded to an
+encrypted connection with STARTTLS unless you say `starttls: false`, and
+logged in to when you give a `username` (which needs a `password`, and the
+other way round). The subject is `[pysched high] <message>` and the body is
+the whole alert as tidy JSON.
 
 ## Trying a Notifier
 

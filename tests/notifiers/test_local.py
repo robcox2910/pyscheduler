@@ -73,8 +73,9 @@ class TestCommandNotifier:
 
     def test_command_notifier_list_form(self, tmp_path: Path) -> None:
         """A list command runs without a shell."""
-        notifier = build(tmp_path, "{type: command, command: [cat]}")
+        notifier = build(tmp_path, f"{{type: command, command: [tee, {tmp_path}/out.json]}}")
         pynet.loop.run(notifier.send(ALERT))
+        assert json.loads((tmp_path / "out.json").read_text(encoding="utf-8")) == ALERT
 
     def test_command_notifier_nonzero_exit(self, tmp_path: Path) -> None:
         """A failing command reports its exit code and last stderr line."""
@@ -100,6 +101,33 @@ class TestCommandNotifier:
             pynet.loop.run(notifier.send(ALERT))
         assert str(caught.value) == "command timed out after 1s"
         assert time.monotonic() - started < TIMEOUT_LIMIT_SECONDS
+        pgid = int(pid_file.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError, PermissionError:  # macOS: EPERM for a zombie-only group
+                return
+            time.sleep(0.02)
+        pytest.fail("a child of the command is still alive")
+
+    def test_command_notifier_cancel_kills_group(self, tmp_path: Path) -> None:
+        """Cancelling a send kills the command and everything it started."""
+        pid_file = tmp_path / "pgid"
+        command = f"echo $$$$ > {pid_file}; sleep 30 & sleep 30"
+        notifier = build(tmp_path, f"{{type: command, command: '{command}'}}")
+
+        async def main() -> None:
+            """Start a send, wait for the command to run, then cancel it."""
+            task = pynet.loop.spawn(notifier.send(ALERT), name="send")
+            deadline = time.monotonic() + 2.0
+            while not pid_file.exists() and time.monotonic() < deadline:
+                await pynet.loop.sleep(0.02)
+            task.cancel()
+            with pytest.raises(pynet.loop.Cancelled):
+                await task
+
+        pynet.loop.run(main())
         pgid = int(pid_file.read_text(encoding="utf-8"))
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:

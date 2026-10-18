@@ -101,6 +101,9 @@ class CommandNotifier:
             process.kill_group()
             message = f"command timed out after {self.timeout_text}"
             raise NotifyError(message) from None
+        except BaseException:
+            process.kill_group()  # cancelled or broken: never leave the command running
+            raise
         finally:
             process.close()
         if code != 0:

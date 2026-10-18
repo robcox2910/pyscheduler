@@ -7,7 +7,7 @@ a notifier's ``type`` and it finds the right kind of messenger.
 """
 
 from collections.abc import Callable, Mapping
-from typing import Protocol
+from typing import Protocol, cast
 
 from pynet.messaging import JsonValue
 
@@ -38,18 +38,25 @@ type NotifierFactory = Callable[[NotifierDef, Settings], Notifier]
 A factory must not do I/O: validation calls it just to check the options.
 """
 
-UNREGISTERED_TYPES = frozenset({"webhook", "slack", "telegram", "email"})
-"""Built-in types whose factories are not written yet: accepted as valid, never built.
-
-Task 4 registers these in ``builtin_factories`` and empties this set.
-"""
-
 
 def builtin_factories() -> dict[str, NotifierFactory]:
     """Return the built-in notifier factories by type name."""
+    from pyscheduler.notifiers.email import EmailNotifier  # noqa: PLC0415
     from pyscheduler.notifiers.local import CommandNotifier, LogNotifier  # noqa: PLC0415
+    from pyscheduler.notifiers.web import (  # noqa: PLC0415
+        SlackNotifier,
+        TelegramNotifier,
+        WebhookNotifier,
+    )
 
-    return {"log": LogNotifier.from_config, "command": CommandNotifier.from_config}
+    return {
+        "log": LogNotifier.from_config,
+        "command": CommandNotifier.from_config,
+        "webhook": WebhookNotifier.from_config,
+        "slack": SlackNotifier.from_config,
+        "telegram": TelegramNotifier.from_config,
+        "email": EmailNotifier.from_config,
+    }
 
 
 def check_options(
@@ -67,6 +74,20 @@ def check_options(
             raise ValueError(message)
 
 
+def text_option(definition: NotifierDef, key: str, default: str | None = None) -> str:
+    """Return option ``key`` as non-empty text (or ``default`` when absent).
+
+    Raises:
+        ValueError: If the option is missing with no default, or is not text.
+
+    """
+    raw = definition.options.get(key, default)
+    if not isinstance(raw, str) or not raw:
+        message = f"option {key!r} for {definition.type} notifier must be text"
+        raise ValueError(message)
+    return raw
+
+
 def build_notifier(definition: NotifierDef, settings: Settings) -> Notifier:
     """Build the notifier for ``definition``: a built-in type, else a plug-in entry point.
 
@@ -80,14 +101,20 @@ def build_notifier(definition: NotifierDef, settings: Settings) -> Notifier:
         if entry is None:
             message = f"unknown notifier type {definition.type!r}"
             raise ValueError(message)
-        factory = entry.load()
+        try:
+            loaded = entry.load()
+        except Exception as exc:
+            message = f"cannot load notifier type {definition.type!r}: {exc}"
+            raise ValueError(message) from exc
+        if not callable(loaded):
+            message = f"cannot load notifier type {definition.type!r}: not a callable factory"
+            raise ValueError(message)
+        factory = cast("NotifierFactory", loaded)
     return factory(definition, settings)
 
 
 def check_notifier(definition: NotifierDef, settings: Settings) -> list[str]:
     """Return the problems with ``definition``'s options (empty when it is fine)."""
-    if definition.type in UNREGISTERED_TYPES:
-        return []
     try:
         build_notifier(definition, settings)
     except ValueError as exc:
@@ -96,7 +123,6 @@ def check_notifier(definition: NotifierDef, settings: Settings) -> list[str]:
 
 
 __all__ = [
-    "UNREGISTERED_TYPES",
     "Notifier",
     "NotifierFactory",
     "NotifyError",
@@ -104,4 +130,5 @@ __all__ = [
     "builtin_factories",
     "check_notifier",
     "check_options",
+    "text_option",
 ]
