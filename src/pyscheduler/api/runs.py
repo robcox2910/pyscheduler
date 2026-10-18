@@ -16,6 +16,7 @@ from pynet.messaging import JsonValue
 from pyweb.app import App
 from pyweb.messages import HttpRequest
 
+from pyscheduler.api.alerts import alert_rows
 from pyscheduler.api.serialize import attempt_json, event_json, run_json
 from pyscheduler.api.support import (
     BAD_REQUEST,
@@ -216,20 +217,22 @@ def add_run_routes(app: App, engine: Engine) -> None:
     @app.get("/api/runs/<run_id>")
     @guarded
     async def show_run(request: HttpRequest, run_id: str) -> JsonObject:
-        """Show a run with its attempts and events."""
+        """Show a run with its attempts, events and alerts."""
         del request
         run = await find_run(engine, run_id)
         store = engine.store
 
-        def read() -> tuple[list[Attempt], list[Event]]:
-            """Read the run's attempts and events from the store."""
-            return store.attempts_for(run_id), store.events_for(run_id)
+        def read() -> tuple[list[Attempt], list[Event], list[JsonValue]]:
+            """Read the run's attempts, events and alerts (with deliveries) from the store."""
+            alerts = alert_rows(engine, store.alerts_for(run_id))
+            return store.attempts_for(run_id), store.events_for(run_id), alerts
 
-        attempts, events = await run_in_thread(read)
+        attempts, events, alerts = await run_in_thread(read)
         return {
             "run": run_json(run, attempts[-1] if attempts else None),
             "attempts": [attempt_json(a) for a in attempts],
             "events": [event_json(e) for e in events],
+            "alerts": alerts,
         }
 
     @app.get("/api/runs/<run_id>/log")

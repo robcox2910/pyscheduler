@@ -8,7 +8,7 @@ tokens file, so a revoked token stops working), ``validate`` only
 reports.
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 
 from pynet.loop import run_in_thread
@@ -57,6 +57,7 @@ def config_actions(
     *,
     env: Mapping[str, str] | None = None,
     tokens: TokenHolder | None = None,
+    on_failed: Callable[[Sequence[Problem]], None] | None = None,
 ) -> tuple[Reload, Validate]:
     """Return ``(reload, validate)`` callables for the config at ``path``.
 
@@ -70,7 +71,15 @@ def config_actions(
     ``api_tokens_file`` and swaps it into the holder once the config is
     in. A tokens file that cannot be read, or a change between
     development mode and tokens, fails the whole reload.
+
+    A reload that comes back with errors (the files, or the tokens file)
+    calls ``on_failed`` with those error problems, whoever asked for it.
     """
+
+    def _failed(problems: Sequence[Problem]) -> None:
+        """Tell ``on_failed`` about a reload that found these error problems."""
+        if on_failed is not None:
+            on_failed([p for p in problems if p.severity == "error"])
 
     async def load() -> tuple[Config | None, list[Problem]]:
         """Load the config files, returning the config or its errors."""
@@ -86,12 +95,14 @@ def config_actions(
         """Load the files (and the tokens) and, if they are valid, swap them in."""
         config, problems = await load()
         if config is None:
+            _failed(problems)
             return problems
         table = None
         if tokens is not None:
             loaded, holder = config, tokens
             table, trouble = await run_in_thread(lambda: _reread_tokens(loaded, path, holder))
             if trouble:
+                _failed(trouble)
                 return trouble + problems
         await engine.reload(config, actor=actor)
         if tokens is not None:

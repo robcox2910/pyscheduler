@@ -31,6 +31,7 @@ from pathlib import Path
 import pynet.loop
 from pydb.errors import PyDBError
 
+from pyscheduler.cli_alerts import ALERT_COMMANDS
 from pyscheduler.cli_commands import (
     CLIENT_COMMANDS,
     OFFLINE_COMMANDS,
@@ -135,6 +136,14 @@ def _add_client(add: AddParser) -> None:
                 "--downstream", action="store_true", help="also rerun final downstream runs"
             )
     add("reload", parents=conn, help="reload the config files")
+    alerts = add("alerts", parents=conn, help="list alerts and how their delivery went")
+    alerts.add_argument("--kind", help="only this kind of alert, such as failed")
+    alerts.add_argument("--job", help="only this job's alerts")
+    alerts.add_argument("--since", help="only alerts raised on or after this date YYYY-MM-DD")
+    alerts.add_argument("--dead", action="store_true", help="list the deliveries that gave up")
+    replay = add("replay", parents=conn, help="send an alert's dead deliveries again")
+    replay.add_argument("alert", help="the alert id")
+    replay.add_argument("--notifier", help="only this notifier's delivery")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -236,7 +245,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if offline is not None:
         return offline(args)
     try:
-        return CLIENT_COMMANDS[command](_client(args), args)
+        return (CLIENT_COMMANDS | ALERT_COMMANDS)[command](_client(args), args)
     except ApiError as exc:
         warn(f"pysched {command}: {exc}")
         for line in problem_lines(exc.problems):

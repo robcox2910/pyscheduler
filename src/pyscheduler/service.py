@@ -36,6 +36,8 @@ from pynet.errors import PyNetError
 from pynet.loop import Event, Task
 from pyweb.aserver import AsyncServer
 
+from pyscheduler.alerts.dispatch import Dispatcher
+from pyscheduler.alerts.monitor import AlertMonitor
 from pyscheduler.api import TokenFileError, TokenHolder, TokenTable, build_app, config_actions
 from pyscheduler.config import Config, load_config
 from pyscheduler.engine.base import EngineFailedError
@@ -165,6 +167,8 @@ class _Service:
         self.wake = Event()
         self.gate = StartingGate()
         self.engine: Engine | None = None
+        self.dispatcher: Dispatcher | None = None
+        self.monitor: AlertMonitor | None = None
         self.server: AsyncServer | None = None
         self.signals: SignalHooks | None = None
         self.watchers: list[Task[None]] = []
@@ -185,7 +189,11 @@ class _Service:
         self.watchers.append(pynet.loop.spawn(_until(aw, self.wake), name=name))
 
     async def shut_down(self) -> None:
-        """Close the server, let reloads end, stop the engine, then restore the signals.
+        """Close the server, let reloads end, stop the alerts and the engine, then restore signals.
+
+        The alert monitor stops first and then the dispatcher, both before
+        the engine: once the engine's writer is closed, a monitor still
+        raising alerts would fail the engine stop.
 
         The signal handlers go last, so a second Ctrl-C while closing is
         a no-op rather than a ``KeyboardInterrupt``.
@@ -199,12 +207,24 @@ class _Service:
                 await pynet.loop.gather(*self.reloads, return_exceptions=True)
         finally:
             try:
-                if self.engine is not None:
-                    await self.engine.stop()
-                    logger.info("scheduler stopped")
+                await self._stop_alerts()
             finally:
-                if self.signals is not None:
-                    self.signals.restore()
+                try:
+                    if self.engine is not None:
+                        await self.engine.stop()
+                        logger.info("scheduler stopped")
+                finally:
+                    if self.signals is not None:
+                        self.signals.restore()
+
+    async def _stop_alerts(self) -> None:
+        """Stop the alert monitor, then the dispatcher (each is safe if never started)."""
+        try:
+            if self.monitor is not None:
+                await self.monitor.stop()
+        finally:
+            if self.dispatcher is not None:
+                await self.dispatcher.stop()
 
 
 async def serve(
@@ -218,14 +238,17 @@ async def serve(
     In order: load the config; check the tokens; hook the signals; open
     the store; take the port (requests get 503 ``scheduler is starting``
     for now); start the engine; record the config version (when its
-    digest is new); open the gate and call ``ready(port)``. It ends when
-    ``stop`` is set, on SIGTERM or SIGINT (also during start-up: it stops
-    once the engine is up), or when the engine fails. SIGHUP reloads the
-    config. Signals are only hooked on the main thread.
+    digest is new); start the alert dispatcher and monitor; open the gate
+    and call ``ready(port)``. It ends when ``stop`` is set, on SIGTERM or
+    SIGINT (also during start-up: it stops once the engine is up), or
+    when the engine fails. SIGHUP reloads the config (a reload that finds
+    errors raises a ``reload_failed`` alert). Signals are only hooked on
+    the main thread.
 
     Shutting down closes the server (letting requests finish for
-    ``CLOSE_GRACE`` seconds) and stops the engine without killing running
-    attempts: their minders carry on and are adopted on the next start.
+    ``CLOSE_GRACE`` seconds), stops the alerts, then stops the engine
+    without killing running attempts: their minders carry on and are
+    adopted on the next start.
 
     Raises:
         ConfigError: If the config has errors (nothing has been opened).
@@ -245,9 +268,15 @@ async def serve(
     try:
         engine, record = await _open_engine(config)
         service.engine = engine
-        reload, validate = config_actions(engine, config_path, tokens=tokens)
+        dispatcher = service.dispatcher = Dispatcher(engine)
+        monitor = service.monitor = AlertMonitor(engine, dispatcher)  # hears recovery too
+        reload, validate = config_actions(
+            engine, config_path, tokens=tokens, on_failed=monitor.reload_failed
+        )
         service.reload_task = lambda: reload_for_signal(reload)
-        app = build_app(engine, tokens=tokens, reload=reload, validate=validate)
+        app = build_app(
+            engine, tokens=tokens, reload=reload, validate=validate, dispatcher=dispatcher
+        )
         app.middleware(service.gate.middleware())
         service.server = AsyncServer(app)
         try:
@@ -257,6 +286,8 @@ async def serve(
             msg = f"cannot listen on {host}:{port}: {cause}"
             raise ServiceError(msg) from None
         await _start(engine, record)
+        await dispatcher.start()
+        await monitor.start()
         if not service.wake.is_set():  # a stop signal while starting skips the rest
             service.watch(engine.wait_failed(), "failed")
             if stop is not None:

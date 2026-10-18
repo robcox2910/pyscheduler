@@ -139,6 +139,8 @@ class Dispatcher(Pigeonholes):
         Raises:
             LookupError: If the alert has no such dead delivery.
             RuntimeError: If the dispatcher was not started.
+            Exception: The store's error, if saving the rows failed (the
+                engine then fails stop, as for any lost write).
 
         """
         self._require()
@@ -163,7 +165,8 @@ class Dispatcher(Pigeonholes):
             replace(d, status=DeliveryStatus.PENDING, attempts=0, last_error="", updated_at=now)
             for d in dead
         ]
-        await self.engine.writer.save(Batch(deliveries=fresh))
+        if not await self._save(Batch(deliveries=fresh)):
+            raise self.error or RuntimeError("delivery stopped")
         body = self._body(alert)
         for delivery in fresh:
             self._replays += 1  # a fresh message id: PyMQ remembers ids it has seen

@@ -171,7 +171,11 @@ class Pigeonholes(ABC):
         return DeliveryRecord(alert_id, name, status, attempts, error, self.engine.clock.now())
 
     async def _write(self, record: DeliveryRecord) -> bool:
-        """Save one delivery row; on a store error fail the engine stop and return ``False``.
+        """Save one delivery row; on a store error fail the engine stop and return ``False``."""
+        return await self._save(Batch(deliveries=[record]))
+
+    async def _save(self, batch: Batch) -> bool:
+        """Save ``batch``; on a store error fail the engine stop and return ``False``.
 
         Store failures are fail-stop: the engine stops, and so does
         delivering (no more sends, acks or nacks).
@@ -179,7 +183,7 @@ class Pigeonholes(ABC):
         if self.error is not None:
             return False
         try:
-            await self.engine.writer.save(Batch(deliveries=[record]))
+            await self.engine.writer.save(batch)
         except Exception as exc:  # noqa: BLE001 -- handed to the engine's fail path
             if self.error is None:
                 self.error = exc

@@ -19,7 +19,9 @@ customers already inside finish, then send the staff home.
 2. it opens the **store** (the notebook of runs in `state_dir`);
 3. it starts the **engine** (recovery, catch-up, then the firing task),
    and remembers the config version if the files changed;
-4. it opens the **HTTP API** on `listen` (default `127.0.0.1:8470`).
+4. it opens the **HTTP API** on `listen` (default `127.0.0.1:8470`);
+5. it starts the **alert post office** (the dispatcher) and the **smoke
+   alarm** (the monitor), so a failed run is reported to its notifiers.
 
 The door is actually unlocked a little early: the port is taken right
 after the store opens, so a busy port stops `serve` before any job is
@@ -27,8 +29,8 @@ started. Until the engine is ready, every request gets
 `503 scheduler is starting`.
 
 Closing (Ctrl-C or `SIGTERM`) turns the sign round: the API stops taking
-new requests, requests already inside get 5 seconds to finish, and the
-engine stops. Jobs that are running are **not** killed: their minders
+new requests, requests already inside get 5 seconds to finish, the alarm
+and the post office stop, and the engine stops. Jobs that are running are **not** killed: their minders
 keep babysitting them, and the next `serve` adopts them again.
 
 `SIGHUP` (`kill -HUP <pid>`) is like a new delivery note arriving while
@@ -57,6 +59,12 @@ The rest send a request to the API:
 
 - `status [--date D]`, `runs`, `show RUN`, `log RUN [--stderr] [--tail N]`;
 - `trigger JOB [--run-date D]`, `backfill JOB --from D --to D`, `reload`;
+- `alerts [--kind K] [--job J] [--since D]`: a table with the columns
+  `RAISED KIND CRIT JOB RUN STATUS MESSAGE`. `STATUS` is `sent`,
+  `pending` or `dead` (the worst of the alert's deliveries), or `none`
+  when no notifier was routed to it. `alerts --dead` lists the
+  deliveries that gave up;
+- `replay ALERT [--notifier N]`: send an alert's dead deliveries again;
 - `rerun`, `hold`, `release`, `kill`, `force-start`, `skip`,
   `mark-success`, `mark-failed` (each takes a run id).
 

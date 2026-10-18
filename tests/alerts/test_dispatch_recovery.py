@@ -226,6 +226,33 @@ class TestStoreFailure:
         run_dispatcher(harness, {"pager": pager, "desk": desk}, body)
         assert [a["alert_id"] for a in pager.received] == [first.alert_id]
 
+    def test_replay_store_failure_fails_the_engine_stop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A store failure while replaying stops the dispatcher and the engine, then re-raises."""
+        harness = make_harness(tmp_path, DISPATCH_CONFIG)
+        desk = FlakyNotifier(fails=2)
+        alert = make_alert()
+        failure = OSError("disk on fire")
+
+        async def body(dispatcher: Dispatcher) -> None:
+            """Kill the desk delivery, break the writer, and replay."""
+            await raise_alert(harness, dispatcher, alert)
+            assert (await stored(dispatcher, alert.alert_id))["desk"].status is DeliveryStatus.DEAD
+
+            async def broken(batch: Batch) -> None:
+                """Fail every save."""
+                del batch
+                raise failure
+
+            monkeypatch.setattr(harness.engine.writer, "save", broken)
+            with pytest.raises(OSError, match="disk on fire"):
+                await dispatcher.replay(alert.alert_id, "desk")
+            assert dispatcher.error is failure
+            assert harness.engine.error is failure
+
+        run_dispatcher(harness, {"pager": RecordingNotifier(), "desk": desk}, body)
+
     def test_lease_is_kept_during_a_slow_write(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
