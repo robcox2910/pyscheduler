@@ -112,17 +112,18 @@ class TestAgainstServer:
     def test_cli_against_server(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """``rerun``, ``hold`` and ``release`` return 0; an unknown run gives 1 with the message."""
         path = write_config(tmp_path)
-        a_run = f"a.{today()}.1"
-        waiter_run = f"waiter.{today()}.1"
+        day = today()  # once, and passed explicitly: midnight may pass during the test
+        a_run = f"a.{day}.1"
+        waiter_run = f"waiter.{day}.1"
 
         def body(url: str) -> list[int]:
             """Run the commands; return their exit codes."""
             client = ApiClient(url, None)
-            codes = [main(["--url", url, "trigger", "a"])]
-            wait_for_states(client, {"a": "succeeded", "b": "succeeded"})
+            codes = [main(["--url", url, "trigger", "a", "--run-date", day])]
+            wait_for_states(client, {"a": "succeeded", "b": "succeeded"}, run_date=day)
             codes.append(main(["rerun", "--url", url, a_run]))
-            wait_for_states(client, {"a": "succeeded"})
-            codes.append(main(["trigger", "--url", url, "waiter"]))
+            wait_for_states(client, {"a": "succeeded"}, run_date=day)
+            codes.append(main(["trigger", "--url", url, "waiter", "--date", day]))
             codes.append(main(["hold", "--url", url, waiter_run]))
             assert client.run(waiter_run)["run"]["state"] == "held"
             codes.append(main(["release", "--url", url, waiter_run]))
@@ -176,12 +177,14 @@ class TestAgainstServer:
         monkeypatch.setattr(cli_commands, "STATUS_LIMIT", 1)
         path = write_config(tmp_path)
 
+        day = today()
+
         def body(url: str) -> int:
             """Make two runs, then ask for the status."""
             client = ApiClient(url, None)
-            client.trigger("gate")
-            client.trigger("gate")
-            return main(["status", "--url", url, "--date", today()])
+            client.trigger("gate", run_date=day)
+            client.trigger("gate", run_date=day)
+            return main(["status", "--url", url, "--date", day])
 
         assert with_service(path, body) == OK
         assert "only the newest 1 runs" in capsys.readouterr().err

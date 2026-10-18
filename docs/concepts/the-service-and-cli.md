@@ -56,17 +56,23 @@ scheduler switched off, because they only read files on your computer:
 The rest send a request to the API:
 
 - `status [--date D]`, `runs`, `show RUN`, `log RUN [--stderr] [--tail N]`;
-- `trigger JOB`, `backfill JOB --from D --to D`, `reload`;
+- `trigger JOB [--run-date D]`, `backfill JOB --from D --to D`, `reload`;
 - `rerun`, `hold`, `release`, `kill`, `force-start`, `skip`,
   `mark-success`, `mark-failed` (each takes a run id).
 
 Point it at the scheduler with `--url` (or `PYSCHED_URL`) and prove who
-you are with `--token` (or `PYSCHED_TOKEN`). It answers with an **exit
+you are with `PYSCHED_TOKEN` (or `--token`). Prefer the environment
+variable: a `--token` on the command line shows up in `ps` for every
+user of the machine. It answers with an **exit
 code**: `0` it worked, `1` the scheduler said no (or could not be
 reached, or for `serve`: the state folder is in use by another
 scheduler), `2` you typed something wrong or the config has errors.
 `status` shows today's runs, where "today" is the scheduler's date in
-its own time zone.
+its own time zone. `trigger` without `--run-date` (alias `--date`)
+picks the run date the job's own `run_date` rule gives today: for
+`same_day`, today in the job's time zone (or the latest business day
+before it, if today is not one); for `previous_business_day`, the
+business day before today.
 
 ## Try It
 

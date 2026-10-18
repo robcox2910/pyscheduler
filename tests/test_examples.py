@@ -66,3 +66,20 @@ class TestEtlExample:
         assert list((tmp_path / "state").iterdir())  # the marker is in the state folder
         assert attempt() == 0
         assert list((tmp_path / "state").iterdir()) == []
+
+    def test_header_matches_readme(self) -> None:
+        """The example's header shows the README's trigger commands, with their dates."""
+        readme = (EXAMPLES.parent / "README.md").read_text(encoding="utf-8")
+        header = ETL.read_text(encoding="utf-8")
+
+        def triggers(text: str) -> list[str]:
+            """Return each ``pysched trigger ...`` command in ``text``, comments dropped."""
+            found: list[str] = []
+            for line in text.splitlines():
+                start = line.find("pysched trigger ")
+                if start >= 0:
+                    found.append(" ".join(line[start:].split("#")[0].split()))
+            return found
+
+        assert triggers(header) == triggers(readme)
+        assert all("--run-date" in command for command in triggers(header))

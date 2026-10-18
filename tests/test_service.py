@@ -42,14 +42,18 @@ class TestServeEndToEnd:
         caplog.set_level(logging.INFO, logger="pyscheduler.service")
         path = write_config(tmp_path)
 
+        day = today()  # once: midnight UTC may pass while the test runs
+
         def body(url: str) -> int:
             """Trigger a, wait for both runs, then print the status table."""
             client = ApiClient(url, None)
-            assert client.health() == {"status": "ok", "timezone": "UTC", "today": today()}
-            run = client.trigger("a")["run"]
-            assert run["run_id"] == f"a.{today()}.1"
-            wait_for_states(client, {"a": "succeeded", "b": "succeeded"})
-            return main(["status", "--url", url])  # the server's today
+            health = client.health()
+            assert health == {"status": "ok", "timezone": "UTC", "today": health["today"]}
+            assert health["today"] in {day, today()}
+            run = client.trigger("a", run_date=day)["run"]
+            assert run["run_id"] == f"a.{day}.1"
+            wait_for_states(client, {"a": "succeeded", "b": "succeeded"}, run_date=day)
+            return main(["status", "--url", url, "--date", day])
 
         assert with_service(path, body) == 0
         out = capsys.readouterr().out
@@ -57,8 +61,8 @@ class TestServeEndToEnd:
         assert header.split() == ["JOB", "RUN", "STATE", "ATTEMPT", "STARTED", "DURATION"]
         assert {row.split()[0] for row in rows} == {"a", "b"}
         assert all(row.split()[2] == "succeeded" for row in rows)
-        assert f"run a.{today()}.1 succeeded (attempt 1)" in caplog.messages
-        assert f"run b.{today()}.1 succeeded (attempt 1)" in caplog.messages
+        assert f"run a.{day}.1 succeeded (attempt 1)" in caplog.messages
+        assert f"run b.{day}.1 succeeded (attempt 1)" in caplog.messages
 
     def test_records_the_config_once_per_digest(self, tmp_path: Path) -> None:
         """The first start records version 1; the same files again add nothing; a change adds 2."""

@@ -117,7 +117,12 @@ def _add_client(add: AddParser) -> None:
     log.add_argument("--attempt", type=int, help="which attempt (default the latest)")
     trigger = add("trigger", parents=conn, help="start a manual run of a job")
     trigger.add_argument("job")
-    trigger.add_argument("--date", help="run date YYYY-MM-DD (default today)")
+    trigger.add_argument(
+        "--run-date",
+        "--date",
+        dest="run_date",
+        help="run date YYYY-MM-DD (default: what the job's run_date rule gives today)",
+    )
     backfill = add("backfill", parents=conn, help="create runs for past days")
     backfill.add_argument("job")
     backfill.add_argument("--from", dest="start", required=True, help="first run date")

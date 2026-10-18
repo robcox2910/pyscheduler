@@ -46,8 +46,8 @@ uv run pysched serve examples/etl.yaml          # start the scheduler (leave it 
 In another terminal:
 
 ```bash
-uv run pysched trigger extract --date 2026-10-16
-uv run pysched trigger fetch-rates --date 2026-10-16
+uv run pysched trigger extract --run-date 2026-10-16
+uv run pysched trigger fetch-rates --run-date 2026-10-16
 uv run pysched status --date 2026-10-16
 uv run pysched log fetch-rates.2026-10-16.1 --attempt 1 --stderr
 ```

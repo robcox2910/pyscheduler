@@ -222,7 +222,7 @@ def _print_runs(found: list[dict[str, object]]) -> None:
 
 def trigger(client: ApiClient, args: argparse.Namespace) -> int:
     """Create a manual run of a job."""
-    _print_runs([client.trigger(args.job, run_date=args.date)["run"]])
+    _print_runs([client.trigger(args.job, run_date=args.run_date)["run"]])
     return OK
 
 

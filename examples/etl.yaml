@@ -1,9 +1,11 @@
 # A small nightly ETL chain, to try PyScheduler out.
 #
 #   pysched validate examples/etl.yaml
-#   pysched serve examples/etl.yaml          # from the repository root
-#   pysched trigger extract                  # in another terminal
-#   pysched status
+#   pysched serve examples/etl.yaml                       # from the repository root
+#   pysched trigger extract --run-date 2026-10-16         # in another terminal
+#   pysched trigger fetch-rates --run-date 2026-10-16
+#   pysched status --date 2026-10-16
+#   pysched log fetch-rates.2026-10-16.1 --attempt 1 --stderr
 #
 # Every weekday at 02:00 (London time) the chain processes the previous
 # business day:

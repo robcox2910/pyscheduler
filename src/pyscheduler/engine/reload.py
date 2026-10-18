@@ -66,23 +66,37 @@ class ConfigReload(OperatorActions):
     """Give the engine ``trigger``, ``backfill`` and ``reload``."""
 
     async def trigger(self, job: str, *, run_date: date | None = None, actor: str) -> Run:
-        """Create a manual run of ``job`` now; the run date defaults to today in its zone.
+        """Create a manual run of ``job`` now; the run date defaults by the job's rule.
 
-        Manual runs are always new (the next sequence number), and create
-        dependency-only downstream runs like any other run.
+        Without ``run_date`` (see ``default_run_date``): ``same_day`` is
+        today in the job's zone, or the latest business day before it when
+        today is not one; ``previous_business_day`` is the business day
+        before today. Manual runs are always new (the next sequence
+        number), and create dependency-only downstream runs like any other run.
 
         Raises:
             ActionError: 404 for an unknown job, 409 for a disabled one, 503 if stopping.
 
         """
         definition = self._usable_job(job)
-        day = run_date or self.clock.now().astimezone(definition.timezone).date()
+        day = run_date or self.default_run_date(definition)
         await self._load_dates(job, [day])
         await self._seed_old_seqs(job, [day])
         self._usable_job(job)
         made = self._create_runs(job, day, self.clock.now(), Trigger.MANUAL)
         # The downstream runs made along the way log only the scheduler's ``created``.
         return (await self._commit(actor, "trigger", {made[0].run_id: None}))[0]
+
+    def default_run_date(self, job: JobDef) -> date:
+        """Return the run date a trigger of ``job`` gets when none is given (ruling R32)."""
+        today = self.clock.now().astimezone(job.timezone).date()
+        calendar = self.config.calendar_for(job)
+        try:
+            if job.run_date_rule is RunDateRule.PREVIOUS_BUSINESS_DAY:
+                return calendar.previous(today)
+            return today if calendar.is_business_day(today) else calendar.previous(today)
+        except ValueError:  # a calendar with no business days: nothing better than today
+            return today
 
     async def backfill(self, job: str, *, start: date, end: date, actor: str) -> list[Run]:
         """Create one run per business day from ``start`` to ``end`` on which ``job`` has none.
