@@ -60,7 +60,7 @@ class RunBook:
         if old is not None:
             self._unindex(old)
         self._runs[run.run_id] = run
-        self._index(run)
+        self._index(run, new=old is None)
 
     def get(self, run_id: str) -> Run | None:
         """Return the run with ``run_id``, or ``None``."""
@@ -201,8 +201,13 @@ class RunBook:
 
     # -- index upkeep -------------------------------------------------
 
-    def _index(self, run: Run) -> None:
-        """Add ``run`` to every index."""
+    def _index(self, run: Run, *, new: bool) -> None:
+        """Add ``run`` to every index; a ``new`` run id also seeds its sequence number.
+
+        A replaced run keeps its id, so its sequence number was seeded when
+        it was first put (and parsing the id again on every state change
+        is wasted work on a busy loop).
+        """
         slot = (run.job, run.run_date)
         bisect.insort(self._sorted.setdefault(slot, []), (run.scheduled_at, run.run_id))
         self._by_date.setdefault(run.run_date, set()).add(run.run_id)
@@ -217,6 +222,8 @@ class RunBook:
         if run.state not in FINAL_STATES:
             self._open.add(run.run_id)
             self._open_by_job.setdefault(run.job, set()).add(run.run_id)
+        if not new:
+            return
         try:
             seq = parse_run_id(run.run_id)[2]
         except ValueError:

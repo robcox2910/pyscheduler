@@ -30,6 +30,12 @@ theme:
 exclude_docs: |
   superpowers/
 
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
 markdown_extensions:
   - admonition
   - pymdownx.details
@@ -42,23 +48,24 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Concepts:
+      - "The Scheduler Engine (The School Timetable)": concepts/scheduler.md
       - "YAML (A Recipe Card With Indents)": concepts/yaml.md
-      - "Templates and Values (Form Letters and Labels)": concepts/templates.md
-      - "Calendars and Run Dates (School Days and Homework)": concepts/calendars-and-run-dates.md
-      - "Cron Expressions (The Alarm Clock With Many Dials)": concepts/cron.md
-      - "Time Zones and DST (The Clocks Change, and the Alarm Still Rings Once)": concepts/time-zones-and-dst.md
       - "Config Files (The Recipe Book)": concepts/config.md
-      - "Validation (The Teacher Who Checks Your Work Before the Test)": concepts/validation.md
-      - "Forecast (The Weather Report for Jobs)": concepts/forecast.md
+      - "Templates and Values (Form Letters and Labels)": concepts/templates.md
+      - "Cron Expressions (The Alarm Clock With Many Dials)": concepts/cron.md
+      - "Calendars and Run Dates (School Days and Homework)": concepts/calendars-and-run-dates.md
+      - "Time Zones and DST (The Clocks Change, and the Alarm Still Rings Once)": concepts/time-zones-and-dst.md
+      - "Dependencies (You Can't Ice the Cake Before It's Baked)": concepts/dependencies.md
+      - "Runs and States (The Traffic Lights of a Run)": concepts/runs-and-states.md
+      - "Retries and Backoff (Knock Again, but Wait a Bit Longer Each Time)": concepts/retries-and-backoff.md
+      - "Pools and Limits (Only Two Kids on the Trampoline)": concepts/pools-and-limits.md
       - "The Minder (A Babysitter Who Writes a Note When the Job's Done)": concepts/the-minder.md
       - "Clocks and Launchers (A Practice Clock and a Starting Whistle)": concepts/clocks-and-launchers.md
-      - "Runs and States (The Traffic Lights of a Run)": concepts/runs-and-states.md
       - "Group Commit (One Trip to the Post Box for Many Letters)": concepts/group-commit.md
-      - "Dependencies (You Can't Ice the Cake Before It's Baked)": concepts/dependencies.md
-      - "Pools and Limits (Only Two Kids on the Trampoline)": concepts/pools-and-limits.md
-      - "Retries and Backoff (Knock Again, but Wait a Bit Longer Each Time)": concepts/retries-and-backoff.md
-      - "The Scheduler Engine (The School Timetable)": concepts/scheduler.md
-      - "Operator Actions (The Train Controller's Desk)": concepts/operator-actions.md
+      - "Concurrency (One Waiter, Two Hundred Tables)": concepts/concurrency.md
       - "Recovery and Catch-Up (Waking Up After a Nap and Reading the Babysitter's Notes)": concepts/recovery-and-catch-up.md
+      - "Validation (The Teacher Who Checks Your Work Before the Test)": concepts/validation.md
+      - "Operator Actions (The Train Controller's Desk)": concepts/operator-actions.md
+      - "Forecast (The Weather Report for Jobs)": concepts/forecast.md
       - "The HTTP API (The Front Desk With Wristbands)": concepts/http-api.md
       - "The Service and the CLI (Opening the Shop and the Remote Control)": concepts/the-service-and-cli.md

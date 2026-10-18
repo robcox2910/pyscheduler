@@ -41,6 +41,11 @@ small tasks that each wait for something:
 - The **store writer** carries changes to disk in groups (see
   [Group Commit](group-commit.md)).
 
+The waiter must never stand still for long, so slow work (starting a
+process, reading a file) goes to helper threads, and a burst of queued
+runs is started 16 at a time. [Concurrency](concurrency.md) shows the
+test that proves two hundred jobs can run at once.
+
 ## Write It Down, Then Act
 
 A good teacher marks the register *before* sending a pupil to the

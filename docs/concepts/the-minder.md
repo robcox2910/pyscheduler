@@ -85,6 +85,33 @@ print(json.loads(status.read_text())["exit_code"])  # 3
 print((folder / "run.out").read_text())  # hi
 ```
 
+## Travelling Light
+
+A babysitter who turns up with three suitcases takes a long time to get
+through the door. When two hundred jobs start at once, two hundred
+minders come through the door at once, so the minder packs almost
+nothing: it uses only `os`, `signal`, `sys` and `datetime`.
+
+- It reads its own command line instead of loading `argparse` (which
+  brings `dataclasses`, `inspect` and more along with it).
+- It starts the job with `os.posix_spawnp` instead of `subprocess`.
+- It uses plain `os` paths instead of `pathlib`.
+- It writes its little JSON notes itself, escaped exactly as `json.dumps`
+  would, instead of loading `json` (which loads `re`).
+
+That cuts its start-up work by about a third. A test checks that none of
+those heavy modules sneak back in, and [Concurrency](concurrency.md)
+explains how the saving was measured.
+
+```python
+import subprocess
+import sys
+
+probe = "import sys, pyscheduler.minder; print(sorted({'argparse', 'json', 'subprocess'} & set(sys.modules)))"
+print(subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True).stdout)
+# []
+```
+
 ## Why Bother?
 
 The scheduler could run jobs itself, but then if the scheduler crashed, it

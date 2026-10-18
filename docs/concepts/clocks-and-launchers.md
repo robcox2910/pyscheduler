@@ -71,6 +71,12 @@ SIGKILL), it works the answer out from the minder's own exit status. A
 note that is garbled never crashes anything: it comes back as a
 `start_error` beginning `corrupt status file:`.
 
+Starting a process is slow work for a waiter who must never stand still,
+so `MinderLauncher` does the slow parts on its own **launch thread**: the
+`fork`, clearing the old files and writing the `.pid` file. The loop only
+hears "it's running". The note is read on a helper thread too.
+[Concurrency](concurrency.md) shows how that was measured.
+
 ```python
 import os
 import tempfile

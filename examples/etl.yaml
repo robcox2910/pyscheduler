@@ -1,0 +1,68 @@
+# A small nightly ETL chain, to try PyScheduler out.
+#
+#   pysched validate examples/etl.yaml
+#   pysched serve examples/etl.yaml          # from the repository root
+#   pysched trigger extract                  # in another terminal
+#   pysched status
+#
+# Every weekday at 02:00 (London time) the chain processes the previous
+# business day:
+#
+#   extract ──> transform ──┐
+#   fetch-rates (flaky) ────┴──> load ──(if load fails)──> cleanup
+#
+# fetch-rates fails on its first attempt and succeeds on its retry, so you
+# can watch a retry happen. load and transform share the one-slot
+# "warehouse" pool, so they never run at the same time.
+
+scheduler:
+  name: example-etl
+  timezone: Europe/London
+  state_dir: state               # next to this file: examples/state
+  log_dir: logs                  # examples/logs
+  max_running: 4
+
+calendars:
+  uk-business:
+    weekdays: [mon, tue, wed, thu, fri]
+    holidays: [2026-12-25, 2026-12-28, 2027-01-01]
+
+pools:
+  warehouse: 1                   # one slot: one warehouse job at a time
+
+defaults:
+  calendar: uk-business
+  run_date: previous_business_day
+  timeout: 10m
+  tags: [example, etl]
+
+jobs:
+  extract:
+    description: Copy yesterday's trades out of the trading system.
+    command: examples/scripts/extract.sh {run_date}
+    schedule: "0 2 * * *"
+
+  fetch-rates:
+    description: Download the day's exchange rates (the server is a bit unreliable).
+    command: examples/scripts/flaky.sh {run_date}
+    schedule: "0 2 * * *"
+    retries: {count: 2, delay: 5s, backoff: 2, max_delay: 1m}
+
+  transform:
+    description: Turn raw trades into warehouse rows.
+    command: examples/scripts/transform.sh {run_date}
+    depends_on: [extract]
+    pools: {warehouse: 1}
+
+  load:
+    description: Load the rows, priced with the day's rates.
+    command: examples/scripts/load.sh {run_date}
+    depends_on: [transform, fetch-rates]
+    pools: {warehouse: 1}
+    criticality: critical
+
+  cleanup:
+    description: Tidy up half-loaded files, only on a day the load failed.
+    command: echo "load failed for {run_date}; removing partial files"
+    depends_on:
+      - {job: load, on: failure}

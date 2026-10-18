@@ -109,7 +109,9 @@ class TestSignals:
             assert names == ["late"]
             os.kill(os.getpid(), signal.SIGTERM)
             while time.monotonic() < deadline:
-                if not reachable(client):
+                # While closing, the server turns new connections away with a
+                # 503: that is still reachable, not a failure.
+                if not reachable(client, allow_errors=True):
                     return
                 time.sleep(POLL)
             msg = "serve did not stop on SIGTERM"

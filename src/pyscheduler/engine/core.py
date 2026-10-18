@@ -46,7 +46,7 @@ LATE = timedelta(seconds=2 * MAX_NAP)
 JUST_BEFORE = timedelta(microseconds=1)
 """How far before ``now`` the first firing search starts, so a firing due right now counts."""
 
-PUMP_BATCH = 32
+PUMP_BATCH = 16
 """The most queued runs one pump starts; more wait for the next loop turn.
 
 Starting an attempt is quick, but two hundred in one go would hold the
