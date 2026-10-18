@@ -203,3 +203,47 @@ class TestForecast:
             assert response.status == BAD_REQUEST
 
         h.run(body)
+
+
+HIDDEN_VALUE = "s3cr3t-value"
+SHORT = "abc"
+HIDDEN_JOBS = """
+jobs:
+  s:
+    command: run-s --password ${SECRET} --user ${SHORT}
+    cwd: /home/${SECRET}
+    description: uses ${SECRET}
+    schedule: manual
+    env: {PW: "${SECRET}"}
+    alerts: {webhook: "https://hooks/${SECRET}", to: [ops]}
+"""
+
+
+class TestSecrets:
+    """Never show the value of an expanded ``${NAME}`` to anyone."""
+
+    @pytest.mark.parametrize("headers", [VIEWER, OPERATOR], ids=["viewer", "operator"])
+    def test_expanded_values_are_hidden(self, api: MakeApi, headers: dict[str, str]) -> None:
+        """Show ``${SECRET}`` in place of its value everywhere; alerts only to operators."""
+        h = api(HIDDEN_JOBS, env={"SECRET": HIDDEN_VALUE, "SHORT": SHORT})
+
+        async def body() -> None:
+            """Ask for the job list and the job, as a viewer and as an operator."""
+            listed = await h.client.get("/api/jobs", headers=headers)
+            detail = await h.client.get("/api/jobs/s", headers=headers)
+            for response in (listed, detail):
+                assert response.status == OK
+                assert HIDDEN_VALUE not in response.text
+            [summary] = body_of(listed)["jobs"]
+            assert summary["description"] == "uses ${SECRET}"
+            definition = body_of(detail)["definition"]
+            assert definition["command"] == "run-s --password ${SECRET} --user abc"
+            assert definition["cwd"] == "/home/${SECRET}"
+            assert definition["description"] == "uses ${SECRET}"
+            assert definition["env"] == {"PW": "***"}
+            if headers is OPERATOR:
+                assert definition["alerts"] == {"webhook": "https://hooks/${SECRET}", "to": ["ops"]}
+            else:
+                assert definition["alerts"] == "***"
+
+        h.run(body)

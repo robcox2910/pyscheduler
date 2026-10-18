@@ -19,6 +19,7 @@ from pyscheduler.calendars import BusinessCalendar, merge_calendars
 from pyscheduler.config.calendar_inheritance import resolve_calendars
 from pyscheduler.config.fields import (
     Reader,
+    RecordingEnv,
     check_keys,
     read_date,
     read_duration,
@@ -79,7 +80,8 @@ class _Loader:
     def __init__(self, main: Path, env: Mapping[str, str]) -> None:
         """Prepare to load ``main``."""
         self.main = main
-        self.r = Reader(os.path.normpath(main), env)
+        self.env = RecordingEnv(env)
+        self.r = Reader(os.path.normpath(main), self.env)
         self.docs: list[_Doc] = []
         self.sources: dict[str, str] = {}
         self.seen: set[Path] = set()
@@ -380,6 +382,7 @@ def build_config(
         calendar_includes={n: tuple(i for i, _ in c.includes) for n, c in raw.items()},
         calendar_sources={n: c.source for n, c in raw.items()},
         effective_calendars=resolve_calendars(jobs).effective,
+        expansions={value: name for name, value in loader.env.used.items()},
     )
     return config, problems
 

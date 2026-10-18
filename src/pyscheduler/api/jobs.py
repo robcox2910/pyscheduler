@@ -28,6 +28,7 @@ from pyscheduler.api.support import (
     guarded,
     json_body,
     not_found,
+    role_of,
 )
 from pyscheduler.config import Config, JobDef
 from pyscheduler.engine.core import Engine
@@ -42,6 +43,7 @@ NEXT_FIRINGS = 5
 RECENT_RUNS = 20
 DEFAULT_WINDOW = timedelta(hours=24)
 MAX_WINDOW = timedelta(days=31)
+OUT_OF_RANGE = "the forecast window is outside the dates the scheduler can handle"
 
 
 def next_firings(config: Config, job: JobDef, after: datetime, count: int) -> list[datetime]:
@@ -119,13 +121,12 @@ def add_job_routes(app: App, engine: Engine) -> None:
     @guarded
     async def show_job(request: HttpRequest, name: str) -> JsonObject:
         """Show a job's summary, definition, next firings and recent runs."""
-        del request
         config, now = engine.config, engine.clock.now()
         job = job_named(name)
         upcoming = await run_in_thread(next_firings, config, job, now, NEXT_FIRINGS)
         runs = await merged_runs(engine, job=name, limit=RECENT_RUNS)
         out = job_json(config, job, upcoming[0] if upcoming else None)
-        out["definition"] = definition_json(job)
+        out["definition"] = definition_json(config, job, show_alerts=role_of(request) == "operator")
         out["next_firings"] = [instant(f) for f in upcoming]
         out["recent_runs"] = [run_json(run) for run in runs]
         return out
@@ -150,13 +151,21 @@ def add_job_routes(app: App, engine: Engine) -> None:
         runs = await engine.backfill(name, start=start, end=end, actor=actor_of(request))
         return {"runs": [run_json(run) for run in runs]}
 
+    _add_forecast_route(app, engine)
+
+
+def _add_forecast_route(app: App, engine: Engine) -> None:
+    """Register ``/api/forecast`` on ``app``."""
+
     @app.get("/api/forecast")
     @guarded
     async def show_forecast(request: HttpRequest) -> JsonObject:
         """Predict the runs between ``from`` and ``to`` (default: the next 24 hours)."""
-        now = engine.clock.now()
-        start = _instant(request, "from", now)
-        end = _instant(request, "to", start + DEFAULT_WINDOW)
+        start = _instant(request, "from", engine.clock.now())
+        try:
+            end = _instant(request, "to", start + DEFAULT_WINDOW)
+        except OverflowError:
+            raise ApiError(BAD_REQUEST, OUT_OF_RANGE) from None
         if end < start:
             raise ApiError(BAD_REQUEST, "to is before from")
         if end - start > MAX_WINDOW:
@@ -169,4 +178,7 @@ def add_job_routes(app: App, engine: Engine) -> None:
             entries = forecast(config, start, end, durations=durations)
             return [forecast_json(entry) for entry in entries]
 
-        return {"entries": await run_in_thread(build)}
+        try:
+            return {"entries": await run_in_thread(build)}
+        except OverflowError:
+            raise ApiError(BAD_REQUEST, OUT_OF_RANGE) from None

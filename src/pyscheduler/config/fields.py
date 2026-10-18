@@ -12,7 +12,7 @@ the problem), so callers fall back to the default.
 import difflib
 import math
 import re
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import date, time, timedelta
 from enum import StrEnum
@@ -28,6 +28,38 @@ _INT = re.compile(r"[-+]?\d+", re.ASCII)
 _FLOAT = re.compile(r"[-+]?(\d+(\.\d*)?|\.\d+)", re.ASCII)
 MAX_INT_CHARS = 20
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+class RecordingEnv(Mapping[str, str]):
+    """A read-only view of the environment that remembers every variable looked up.
+
+    The loader hands this to its readers, so afterwards it knows each
+    ``${NAME}`` it expanded and the value it put in (the API hides those
+    values again before showing a config).
+    """
+
+    def __init__(self, env: Mapping[str, str]) -> None:
+        """Wrap ``env``; nothing has been looked up yet."""
+        self._env = env
+        self.used: dict[str, str] = {}
+
+    def __getitem__(self, name: str) -> str:
+        """Return the variable ``name`` and remember that it was used."""
+        value = self._env[name]
+        self.used[name] = value
+        return value
+
+    def __contains__(self, name: object) -> bool:
+        """Return whether ``name`` is set, without counting it as used."""
+        return name in self._env
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate over the variable names."""
+        return iter(self._env)
+
+    def __len__(self) -> int:
+        """Return how many variables there are."""
+        return len(self._env)
 
 
 @dataclass

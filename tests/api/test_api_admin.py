@@ -131,3 +131,38 @@ class TestErrors:
             h.engine.error = None
 
         h.run(body)
+
+
+class TestMinorChecks:
+    """Refuse oversized numbers and windows; hide the cause of a failed engine."""
+
+    def test_long_numbers_and_far_windows_are_400(self, api: MakeApi) -> None:
+        """Refuse a limit with too many digits and a forecast past year 9999."""
+        h = api()
+
+        async def body() -> None:
+            """Ask with the extreme values."""
+            huge = await h.client.get("/api/runs", query={"limit": "9" * 5000}, headers=VIEWER)
+            assert huge.status == BAD_REQUEST
+            padded = await h.client.get("/api/runs", query={"limit": "00001"}, headers=VIEWER)
+            assert padded.status == BAD_REQUEST
+            far = {"from": "9999-12-31T12:00:00+00:00"}
+            response = await h.client.get("/api/forecast", query=far, headers=VIEWER)
+            assert response.status == BAD_REQUEST
+            assert "outside" in body_of(response)["error"]
+
+        h.run(body)
+
+    def test_failed_engine_message_is_fixed(self, api: MakeApi) -> None:
+        """Answer 503 with a fixed message, not the failure's details."""
+        h = api()
+
+        async def body() -> None:
+            """Mark the engine failed and try an action."""
+            h.engine.error = RuntimeError("disk /secret/path full")
+            response = await h.client.post("/api/jobs/adhoc/trigger", headers=OPERATOR)
+            h.engine.error = None
+            assert response.status == UNAVAILABLE
+            assert body_of(response) == {"error": "scheduler failed; see the scheduler log"}
+
+        h.run(body)

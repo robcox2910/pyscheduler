@@ -236,7 +236,9 @@ class Config:
     where it was defined, so validation can look for include cycles.
     ``effective_calendars`` gives each job's calendar after inheritance (a
     dependency-only job with no calendar takes its upstreams'); a job
-    missing from it uses its own ``calendar``.
+    missing from it uses its own ``calendar``. ``expansions`` maps each
+    value a ``${NAME}`` was expanded to back to its ``NAME``, so the API
+    can hide those values again.
     """
 
     settings: Settings
@@ -251,6 +253,7 @@ class Config:
     )
     calendar_sources: Mapping[str, SourceRef] = field(default_factory=dict[str, SourceRef])
     effective_calendars: Mapping[str, str | None] = field(default_factory=dict[str, str | None])
+    expansions: Mapping[str, str] = field(default_factory=dict[str, str])
     _dependents: Mapping[str, frozenset[str]] = field(
         init=False, repr=False, compare=False, default_factory=dict[str, frozenset[str]]
     )
@@ -265,6 +268,7 @@ class Config:
             "calendar_includes",
             "calendar_sources",
             "effective_calendars",
+            "expansions",
         ):
             object.__setattr__(self, name, _frozen(getattr(self, name)))
         index: dict[str, set[str]] = {}

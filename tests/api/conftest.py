@@ -19,7 +19,9 @@ from pyscheduler.testing import FakeLauncher
 def api(tmp_path: Path) -> MakeApi:
     """Return a factory that builds an ``ApiHarness`` from the YAML after ``scheduler:``."""
 
-    def make(text: str = JOBS, *, tokens: bool = True) -> ApiHarness:
+    def make(
+        text: str = JOBS, *, tokens: bool = True, env: dict[str, str] | None = None
+    ) -> ApiHarness:
         """Write the config and tokens, then build the store, fakes, engine and app."""
         header = (
             "scheduler:\n"
@@ -29,7 +31,7 @@ def api(tmp_path: Path) -> MakeApi:
         )
         path = tmp_path / "pysched.yaml"
         path.write_text(header + textwrap.dedent(text).lstrip("\n"), encoding="utf-8")
-        config = load_config(path, env={}, today=TODAY)
+        config = load_config(path, env=env or {}, today=TODAY)
         store = Store.open(tmp_path / "state", sync=False)
         clock = FakeClock(START)
         launcher = FakeLauncher(clock)
@@ -39,7 +41,7 @@ def api(tmp_path: Path) -> MakeApi:
             tokens_path = tmp_path / "tokens.yaml"
             tokens_path.write_text(tokens_yaml(), encoding="utf-8")
             table = TokenTable.load(tokens_path)
-        reload, validate = config_actions(engine, path, env={})
+        reload, validate = config_actions(engine, path, env=env or {})
         app = build_app(engine, tokens=table, reload=reload, validate=validate)
         return ApiHarness(tmp_path, path, config, store, clock, launcher, engine, TestClient(app))
 

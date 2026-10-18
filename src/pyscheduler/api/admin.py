@@ -48,7 +48,8 @@ def config_actions(
 
     async def load() -> tuple[Config | None, list[Problem]]:
         """Load the config files, returning the config or its errors."""
-        today = engine.clock.now().date()
+        zone = engine.config.settings.timezone
+        today = engine.clock.now().astimezone(zone).date()
         try:
             config = await run_in_thread(lambda: load_config(path, env=env, today=today))
         except ConfigError as exc:

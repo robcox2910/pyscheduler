@@ -33,6 +33,7 @@ __all__ = [
     "query_date",
     "query_int",
     "query_name",
+    "role_of",
 ]
 
 logger = logging.getLogger("pyscheduler.api")
@@ -43,6 +44,10 @@ type Handler = Callable[..., Awaitable[JsonObject]]
 BAD_REQUEST = 400
 NOT_FOUND = 404
 INTERNAL_ERROR = 500
+UNAVAILABLE = 503
+FAILED_PREFIX = "scheduler failed"
+FAILED_MESSAGE = "scheduler failed; see the scheduler log"
+"""What callers see when the engine has failed stop (the cause stays in the log)."""
 
 
 class ApiError(Exception):
@@ -71,7 +76,11 @@ def guarded(handler: Handler) -> Callable[..., Awaitable[HttpResponse]]:
         except ApiError as exc:
             return exc.response()
         except ActionError as exc:
-            return json({"error": str(exc)}, exc.status)
+            message = str(exc)
+            if exc.status == UNAVAILABLE and message.startswith(FAILED_PREFIX):
+                logger.warning("refused %s %s: %s", request.method, request.path, message)
+                message = FAILED_MESSAGE
+            return json({"error": message}, exc.status)
         except HTTPError as exc:
             return json({"error": exc.message or str(exc)}, exc.status)
         except Exception:
@@ -79,6 +88,12 @@ def guarded(handler: Handler) -> Callable[..., Awaitable[HttpResponse]]:
             return json({"error": "internal error"}, INTERNAL_ERROR)
 
     return call
+
+
+def role_of(request: HttpRequest) -> str:
+    """Return the caller's role (set by the token middleware)."""
+    user = request.user
+    return user.role if isinstance(user, Principal) else DEV_PRINCIPAL.role
 
 
 def actor_of(request: HttpRequest) -> str:
@@ -113,7 +128,8 @@ def query_int(request: HttpRequest, name: str, *, default: int, low: int, high: 
     text = request.query.get(name)
     if text is None:
         return default
-    if not (text.isascii() and text.isdigit()) or not low <= int(text) <= high:
+    digits = text.isascii() and text.isdigit() and len(text) <= len(str(high))
+    if not digits or not low <= int(text) <= high:
         raise ApiError(BAD_REQUEST, f"{name} must be a whole number from {low} to {high}")
     return int(text)
 

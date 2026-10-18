@@ -74,6 +74,18 @@ Run ids are one path segment: `/api/runs/extract-trades.2026-10-17.1/rerun`.
   attempt (`null` while that attempt runs); run lists leave it out.
 - A job's `definition` shows its environment variable **names** only
   (`"***"` for each value), because values may be secrets.
+- Any value the config got from `${NAME}` is put back as `${NAME}` in
+  every string of a job summary or definition (command, cwd,
+  description, alerts, ...), longest values first. Values shorter than
+  4 characters are left alone (hiding them would mangle ordinary text),
+  so do not keep secrets that short.
+- A job's `alerts` settings (webhooks, addresses) are shown to
+  operators only; viewers see `"***"`.
+- Paths (log files, working directories, config file names) are shown
+  to viewers too: the API is an operator tool for a trusted network,
+  and knowing where a log lives is part of reading it.
+- When the engine has failed stop, actions answer 503 `"scheduler
+  failed; see the scheduler log"`; the cause is only in the log.
 - Errors are always `{"error": "..."}` with 400, 404, 409 or 503. An
   unexpected bug answers 500 `{"error": "internal error"}` and the
   details go to the scheduler's log, never to the caller.

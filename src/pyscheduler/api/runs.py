@@ -72,7 +72,8 @@ async def merged_runs(
         stored = await run_in_thread(
             lambda: store.query_runs(run_date=run_date, job=job, state=state, limit=limit)
         )
-        found += [run for run in stored if book.published(run.run_id) is None]
+        shown = {run.run_id for run in found}
+        found += [run for run in stored if run.run_id not in shown]
         found.sort(key=lambda run: run.run_id)
         found.sort(key=lambda run: run.scheduled_at, reverse=True)
     return found[:limit]

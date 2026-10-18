@@ -122,6 +122,8 @@ class ApiHarness:
 class MakeApi(Protocol):
     """Build an API harness from the YAML that follows ``scheduler:``."""
 
-    def __call__(self, text: str = JOBS, *, tokens: bool = True) -> ApiHarness:
-        """Return a harness; ``tokens=False`` runs the API in development mode."""
+    def __call__(
+        self, text: str = JOBS, *, tokens: bool = True, env: dict[str, str] | None = None
+    ) -> ApiHarness:
+        """Return a harness; ``tokens=False`` is development mode; ``env`` feeds ``${NAME}``."""
         ...

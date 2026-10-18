@@ -17,6 +17,7 @@ known (the run detail endpoint), and is ``null`` until that attempt ends.
 import json
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time, timedelta
+from typing import cast
 
 from pynet.messaging import JsonValue
 
@@ -34,11 +35,13 @@ from pyscheduler.schedule.specs import (
 __all__ = [
     "attempt_json",
     "date_text",
+    "definition_json",
     "event_json",
     "forecast_json",
     "instant",
     "job_json",
     "problem_json",
+    "redact",
     "run_json",
     "schedule_text",
 ]
@@ -210,20 +213,66 @@ def forecast_json(entry: ForecastEntry) -> JsonObject:
     }
 
 
+MIN_REDACTED = 4
+"""The shortest expanded ``${NAME}`` value that is hidden again (shorter ones would
+mangle ordinary text; do not keep secrets that short)."""
+
+
+def redact(value: JsonValue, expansions: Mapping[str, str]) -> JsonValue:
+    """Replace every expanded ``${NAME}`` value in the strings of ``value`` with ``${NAME}``.
+
+    Walks lists and objects (keys too). Longer values are replaced first,
+    so a value that contains another is hidden whole. Values shorter than
+    ``MIN_REDACTED`` are left alone.
+    """
+    pairs = sorted(
+        ((text, name) for text, name in expansions.items() if len(text) >= MIN_REDACTED),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+    if not pairs:
+        return value
+
+    def walk(item: JsonValue) -> JsonValue:
+        """Redact one value, recursing into lists and objects."""
+        if isinstance(item, str):
+            for text, name in pairs:
+                item = item.replace(text, f"${{{name}}}")
+            return item
+        if isinstance(item, list):
+            return [walk(child) for child in item]
+        if isinstance(item, dict):
+            return {str(walk(key)): walk(child) for key, child in item.items()}
+        return item
+
+    return walk(value)
+
+
+def _redacted(config: Config, out: JsonObject) -> JsonObject:
+    """Return ``out`` with the config's expanded ``${NAME}`` values hidden."""
+    return cast("JsonObject", redact(out, config.expansions))  # an object stays an object
+
+
 def job_json(config: Config, job: JobDef, next_firing: datetime | None) -> JsonObject:
-    """Return a job's summary: who owns it, how it is scheduled, and when it fires next."""
-    return {
-        "name": job.name,
-        "description": job.description,
-        "owner": job.owner,
-        "tags": list(job.tags),
-        "criticality": job.criticality.name.lower(),
-        "enabled": job.enabled,
-        "calendar": config.effective_calendars.get(job.name, job.calendar),
-        "schedules": schedules_text(job),
-        "depends_on": [dep.job for dep in job.depends_on],
-        "next_firing": instant(next_firing),
-    }
+    """Return a job's summary: who owns it, how it is scheduled, and when it fires next.
+
+    Expanded ``${NAME}`` values are hidden again (see ``redact``).
+    """
+    return _redacted(
+        config,
+        {
+            "name": job.name,
+            "description": job.description,
+            "owner": job.owner,
+            "tags": list(job.tags),
+            "criticality": job.criticality.name.lower(),
+            "enabled": job.enabled,
+            "calendar": config.effective_calendars.get(job.name, job.calendar),
+            "schedules": schedules_text(job),
+            "depends_on": [dep.job for dep in job.depends_on],
+            "next_firing": instant(next_firing),
+        },
+    )
 
 
 def _must_start_by(job: JobDef) -> JsonValue:
@@ -251,51 +300,56 @@ def _plain(value: object) -> JsonValue:
     return str(value)
 
 
-def definition_json(job: JobDef) -> JsonObject:
-    """Return the whole job definition as JSON; environment values are hidden.
+def definition_json(config: Config, job: JobDef, *, show_alerts: bool) -> JsonObject:
+    """Return the whole job definition as JSON, with secrets hidden.
 
     Durations are seconds (``timeout_seconds``, ``retries.delay_seconds``,
-    ...). Environment variable values may hold secrets expanded from
-    ``${NAME}``, so only their names are shown.
+    ...). Environment variable values are shown as ``***``; every other
+    string has the config's expanded ``${NAME}`` values put back as
+    ``${NAME}`` (see ``redact``). ``alerts`` (webhooks, addresses) is
+    ``***`` unless ``show_alerts`` (the caller is an operator).
     """
     command: JsonValue = job.command if isinstance(job.command, str) else list(job.command)
     retries = job.retries
-    return {
-        "name": job.name,
-        "command": command,
-        "cwd": job.cwd,
-        "env": dict.fromkeys(sorted(job.env), HIDDEN),
-        "schedules": schedules_text(job),
-        "manual": job.manual,
-        "calendar": job.calendar,
-        "timezone": job.timezone.key,
-        "run_date": job.run_date_rule.value,
-        "depends_on": [
-            {"job": d.job, "on": d.on.value, "run_date_offset": d.run_date_offset}
-            for d in job.depends_on
-        ],
-        "retries": {
-            "count": retries.count,
-            "delay_seconds": retries.delay.total_seconds(),
-            "backoff": retries.backoff,
-            "max_delay_seconds": retries.max_delay.total_seconds(),
+    return _redacted(
+        config,
+        {
+            "name": job.name,
+            "command": command,
+            "cwd": job.cwd,
+            "env": dict.fromkeys(sorted(job.env), HIDDEN),
+            "schedules": schedules_text(job),
+            "manual": job.manual,
+            "calendar": job.calendar,
+            "timezone": job.timezone.key,
+            "run_date": job.run_date_rule.value,
+            "depends_on": [
+                {"job": d.job, "on": d.on.value, "run_date_offset": d.run_date_offset}
+                for d in job.depends_on
+            ],
+            "retries": {
+                "count": retries.count,
+                "delay_seconds": retries.delay.total_seconds(),
+                "backoff": retries.backoff,
+                "max_delay_seconds": retries.max_delay.total_seconds(),
+            },
+            "timeout_seconds": _seconds(job.timeout),
+            "criticality": job.criticality.name.lower(),
+            "pools": dict(job.pools),
+            "overlap": job.overlap.value,
+            "catch_up": job.catch_up.value,
+            "stdout": job.stdout,
+            "stderr": job.stderr,
+            "min_runtime_seconds": _seconds(job.min_runtime),
+            "max_runtime_seconds": _seconds(job.max_runtime),
+            "must_start_by": _must_start_by(job),
+            "alerts": _plain(job.alerts) if show_alerts else HIDDEN,
+            "agent": job.agent,
+            "agent_tags": list(job.agent_tags),
+            "tags": list(job.tags),
+            "description": job.description,
+            "owner": job.owner,
+            "enabled": job.enabled,
+            "source": {"file": job.source.file, "line": job.source.line},
         },
-        "timeout_seconds": _seconds(job.timeout),
-        "criticality": job.criticality.name.lower(),
-        "pools": dict(job.pools),
-        "overlap": job.overlap.value,
-        "catch_up": job.catch_up.value,
-        "stdout": job.stdout,
-        "stderr": job.stderr,
-        "min_runtime_seconds": _seconds(job.min_runtime),
-        "max_runtime_seconds": _seconds(job.max_runtime),
-        "must_start_by": _must_start_by(job),
-        "alerts": _plain(job.alerts),
-        "agent": job.agent,
-        "agent_tags": list(job.agent_tags),
-        "tags": list(job.tags),
-        "description": job.description,
-        "owner": job.owner,
-        "enabled": job.enabled,
-        "source": {"file": job.source.file, "line": job.source.line},
-    }
+    )
