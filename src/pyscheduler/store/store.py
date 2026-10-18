@@ -27,6 +27,7 @@ from pydb.table import Table
 from pydb.transaction import Transaction
 
 from pyscheduler.engine.model import FINAL_STATES, Attempt, Event, Outcome, Run, RunState
+from pyscheduler.store.alert_store import AlertReads, AlertStage, AlertTables
 from pyscheduler.store.schema import (
     ATTEMPTS,
     CONFIGS,
@@ -47,6 +48,7 @@ from pyscheduler.store.schema import (
     run_from_row,
     run_to_row,
 )
+from pyscheduler.store.staging import Staged, upsert
 
 SCHEMA_VERSION_KEY = "schema_version"
 """The engine note that records which table layout the store was written with."""
@@ -65,34 +67,7 @@ OPEN_STATES = tuple(state for state in RunState if state not in FINAL_STATES)
 """The states a run can be in before it is final, in lifecycle order."""
 
 
-class _Staged[K]:
-    """Hold address-book changes made during a commit, until it succeeds."""
-
-    def __init__(self, base: dict[K, int]) -> None:
-        """Start with no changes on top of ``base``."""
-        self.base = base
-        self.changes: dict[K, int | None] = {}
-
-    def get(self, key: K) -> int | None:
-        """Return the record id of ``key``, seeing this commit's changes first."""
-        if key in self.changes:
-            return self.changes[key]
-        return self.base.get(key)
-
-    def put(self, key: K, record_id: int | None) -> None:
-        """Note that ``key`` now lives at ``record_id`` (``None``: deleted)."""
-        self.changes[key] = record_id
-
-    def publish(self) -> None:
-        """Copy the changes into the real address book."""
-        for key, record_id in self.changes.items():
-            if record_id is None:
-                self.base.pop(key, None)
-            else:
-                self.base[key] = record_id
-
-
-class Store:
+class Store(AlertReads):
     """Hide PyDB behind a small typed API for the engine.
 
     Every read takes PyDB's lock, so it can wait for a group commit that
@@ -109,6 +84,7 @@ class Store:
         self._events = db.get_table(EVENTS)
         self._engine = db.get_table(ENGINE)
         self._configs = db.get_table(CONFIGS)
+        self._alerts = AlertTables(db)
         self._run_ids: dict[str, int] = {}
         self._attempt_ids: dict[AttemptKey, int] = {}
         self._engine_ids: dict[str, int] = {}
@@ -170,35 +146,41 @@ class Store:
 
         Runs are upserted by run id, attempts by ``(run_id, attempt)``,
         engine notes by key and configs by version; events are appended.
+        Alerts, deliveries and matched files are upserted by their keys.
         On failure nothing changes, in the database or in the lookups.
         """
         with self._db.lock:
-            runs = _Staged(self._run_ids)
-            attempts = _Staged(self._attempt_ids)
-            engine = _Staged(self._engine_ids)
-            configs = _Staged(self._config_ids)
+            runs = Staged(self._run_ids)
+            attempts = Staged(self._attempt_ids)
+            engine = Staged(self._engine_ids)
+            configs = Staged(self._config_ids)
+            alerts = self._alerts.stage()
             try:
                 with Transaction(self._db):
                     for run_id in batch.deleted_run_ids:
                         self._delete_run(run_id, runs, attempts)
+                        self._alerts.delete_run(alerts, run_id)
+                    for alert_id in batch.deleted_alert_ids:
+                        self._alerts.delete_alert(alerts, alert_id)
                     for run in batch.runs:
-                        _upsert(self._runs, runs, run.run_id, run_to_row(run))
+                        upsert(self._runs, runs, run.run_id, run_to_row(run))
                     for attempt in batch.attempts:
                         key = (attempt.run_id, attempt.attempt)
-                        _upsert(self._attempts, attempts, key, attempt_to_row(attempt))
+                        upsert(self._attempts, attempts, key, attempt_to_row(attempt))
                     for event in batch.events:
                         self._events.insert(event_to_row(event))
                     for key, value in batch.engine.items():
-                        _upsert(self._engine, engine, key, {"key": key, "value": value})
+                        upsert(self._engine, engine, key, {"key": key, "value": value})
                     for config in batch.configs:
-                        _upsert(self._configs, configs, config.version, config_to_row(config))
+                        upsert(self._configs, configs, config.version, config_to_row(config))
+                    self._alerts.write(alerts, batch)
             except BaseException as exc:
                 if is_committed(exc):  # durable despite the error: keep the lookups true
-                    _publish(runs, attempts, engine, configs)
+                    _publish(runs, attempts, engine, configs, alerts)
                 raise
-            _publish(runs, attempts, engine, configs)
+            _publish(runs, attempts, engine, configs, alerts)
 
-    def _delete_run(self, run_id: str, runs: _Staged[str], attempts: _Staged[AttemptKey]) -> None:
+    def _delete_run(self, run_id: str, runs: Staged[str], attempts: Staged[AttemptKey]) -> None:
         """Delete a run with its attempts and events (inside the open transaction)."""
         for record in self._by_index(self._attempts, "attempts_run_id", run_id):
             self._attempts.delete(record.record_id)
@@ -394,16 +376,7 @@ def _check_schema_version(db: Database, existing: set[str]) -> None:
         raise StoreSchemaError(msg)
 
 
-def _upsert[K](table: Table, ids: _Staged[K], key: K, row: dict[str, Value]) -> None:
-    """Update the row stored under ``key``, or insert it if there is none."""
-    record_id = ids.get(key)
-    if record_id is None:
-        ids.put(key, table.insert(row).record_id)
-    else:
-        table.update(record_id, row)
-
-
-def _publish(*staged: _Staged[str] | _Staged[AttemptKey] | _Staged[int]) -> None:
+def _publish(*staged: Staged[str] | Staged[AttemptKey] | Staged[int] | AlertStage) -> None:
     """Copy every staged change into its address book."""
     for changes in staged:
         changes.publish()

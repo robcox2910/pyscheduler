@@ -3,7 +3,8 @@
 A school keeps last term's registers in a cupboard, but not those from
 ten years ago. Once an hour (and once at start-up) the scheduler clears
 out final runs whose run date is older than ``retention``: from the
-store, with their attempts and logbook lines, ``PRUNE_BATCH`` at a time.
+store, with their attempts, logbook lines and alerts, ``PRUNE_BATCH`` at a
+time. Alerts that belong to no run are cleared by their own age.
 It also lets go of final runs older than ``memory_days`` in memory
 (they stay readable from the store).
 
@@ -69,10 +70,31 @@ class Retention(ActionSupport):
             deleted += len(locked)
             if len(ids) < PRUNE_BATCH:
                 break
+        await self._prune_alerts(now - settings.retention)
         self.book.evict_final_before(
             self._memory_start(now), self._protected(), busy=self._run_locks.busy
         )
         return deleted
+
+    async def _prune_alerts(self, cutoff: datetime) -> None:
+        """Delete run-less alerts (and their deliveries) raised before ``cutoff``.
+
+        Alerts of a run go with the run. Scheduler-wide ones (a failed
+        reload) have no run, so they are cleared here by age instead.
+        """
+        while not self._stopping:
+            ids = await pynet.loop.run_in_thread(
+                lambda: self.store.runless_alert_ids_before(cutoff, PRUNE_BATCH)
+            )
+            if not ids:
+                return
+            try:
+                await self.writer.save(Batch(deleted_alert_ids=ids))
+            except Exception as exc:
+                self._fail(exc, ())
+                raise EngineFailedError(str(exc)) from exc
+            if len(ids) < PRUNE_BATCH:
+                return
 
     def _protected(self) -> Collection[tuple[str, date]]:
         """Return the ``(job, run date)`` slots open runs' dependencies look at.

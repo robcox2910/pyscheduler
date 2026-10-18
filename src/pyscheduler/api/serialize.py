@@ -21,7 +21,7 @@ from typing import cast
 
 from pynet.messaging import JsonValue
 
-from pyscheduler.config import Config, JobDef, Problem
+from pyscheduler.config import Config, JobAlerts, JobDef, Problem
 from pyscheduler.config.redaction import redact_text, redactor
 from pyscheduler.engine.model import Attempt, Event, Run
 from pyscheduler.schedule.forecast import ForecastEntry
@@ -285,19 +285,12 @@ def _must_start_by(job: JobDef) -> JsonValue:
     return value.total_seconds()
 
 
-def _plain(value: object) -> JsonValue:
-    """Return a nested mapping or list of plain values as JSON (alerts settings)."""
-    if value is None or isinstance(value, bool | int | float | str):
-        return value
-    if isinstance(value, Mapping):
-        items: Mapping[object, object] = value  # pyright: ignore[reportUnknownVariableType]
-        return {str(k): _plain(v) for k, v in items.items()}
-    if isinstance(value, list | tuple):
-        seq: list[object] | tuple[object, ...] = value  # pyright: ignore[reportUnknownVariableType]
-        return [_plain(v) for v in seq]
-    if isinstance(value, timedelta):
-        return value.total_seconds()
-    return str(value)
+def _alerts(alerts: JobAlerts) -> JsonObject:
+    """Return a job's alert settings as sorted kind names and the notifier list."""
+    on: list[JsonValue] = [*sorted(k.value for k in alerts.on)]
+    off: list[JsonValue] = [*sorted(k.value for k in alerts.off)]
+    notify: list[JsonValue] = list(alerts.notify)
+    return {"on": on, "off": off, "notify": notify}
 
 
 def definition_json(config: Config, job: JobDef, *, show_alerts: bool) -> JsonObject:
@@ -311,10 +304,22 @@ def definition_json(config: Config, job: JobDef, *, show_alerts: bool) -> JsonOb
     """
     command: JsonValue = job.command if isinstance(job.command, str) else list(job.command)
     retries = job.retries
+    watch = job.watch
     return _redacted(
         config,
         {
             "name": job.name,
+            "type": job.kind.value,
+            **(
+                {}
+                if watch is None
+                else {
+                    "watch": watch.pattern,
+                    "min_age_seconds": _seconds(watch.min_age),
+                    "poll_seconds": _seconds(watch.poll),
+                    "give_up_after_seconds": _seconds(watch.give_up_after),
+                }
+            ),
             "command": command,
             "cwd": job.cwd,
             "env": dict.fromkeys(sorted(job.env), HIDDEN),
@@ -343,7 +348,7 @@ def definition_json(config: Config, job: JobDef, *, show_alerts: bool) -> JsonOb
             "min_runtime_seconds": _seconds(job.min_runtime),
             "max_runtime_seconds": _seconds(job.max_runtime),
             "must_start_by": _must_start_by(job),
-            "alerts": _plain(job.alerts) if show_alerts else HIDDEN,
+            "alerts": _alerts(job.alerts) if show_alerts else HIDDEN,
             "agent": job.agent,
             "agent_tags": list(job.agent_tags),
             "tags": list(job.tags),

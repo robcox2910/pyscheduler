@@ -36,8 +36,9 @@ from pynet.loop import Event as LoopEvent
 from pynet.loop import Task
 
 from pyscheduler.config import Config, JobDef
-from pyscheduler.engine.admission import Admission, ReadyQueue
+from pyscheduler.engine.admission import Admission, ReadyQueue, takes_global_slot
 from pyscheduler.engine.clock import Cancel, Clock
+from pyscheduler.engine.hooks import AttemptHooks
 from pyscheduler.engine.launcher import AttemptHandle, Launcher
 from pyscheduler.engine.locks import RunLocks
 from pyscheduler.engine.model import Attempt, Event, Run, RunState
@@ -63,7 +64,7 @@ class EngineFailedError(RuntimeError):
     """Raised inside the engine after a failed commit; the failure is already recorded."""
 
 
-class EngineBase(ABC):
+class EngineBase(AttemptHooks, ABC):
     """Hold the engine's shared state and commit changes write-ahead.
 
     Attributes:
@@ -86,6 +87,7 @@ class EngineBase(ABC):
         config_version: int = 1,
     ) -> None:
         """Set up empty state; nothing runs until ``start``."""
+        super().__init__()
         self.config = config
         self.store = store
         self.clock = clock
@@ -95,15 +97,18 @@ class EngineBase(ABC):
         self.admission = Admission(config.settings.max_running, config.pools)
         self.ready = ReadyQueue()
         self.writer = StoreWriter(store)
-        self._subscribers: list[Callable[[Run], None]] = []
         self._staged: dict[str, None] = {}
         self._staged_events: list[Event] = []
         self._flush_planned = False
-        self._busy = 0
+        self._busy: int = 0
         self._tasks: set[Task[None]] = set()
         self._attempt_tasks: dict[str, Task[None]] = {}
         self._handles: dict[str, AttemptHandle] = {}
         self._needs: dict[str, Mapping[str, int]] = {}
+        self._slotless: set[str] = set()
+        """Queued or running runs that hold no global slot (file watchers)."""
+        self._polls: int = 0
+        """Watchers looking at the disk on a helper thread right now (``settle`` naps)."""
         self._force: set[str] = set()
         self._kill_requested: set[str] = set()
         self._kill_actors: dict[str, str] = {}
@@ -123,18 +128,7 @@ class EngineBase(ABC):
         self.error: BaseException | None = None
         self._failed = LoopEvent()
 
-    # -- subscribers and settling ----------------------------------------
-
-    def subscribe(self, callback: Callable[[Run], None]) -> Callable[[], None]:
-        """Call ``callback`` with each run once its change is durable; return an unsubscribe."""
-        self._subscribers.append(callback)
-
-        def unsubscribe() -> None:
-            """Stop calling ``callback`` (a second call does nothing)."""
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return unsubscribe
+    # -- settling --------------------------------------------------------
 
     async def settle(self) -> None:
         """Wait until the writer is idle and no transition work is pending (a test helper).
@@ -152,7 +146,7 @@ class EngineBase(ABC):
                 await pynet.loop.sleep(0)
             else:
                 quiet = 0
-                await pynet.loop.sleep(0 if self.writer.idle else WRITER_NAP)
+                await pynet.loop.sleep(0 if self.writer.idle and not self._polls else WRITER_NAP)
         msg = "engine did not settle"
         raise RuntimeError(msg)
 
@@ -205,9 +199,11 @@ class EngineBase(ABC):
     def _release(self, run_id: str) -> None:
         """Give back the slots ``run_id`` holds (if any) and forget its needs."""
         needs = self._needs.pop(run_id, {})
+        global_slot = run_id not in self._slotless
+        self._slotless.discard(run_id)
         if run_id in self._held:
             self._held.discard(run_id)
-            self.admission.release(needs)
+            self.admission.release(needs, global_slot=global_slot)
 
     def _guard(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Wrap a timer callback so an error in it fails the engine instead of escaping."""
@@ -242,6 +238,7 @@ class EngineBase(ABC):
         events: Iterable[Event] = (),
         engine: Mapping[str, str] | None = None,
         configs: Iterable[ConfigRecord] = (),
+        run_files: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Put ``changes`` in the book, make them durable, publish them, then notify."""
         self._busy += 1
@@ -254,6 +251,7 @@ class EngineBase(ABC):
                 events=list(events),
                 engine=dict(engine or {}),
                 configs=list(configs),
+                run_files=dict(run_files or {}),
             )
             ids = [run.run_id for run in changes] + [a.run_id for a in batch.attempts]
             try:
@@ -265,20 +263,13 @@ class EngineBase(ABC):
                 self.book.publish(run)
             for run in changes:
                 self._notify(run)
+            self._notify_attempts(batch.attempts if changes else ())
             if self.error is not None:
                 # Durable, but the engine failed while this save waited: act on nothing.
                 self._fail(self.error, ids)
                 raise EngineFailedError(str(self.error))
         finally:
             self._busy -= 1
-
-    def _notify(self, run: Run) -> None:
-        """Tell every subscriber about ``run``; one that raises is logged and skipped."""
-        for callback in list(self._subscribers):
-            try:
-                callback(run)
-            except Exception:
-                logger.exception("subscriber failed for %s", run.run_id)
 
     def _stage(self, run: Run, *events: Event) -> None:
         """Put ``run`` in the book now and add it to the tray for the next flush."""
@@ -296,6 +287,7 @@ class EngineBase(ABC):
         *,
         engine: Mapping[str, str] | None = None,
         configs: Iterable[ConfigRecord] = (),
+        run_files: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Commit the tray (with the book's current copy of each run), then start what fits.
 
@@ -306,8 +298,10 @@ class EngineBase(ABC):
         events, self._staged_events = self._staged_events, []
         runs = [run for run_id in ids if (run := self.book.get(run_id)) is not None]
         configs = list(configs)
-        if runs or events or engine or configs:
-            await self._transition(runs, events=events, engine=engine, configs=configs)
+        if runs or events or engine or configs or run_files:
+            await self._transition(
+                runs, events=events, engine=engine, configs=configs, run_files=run_files
+            )
         self._pump()
 
     def _flush_soon(self) -> None:
@@ -360,9 +354,18 @@ class EngineBase(ABC):
         """Stage ``run`` as queued and put it in the ready queue."""
         queued = self._changed(run, RunState.QUEUED)
         self._stage(queued)
-        self._needs[run.run_id] = dict(job.pools)
-        self.ready.push(queued, job.criticality, job.pools)
+        self._enqueue(queued, job)
         return queued
+
+    def _enqueue(self, run: Run, job: JobDef) -> None:
+        """Note what ``run`` needs (its pools; a global slot unless a watcher) and queue it."""
+        global_slot = takes_global_slot(job)
+        self._needs[run.run_id] = dict(job.pools)
+        if global_slot:
+            self._slotless.discard(run.run_id)
+        else:
+            self._slotless.add(run.run_id)
+        self.ready.push(run, job.criticality, job.pools, global_slot=global_slot)
 
     def _unqueue(self, run_id: str) -> None:
         """Take ``run_id`` out of the ready queue, the force list and its retry wait."""

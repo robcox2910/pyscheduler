@@ -222,7 +222,7 @@ class ApiClient:
         return self.call("GET", "/api/runs", query=query)
 
     def run(self, run_id: str) -> JsonObject:
-        """Return ``{"run", "attempts", "events"}`` for one run."""
+        """Return ``{"run", "attempts", "events", "alerts"}`` for one run."""
         return self.call("GET", f"/api/runs/{_quote(run_id)}")
 
     def log(
@@ -240,6 +240,27 @@ class ApiClient:
     def forecast(self, start: str | None = None, end: str | None = None) -> JsonObject:
         """Return ``{"entries": [...]}``: the predicted runs between two ISO instants."""
         return self.call("GET", "/api/forecast", query={"from": start, "to": end})
+
+    def alerts(
+        self,
+        *,
+        kind: str | None = None,
+        job: str | None = None,
+        since: str | None = None,
+        limit: int | None = None,
+    ) -> JsonObject:
+        """Return ``{"alerts": [...]}``, newest first, each with its ``deliveries``."""
+        query: dict[str, str | int | None] = {
+            "kind": kind,
+            "job": job,
+            "since": since,
+            "limit": limit,
+        }
+        return self.call("GET", "/api/alerts", query=query)
+
+    def dead_alerts(self, limit: int | None = None) -> JsonObject:
+        """Return ``{"deliveries": [...]}``: the dead deliveries, each with its ``alert``."""
+        return self.call("GET", "/api/alerts/dead", query={"limit": limit})
 
     def validate(self) -> JsonObject:
         """Check the config files on the scheduler's disk; return ``{"ok", "warnings"}``."""
@@ -272,6 +293,11 @@ class ApiClient:
             raise ValueError(msg)
         body: dict[str, JsonValue] = {"downstream": True} if downstream else {}
         return self.call("POST", f"/api/runs/{_quote(run_id)}/{action}", body=body)
+
+    def replay(self, alert_id: str, *, notifier: str | None = None) -> JsonObject:
+        """Send an alert's dead deliveries again; return ``{"deliveries": [...]}``."""
+        body: dict[str, JsonValue] = {} if notifier is None else {"notifier": notifier}
+        return self.call("POST", f"/api/alerts/{_quote(alert_id)}/replay", body=body)
 
     def reload(self) -> JsonObject:
         """Ask the scheduler to reload its config files; return ``{"ok", "warnings"}``."""

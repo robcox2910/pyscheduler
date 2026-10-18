@@ -55,9 +55,8 @@ class TestPlaceholders:
 
     def test_placeholders_known(self) -> None:
         """The known set is the documented one."""
-        assert frozenset({"job", "run_date", "run_id", "attempt", "scheduled_at", "log_dir"}) == (
-            PLACEHOLDERS
-        )
+        known = {"job", "run_date", "run_id", "attempt", "scheduled_at", "log_dir", "files"}
+        assert frozenset(known) == PLACEHOLDERS
 
     def test_placeholders_in_bad(self) -> None:
         """Malformed templates raise ValueError."""

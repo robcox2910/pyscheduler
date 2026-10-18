@@ -60,6 +60,51 @@ one-slot `warehouse` pool with `transform`), plus a `cleanup` job that only
 runs on a day `load` fails. Runs use `previous_business_day`, so Monday's
 02:00 run processes Friday.
 
+## Phase 2: Alerts and File Watchers
+
+A smoke alarm is no use if nobody hears it. Phase 2 adds the ears:
+
+- **Alerts**: the scheduler raises an alert when a run `failed`, is
+  `retrying`, `blocked`, `lost`, ran `too_short` or `too_long`, or
+  `never_started` by its `must_start_by`; when a file watcher gives up
+  (`watcher_timeout`); and when a config reload fails (`reload_failed`). A job sets `min_runtime`,
+  `max_runtime` and `must_start_by`, and its own `alerts:` to switch kinds
+  on or off.
+- **Routing**: every alert has a topic, `alert.<kind>.<criticality>.<job>`.
+  `routes:` match topics with `*` (one word) and `#` (any number of words)
+  and pick notifiers. Deliveries are written to the store first, retried
+  with backoff, and replayed after a restart.
+- **Notifiers**: `log`, `command`, `webhook`, `slack`, `telegram` and
+  `email`, with `${SECRET}` values kept out of the file.
+- **File watchers**: a job with `type: file_watcher` waits for files
+  matching `watch` to arrive and sit still for `min_age`, then succeeds
+  and hands the list to its dependents as `{files}` (and
+  `PYSCHED_FILES`). It uses no pool or running slot while waiting, and
+  raises `watcher_timeout` after `give_up_after`.
+
+Try it with `examples/alerts.yaml`:
+
+```bash
+uv run pysched validate examples/alerts.yaml
+uv run pysched serve examples/alerts.yaml          # leave it running
+```
+
+In another terminal:
+
+```bash
+uv run pysched trigger always-fails --run-date 2026-10-16
+uv run pysched trigger slow-job --run-date 2026-10-16
+touch examples/inbox/trades.csv
+uv run pysched trigger inbox --run-date 2026-10-16
+uv run pysched alerts
+cat examples/logs/alerts.log
+```
+
+`pysched alerts` lists what was raised and which deliveries were sent,
+and `pysched replay <alert-id>` sends an alert's dead deliveries again. Concept pages:
+[Alerts](docs/concepts/alerts.md), [Routing Alerts](docs/concepts/routing-alerts.md),
+[Notifiers](docs/concepts/notifiers.md) and [File Watchers](docs/concepts/file-watchers.md).
+
 ## Config Reference
 
 The config format (scheduler settings, calendars, pools, defaults and
@@ -82,7 +127,8 @@ scheduler, YAML, config files, templates, cron, calendars and run dates,
 time zones and DST, dependencies, runs and states, retries and backoff,
 pools and limits, the minder, clocks and launchers, group commit,
 concurrency, recovery and catch-up, validation, operator actions,
-forecast, the HTTP API, and the service and CLI.
+forecast, notifiers, routing alerts, alerts, file watchers, the HTTP API,
+and the service and CLI.
 
 Build the docs site with:
 
@@ -95,7 +141,7 @@ uv run --with mkdocs-material mkdocs build --strict
 | Release | Contents |
 |---------|----------|
 | v0.1 | **Core engine**: YAML reader, config and validation, schedules, calendars, time zones, run dates, forecast, journalled store, the minder, local runs, dependencies, retries, pools, holds, catch-up, backfill, rerun, JSON HTTP API, `pysched` CLI |
-| v0.2 | **Alerts and file watchers**: alert rules (failed, never started, too long, too short, lost), routing through a pymq broker, notifiers (log, command, webhook, Slack, Telegram, email), file-watcher jobs |
+| v0.2 (done) | **Alerts and file watchers**: alert rules (failed, never started, too long, too short, lost), routing through a pymq broker, notifiers (log, command, webhook, Slack, Telegram, email), file-watcher jobs |
 | v0.3 | **Web UI**: login and roles, job board, run detail with live log tail, dependency graph, timeline with forecast, operator actions, live updates over SSE |
 | v0.4 | **Remote agents**: `pysched-agent` workers over a pymq broker, heartbeats, lost-agent handling, remote log fetch, signed messages |
 

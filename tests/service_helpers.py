@@ -129,3 +129,20 @@ def reachable(client: ApiClient, *, allow_errors: bool = False) -> bool:
             raise
         return False
     return True
+
+
+def wait_until[T](look: Callable[[], T | None], what: str) -> T:
+    """Poll ``look`` until it returns something other than ``None``/empty; return that.
+
+    Raises:
+        AssertionError: If that does not happen within ``DONE_SECONDS``.
+
+    """
+    deadline = time.monotonic() + DONE_SECONDS
+    while time.monotonic() < deadline:
+        found = look()
+        if found:
+            return found
+        time.sleep(POLL)
+    msg = f"timed out waiting for {what}"
+    raise AssertionError(msg)

@@ -11,7 +11,7 @@ carries on.
 """
 
 import difflib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 
@@ -24,9 +24,10 @@ from pyscheduler.config.run_dates import (
     WAIT_HORIZON_DAYS,
     RunDateIndex,
 )
+from pyscheduler.config.validate_alerts import check_alerts
+from pyscheduler.config.validate_templates import check_placeholders
 from pyscheduler.schedule.firings import next_firing
 from pyscheduler.schedule.specs import BusinessDaySchedule
-from pyscheduler.templates import PLACEHOLDERS, placeholders_in
 
 __all__ = ["find_cycles", "validate_config"]
 
@@ -80,21 +81,6 @@ def find_cycles(graph: Mapping[str, Sequence[str]]) -> list[tuple[str, ...]]:
     return list(found)
 
 
-def _template_fields(job: JobDef) -> Iterator[tuple[str, str]]:
-    """Yield ``(where, text)`` for every templated value of ``job``."""
-    if isinstance(job.command, str):
-        yield "command", job.command
-    else:
-        for arg in job.command:
-            yield "command", arg
-    if job.cwd is not None:
-        yield "cwd", job.cwd
-    for key, value in job.env.items():
-        yield f"env {key}", value
-    yield "stdout", job.stdout
-    yield "stderr", job.stderr
-
-
 class _Checker:
     """Run every check over one config, collecting problems."""
 
@@ -130,6 +116,7 @@ class _Checker:
         """Run every check and return the problems found."""
         self.check_calendars()
         self.check_cycles()
+        check_alerts(self, self.config)
         for job in self.config.jobs.values():
             if job.name in self.broken:
                 continue
@@ -176,7 +163,7 @@ class _Checker:
         if job.calendar is not None and job.calendar not in self.config.calendars:
             error(f"unknown calendar {job.calendar!r}")
         self.check_pools(job)
-        self.check_placeholders(job)
+        check_placeholders(self, self.config, job)
         low, high, timeout = job.min_runtime, job.max_runtime, job.timeout
         if low is not None and high is not None and low >= high:
             error("min_runtime must be less than max_runtime")
@@ -219,22 +206,6 @@ class _Checker:
                 self.add(job.source, f"unknown pool {pool!r}", job.name)
             elif slots > size:
                 self.add(job.source, f"needs {slots} slots but pool {pool!r} has {size}", job.name)
-
-    def check_placeholders(self, job: JobDef) -> None:
-        """Check every template for malformed or unknown placeholders."""
-        allowed = ", ".join(f"{{{n}}}" for n in sorted(PLACEHOLDERS))
-        reported: set[tuple[str, str]] = set()
-        for where, text in _template_fields(job):
-            try:
-                names = placeholders_in(text)
-            except ValueError as exc:
-                self.add(job.source, f"{where}: {exc}", job.name)
-                continue
-            for name in sorted(names - PLACEHOLDERS):
-                if (where, name) not in reported:
-                    reported.add((where, name))
-                    message = f"unknown placeholder {{{name}}} in {where}: use one of {allowed}"
-                    self.add(job.source, message, job.name)
 
     def check_schedules(self, job: JobDef) -> None:
         """Check business_day schedules and that the schedules fire at all."""
@@ -328,14 +299,15 @@ class _Checker:
     def wait_message(self, run_date: date, up: JobDef, target: date) -> str:
         """Describe a run date ``up`` will never have, naming the job at the root."""
         root, root_date = self.index.root_without(up, target)
+        never = "is disabled" if not root.enabled else "has no firing for it"
         message = (
             f"would wait forever: its run for {run_date} needs a run of {up.name!r} for {target}"
         )
         if root is up:
-            return message + f", which {_never_message(root)} and no way to get one"
+            return message + f", which {never} and no way to get one"
         return message + (
             f", which only gets runs from upstream; {root.name!r} needs a run for "
-            f"{root_date} but {_never_message(root)}"
+            f"{root_date} but {never}"
         )
 
     def check_wait_forever(self, job: JobDef) -> None:
@@ -371,11 +343,6 @@ class _Checker:
                     message = self.wait_message(run_date, up, target)
                     self.add(dep.source, message, job.name, "warning")
                     break
-
-
-def _never_message(root: JobDef) -> str:
-    """Say why ``root`` will not have the run."""
-    return "is disabled" if not root.enabled else "has no firing for it"
 
 
 def validate_config(

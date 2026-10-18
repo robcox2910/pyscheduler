@@ -9,6 +9,7 @@ A ``Batch`` is a parcel of changes for one commit. The writer merges
 many parcels into one before it goes to the post box.
 """
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -18,6 +19,8 @@ from pydb.record import Value
 from pydb.schema import Column, Schema
 from pydb.types import DataType
 
+from pyscheduler.alerts.model import AlertRecord, DeliveryRecord, DeliveryStatus
+from pyscheduler.config.model import AlertKind, Criticality
 from pyscheduler.engine.model import Attempt, Event, Outcome, Run, RunState, Trigger
 
 RUNS = "runs"
@@ -25,6 +28,9 @@ ATTEMPTS = "attempts"
 EVENTS = "events"
 ENGINE = "engine"
 CONFIGS = "configs"
+ALERTS = "alerts"
+DELIVERIES = "deliveries"
+RUN_FILES = "run_files"
 
 T = DataType.TEXT
 INT = DataType.INTEGER
@@ -81,6 +87,32 @@ TABLES: dict[str, Schema] = {
             Column("sources_json", T, not_null=True),
         ]
     ),
+    ALERTS: Schema(
+        [
+            Column("alert_id", T, primary_key=True),
+            Column("kind", T, not_null=True),
+            Column("run_id", T),
+            Column("job", T),
+            Column("run_date", DataType.DATE),
+            Column("attempt", INT, not_null=True),
+            Column("criticality", T, not_null=True),
+            Column("raised_at", DataType.TIMESTAMP, not_null=True),
+            Column("message", T, not_null=True),
+            Column("detail", T, not_null=True),
+        ]
+    ),
+    DELIVERIES: Schema(
+        [
+            Column("delivery_id", T, primary_key=True),
+            Column("alert_id", T, not_null=True),
+            Column("notifier", T, not_null=True),
+            Column("status", T, not_null=True),
+            Column("attempts", INT, not_null=True),
+            Column("last_error", T, not_null=True),
+            Column("updated_at", DataType.TIMESTAMP, not_null=True),
+        ]
+    ),
+    RUN_FILES: Schema([Column("run_id", T, primary_key=True), Column("files", T, not_null=True)]),
 }
 """Every table's schema, by table name."""
 
@@ -88,6 +120,8 @@ INDEXES: dict[str, list[tuple[str, str]]] = {
     RUNS: [("runs_job", "job"), ("runs_run_date", "run_date"), ("runs_state", "state")],
     ATTEMPTS: [("attempts_run_id", "run_id")],
     EVENTS: [("events_run_id", "run_id")],
+    ALERTS: [("alerts_run_id", "run_id"), ("alerts_raised_at", "raised_at")],
+    DELIVERIES: [("deliveries_alert_id", "alert_id"), ("deliveries_status", "status")],
 }
 """The ``(index name, column)`` pairs of each table that has indexes."""
 
@@ -119,6 +153,10 @@ class Batch:
     engine: dict[str, str] = field(default_factory=dict[str, str])
     configs: list[ConfigRecord] = field(default_factory=list[ConfigRecord])
     deleted_run_ids: list[str] = field(default_factory=list[str])
+    alerts: list[AlertRecord] = field(default_factory=list[AlertRecord])
+    deliveries: list[DeliveryRecord] = field(default_factory=list[DeliveryRecord])
+    run_files: dict[str, tuple[str, ...]] = field(default_factory=dict[str, tuple[str, ...]])
+    deleted_alert_ids: list[str] = field(default_factory=list[str])
 
     @property
     def is_empty(self) -> bool:
@@ -130,14 +168,20 @@ class Batch:
             or self.engine
             or self.configs
             or self.deleted_run_ids
+            or self.alerts
+            or self.deliveries
+            or self.run_files
+            or self.deleted_alert_ids
         )
 
     def merge(self, other: Batch) -> None:
         """Fold a later batch into this one, the later change of a key winning.
 
         A delete in ``other`` drops this batch's pending upserts and events
-        of that run, since they came earlier. ``other`` is not changed.
+        of that run, since they came earlier; so does a deleted alert id.
+        ``other`` is not changed.
         """
+        self._merge_alerts(other)
         gone = set(other.deleted_run_ids)
         if gone:
             self.runs = [r for r in self.runs if r.run_id not in gone]
@@ -156,6 +200,25 @@ class Batch:
         self.configs = list(configs.values())
         self.events += other.events
         self.engine.update(other.engine)
+
+    def _merge_alerts(self, other: Batch) -> None:
+        """Fold in ``other``'s alerts, deliveries and files, and its alert deletes."""
+        gone_runs = set(other.deleted_run_ids)
+        gone_alerts = set(other.deleted_alert_ids)
+        gone_alerts |= {a.alert_id for a in self.alerts if a.run_id in gone_runs}
+        if gone_alerts:
+            self.alerts = [a for a in self.alerts if a.alert_id not in gone_alerts]
+            self.deliveries = [d for d in self.deliveries if d.alert_id not in gone_alerts]
+            known = set(self.deleted_alert_ids)
+            self.deleted_alert_ids += [i for i in other.deleted_alert_ids if i not in known]
+        self.run_files = {k: v for k, v in self.run_files.items() if k not in gone_runs}
+        alerts = {a.alert_id: a for a in self.alerts}
+        alerts.update((a.alert_id, a) for a in other.alerts)
+        self.alerts = list(alerts.values())
+        deliveries = {d.delivery_id: d for d in self.deliveries}
+        deliveries.update((d.delivery_id, d) for d in other.deliveries)
+        self.deliveries = list(deliveries.values())
+        self.run_files.update(other.run_files)
 
 
 def run_to_row(run: Run) -> Row:
@@ -273,4 +336,61 @@ def config_from_row(row: Mapping[str, Value]) -> ConfigRecord:
         loaded_at=cast(datetime, row["loaded_at"]),
         digest=cast(str, row["digest"]),
         sources_json=cast(str, row["sources_json"]),
+    )
+
+
+def alert_to_row(alert: AlertRecord) -> Row:
+    """Return the ``alerts`` row for an alert."""
+    return {
+        "alert_id": alert.alert_id,
+        "kind": alert.kind.value,
+        "run_id": alert.run_id,
+        "job": alert.job,
+        "run_date": alert.run_date,
+        "attempt": alert.attempt,
+        "criticality": alert.criticality.name,
+        "raised_at": alert.raised_at,
+        "message": alert.message,
+        "detail": json.dumps(alert.detail),
+    }
+
+
+def alert_from_row(row: Mapping[str, Value]) -> AlertRecord:
+    """Return the alert an ``alerts`` row holds."""
+    return AlertRecord(
+        alert_id=cast(str, row["alert_id"]),
+        kind=AlertKind(row["kind"]),
+        run_id=cast(str | None, row["run_id"]),
+        job=cast(str | None, row["job"]),
+        run_date=cast(date | None, row["run_date"]),
+        attempt=cast(int, row["attempt"]),
+        criticality=Criticality[cast(str, row["criticality"])],
+        raised_at=cast(datetime, row["raised_at"]),
+        message=cast(str, row["message"]),
+        detail=json.loads(cast(str, row["detail"])),
+    )
+
+
+def delivery_to_row(delivery: DeliveryRecord) -> Row:
+    """Return the ``deliveries`` row for a delivery."""
+    return {
+        "delivery_id": delivery.delivery_id,
+        "alert_id": delivery.alert_id,
+        "notifier": delivery.notifier,
+        "status": delivery.status.value,
+        "attempts": delivery.attempts,
+        "last_error": delivery.last_error,
+        "updated_at": delivery.updated_at,
+    }
+
+
+def delivery_from_row(row: Mapping[str, Value]) -> DeliveryRecord:
+    """Return the delivery a ``deliveries`` row holds."""
+    return DeliveryRecord(
+        alert_id=cast(str, row["alert_id"]),
+        notifier=cast(str, row["notifier"]),
+        status=DeliveryStatus(row["status"]),
+        attempts=cast(int, row["attempts"]),
+        last_error=cast(str, row["last_error"]),
+        updated_at=cast(datetime, row["updated_at"]),
     )

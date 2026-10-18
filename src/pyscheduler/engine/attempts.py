@@ -9,17 +9,18 @@ are lifted off (SIGKILL) a little later.
 When the attempt ends, its outcome decides the run's fate: succeeded,
 another try after a growing wait (``retry_wait``), or failed. Either way
 the slot is given back and the next queued runs are started.
+
+A file watcher's attempt has no process: a ``WatcherHandle`` stands in
+for it (see ``watch_runs``), and its found files go in the final commit.
 """
 
 import os
-from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from pyscheduler.config import JobDef
-from pyscheduler.engine.base import EngineBase, EngineFailedError
-from pyscheduler.engine.clock import Cancel
+from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.launcher import (
     CANCELLED_MESSAGE,
     AttemptHandle,
@@ -27,6 +28,9 @@ from pyscheduler.engine.launcher import (
     LaunchSpec,
 )
 from pyscheduler.engine.model import Attempt, Outcome, Run, RunState
+from pyscheduler.engine.outcomes import LOST, Watch, classify
+from pyscheduler.engine.watch_runs import WatchRuns
+from pyscheduler.engine.watcher import WatcherHandle
 from pyscheduler.templates import render
 
 SHELL = ("/bin/sh", "-c")
@@ -37,57 +41,19 @@ MERGED = "stdout"
 
 _NO_RETRY = frozenset({Outcome.SUCCEEDED, Outcome.KILLED})
 
-
-LOST = "lost"
-"""The reason on an attempt whose process vanished without leaving a status note."""
+__all__ = ["LOST", "MERGED", "SHELL", "AttemptRunner", "Watch", "classify"]
 
 
-@dataclass
-class Watch:
-    """The timers and flags of one running attempt.
-
-    Attributes:
-        timed_out: The timeout rang (the attempt was asked to stop).
-        lost: The process vanished without a status note (found by recovery).
-        term: The timer that rings the timeout.
-        kill: The timer that sends SIGKILL after the grace.
-
-    """
-
-    timed_out: bool = False
-    lost: bool = False
-    term: Cancel | None = None
-    kill: Cancel | None = None
-
-    def cancel(self) -> None:
-        """Call off both timers."""
-        for timer in (self.term, self.kill):
-            if timer is not None:
-                timer.cancel()
+def _log_paths(spec: LaunchSpec | WatcherHandle | None) -> tuple[str, str]:
+    """Return the stdout and stderr paths to record for an attempt (``""`` for none)."""
+    if isinstance(spec, WatcherHandle):
+        return str(spec.log_path), ""
+    if spec is None:
+        return "", ""
+    return str(spec.stdout_path), str(spec.stderr_path or spec.stdout_path)
 
 
-def classify(
-    result: AttemptResult, *, timed_out: bool, killed: bool, lost: bool = False
-) -> tuple[Outcome, str]:
-    """Return the outcome of an attempt and the reason to show for it.
-
-    A ``lost`` attempt (no status note, process gone) is ``lost`` unless
-    it was being timed out or killed, which explains its end better.
-    """
-    if result.start_error is not None:
-        return Outcome.START_ERROR, f"start error: {result.start_error}"
-    if result.succeeded:
-        return Outcome.SUCCEEDED, ""
-    flags = ((timed_out, Outcome.TIMEOUT, "timeout"), (killed, Outcome.KILLED, "killed"))
-    for flag, outcome, reason in (*flags, (lost, Outcome.LOST, LOST)):
-        if flag:
-            return outcome, reason
-    if result.signal is not None:
-        return Outcome.FAILED, f"signal {result.signal}"
-    return Outcome.FAILED, f"exit {result.exit_code}"
-
-
-class AttemptRunner(EngineBase):
+class AttemptRunner(WatchRuns):
     """Start attempts, arm their timeouts, and turn their endings into run states."""
 
     def _start_attempt(self, run: Run) -> bool:
@@ -110,14 +76,17 @@ class AttemptRunner(EngineBase):
             config_version=self.config_version,
             updated_at=now,
         )
-        spec: LaunchSpec | None = None
+        spec: LaunchSpec | WatcherHandle | None = None
         error: str | None = None
         try:
-            spec = self._launch_spec(running, job)
+            if job.watch is not None:
+                log = self._watch_log(running, job)
+                spec = self._watcher(running, job, job.watch, now, log)
+            else:
+                spec = self._launch_spec(running, job)
         except (KeyError, ValueError) as exc:
             error = f"bad template: {exc}"
-        stdout = str(spec.stdout_path) if spec else ""
-        stderr = str(spec.stderr_path or spec.stdout_path) if spec else ""
+        stdout, stderr = _log_paths(spec)
         row = Attempt(
             run_id=run.run_id,
             attempt=number,
@@ -129,7 +98,7 @@ class AttemptRunner(EngineBase):
             pid=None,
             stdout_path=stdout,
             stderr_path=stderr,
-            status_path=str(self._status_path(run.run_id, number)),
+            status_path="" if job.watch else str(self._status_path(run.run_id, number)),
             reason="",
         )
         self.book.put(running)
@@ -149,14 +118,7 @@ class AttemptRunner(EngineBase):
             ValueError: If a template is malformed.
 
         """
-        values: Mapping[str, object] = {
-            "job": job.name,
-            "run_date": run.run_date,
-            "run_id": run.run_id,
-            "attempt": run.attempt,
-            "scheduled_at": run.scheduled_at,
-            "log_dir": str(self.config.settings.log_dir),
-        }
+        values = self._values(run, job)
         if isinstance(job.command, str):
             argv = (*SHELL, render(job.command, values))
         else:
@@ -169,6 +131,9 @@ class AttemptRunner(EngineBase):
             "PYSCHED_RUN_ID": run.run_id,
             "PYSCHED_ATTEMPT": str(run.attempt),
         }
+        files = self._upstream_files(run, job)
+        if files is not None:
+            env["PYSCHED_FILES"] = "\n".join(files)
         stderr = None if job.stderr == MERGED else Path(render(job.stderr, values))
         return LaunchSpec(
             run_id=run.run_id,
@@ -183,7 +148,11 @@ class AttemptRunner(EngineBase):
         )
 
     async def _attempt(
-        self, running: Run, row: Attempt, spec: LaunchSpec | None, error: str | None
+        self,
+        running: Run,
+        row: Attempt,
+        spec: LaunchSpec | WatcherHandle | None,
+        error: str | None,
     ) -> None:
         """Commit ``running``, launch, commit the pid, wait, then record the ending.
 
@@ -200,8 +169,8 @@ class AttemptRunner(EngineBase):
             return
         started = self._event(running.run_id, "attempt_started", attempt=row.attempt)
         await self._transition([running], attempts=[row], events=[started])
-        handle: AttemptHandle | None = None
-        if spec is not None:
+        handle: AttemptHandle | None = spec if isinstance(spec, WatcherHandle) else None
+        if isinstance(spec, LaunchSpec):
             try:
                 handle = await self.launcher.launch(spec)
             except (OSError, ValueError, TypeError) as exc:  # Popen refuses a NUL with ValueError
@@ -232,6 +201,7 @@ class AttemptRunner(EngineBase):
         finally:
             watch.cancel()
             self._handles.pop(running.run_id, None)
+        watch.note(handle)
         await self._finish(row, result, watch)
 
     async def _idle_while(self, handle: AttemptHandle) -> AttemptResult:
@@ -278,6 +248,7 @@ class AttemptRunner(EngineBase):
         The run's lock is held across the commit, so no operator action
         sees the run halfway. A killed attempt never retries, and neither
         does one whose job was removed or disabled by a reload while it ran.
+        A watcher a reload stopped (see ``reload``) ends its run cancelled.
         """
         run_id = row.run_id
         async with self._run_lock(run_id):
@@ -304,6 +275,13 @@ class AttemptRunner(EngineBase):
         )
         if outcome is Outcome.KILLED and actor is not None:
             reason = f"killed by {actor}"
+        if outcome is Outcome.TIMEOUT and watch.why:
+            reason = watch.why
+        dropped = self._dropped.pop(run_id, None)  # a reload stopped this watcher
+        if dropped is not None and outcome is not Outcome.SUCCEEDED:
+            reason = dropped
+        else:
+            dropped = None
         now = self.clock.now()
         ended = replace(
             row,
@@ -325,7 +303,7 @@ class AttemptRunner(EngineBase):
         tries = run.attempt - run.rerun
         count = job.retries.count if job is not None and job.enabled else 0
         cancelled = result.start_error == CANCELLED_MESSAGE  # the scheduler is stopping
-        retry = outcome not in _NO_RETRY and not killed and not cancelled
+        retry = outcome not in _NO_RETRY and not (killed or cancelled or dropped)
         if retry and tries <= count and job is not None:
             when = now + job.retries.delay_for(tries)
             waiting = self._changed(
@@ -339,9 +317,14 @@ class AttemptRunner(EngineBase):
                 self._retry_timers[run_id] = self.clock.call_at(when, retry)
             return None
         state = RunState.SUCCEEDED if outcome is Outcome.SUCCEEDED else RunState.FAILED
+        state = RunState.CANCELLED if dropped else state
         final = self._changed(run, state, reason)
         events.append(self._event(run_id, "finished", state=state.value, reason=reason))
-        await self._transition([final], attempts=[ended], events=events)
+        files = {run_id: watch.files} if watch.files and state is RunState.SUCCEEDED else {}
+        # Before the transition: it puts the run in the book at once, so a
+        # dependant woken by another run's commit may launch before ours lands.
+        self._files.update(files)
+        await self._transition([final], attempts=[ended], events=events, run_files=files)
         return final
 
     def _cancel_kill_timer(self, run_id: str) -> None:

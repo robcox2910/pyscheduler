@@ -1,0 +1,76 @@
+# Alert routing demo: failures, a slow job and a file watcher.
+#
+#   pysched validate examples/alerts.yaml
+#   pysched serve examples/alerts.yaml                    # from the repository root
+#   pysched trigger always-fails --run-date 2026-10-16    # in another terminal
+#   pysched trigger slow-job --run-date 2026-10-16        # too_long after 5s
+#   touch examples/inbox/trades.csv                       # the file the watcher waits for
+#   pysched trigger inbox --run-date 2026-10-16           # waits for the CSV, then consume runs
+#   rm examples/inbox/trades.csv                          # tidy up afterwards
+#   pysched alerts                                        # what was raised, and where it went
+#   cat examples/logs/alerts.log                          # the log notifier's file
+#   pysched replay <alert-id>                             # send an alert's dead deliveries again
+#
+# Routes (first column is the topic pattern, alert.<kind>.<criticality>.<job>):
+#
+#   alert.*.critical.#  ──> say-kind  (runs say-kind.sh, which prints "ALERT <kind>")
+#   alert.#             ──> alert-log (everything is written to logs/alerts.log)
+#
+# always-fails is critical, so its alert reaches both notifiers. slow-job and
+# the watcher are normal, so they only reach the log. To page Slack as well,
+# uncomment the ops-slack notifier and its route, and set SLACK_URL.
+
+scheduler:
+  name: example-alerts
+  timezone: Europe/London
+  state_dir: state               # next to this file: examples/state
+  log_dir: logs                  # examples/logs
+
+notifiers:
+  alert-log:
+    type: log
+    path: logs/alerts.log        # examples/logs/alerts.log
+  say-kind:
+    type: command
+    command: examples/scripts/say-kind.sh   # run with /bin/sh -c, alert JSON on stdin
+    timeout: 5s
+  # ops-slack:
+  #   type: slack
+  #   webhook_url: "${SLACK_URL}"
+  #   retries: {count: 5, delay: 10s, max_delay: 10m}
+
+routes:
+  - {match: "alert.#", notify: [alert-log]}
+  - {match: "alert.*.critical.#", notify: [say-kind]}
+  # - {match: "alert.*.critical.#", notify: [ops-slack]}
+
+defaults:
+  timeout: 1m
+  tags: [example, alerts]
+
+jobs:
+  always-fails:
+    description: Breaks every time, so a critical "failed" alert is raised.
+    command: examples/scripts/fail.sh
+    schedule: manual             # only runs when triggered
+    criticality: critical
+
+  slow-job:
+    description: Runs for 20s but should take at most 5s, so "too_long" is raised.
+    command: examples/scripts/slow.sh
+    schedule: manual
+    max_runtime: 5s
+
+  inbox:
+    description: Wait for a CSV in examples/inbox to arrive and stop changing.
+    type: file_watcher
+    schedule: manual
+    watch: "examples/inbox/*.csv"
+    min_age: 2s
+    poll: 1s
+    give_up_after: 1m            # then a "watcher_timeout" alert is raised
+
+  consume:
+    description: Load the files the watcher found.
+    command: examples/scripts/consume.sh {files}
+    depends_on: [inbox]

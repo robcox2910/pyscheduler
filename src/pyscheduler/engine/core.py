@@ -10,6 +10,9 @@ The engine works the same way. It is a handful of tasks on one loop:
 - one **attempt task** per running attempt waits for its process;
 - the **store writer** commits changes in groups.
 
+File watchers (``watch_runs``) are attempts too, but they hold no
+global slot: their looks at the disk share ``watch_limit`` instead.
+
 State lives in memory (the run book) and is mirrored to the store
 write-ahead: a change is durable before it is shown or acted on.
 
@@ -27,7 +30,7 @@ import heapq
 from datetime import datetime, timedelta
 
 import pynet.loop
-from pynet.loop import Cancelled, Task
+from pynet.loop import Cancelled, Semaphore, Task
 
 from pyscheduler.config import Config
 from pyscheduler.engine.base import EngineFailedError, logger
@@ -89,6 +92,12 @@ class Engine(Recovery):
         self._firings_stale = False
         self._stopped = False
         self._pump_planned = False
+        self._watch_size = config.settings.watch_limit
+        self.watch_limit = Semaphore(self._watch_size)
+        self._files = {}
+        self._dropped = {}
+        self.last_active = None
+        self.watch_reloads(self._resize_watch_limit)
 
     async def start(self) -> None:
         """Start the writer, recover, catch up, then start the firing task and prune.
@@ -105,7 +114,13 @@ class Engine(Recovery):
         await self.writer.start()
         await self.recover()
         now = self.clock.now()
-        first = await pynet.loop.run_in_thread(self.store.get_engine, LAST_TICK) is None
+        tick, record = await pynet.loop.run_in_thread(
+            lambda: (self.store.get_engine(LAST_TICK), self.store.latest_config())
+        )
+        first = tick is None
+        marks = [self.last_active, record and record.loaded_at]
+        marks.append(None if tick is None else datetime.fromisoformat(tick))
+        self.last_active = max((mark for mark in marks if mark is not None), default=None)
         await self.catch_up(now)
         self._firings_after = None if first else now
         self._firing_task = pynet.loop.spawn(self._fire_loop(), name="engine-firings")
@@ -121,7 +136,8 @@ class Engine(Recovery):
         that was mid-launch can still be left running; recovery finds it
         on the next start. ``stop`` never raises because of a task's
         error (those are logged), always closes the writer and the store,
-        and does nothing when called again.
+        and does nothing when called again. Just before the writer closes
+        it awaits the ``before_close`` listeners.
         """
         if self._stopped:
             return
@@ -133,14 +149,35 @@ class Engine(Recovery):
             await drain_launches()  # after this, no minder is forked any more
         finally:
             try:
-                await self.writer.close()
-            except Exception:  # noqa: BLE001 -- logged; stop must finish
-                logger.exception("closing the store writer failed")
+                await self._notify_closing()  # the last chance to save (the alert monitor)
             finally:
-                try:
-                    await pynet.loop.run_in_thread(self.store.close)
-                except Exception:  # noqa: BLE001 -- logged; stop must finish
-                    logger.exception("closing the store failed")
+                await self._close_store()
+
+    async def _close_store(self) -> None:
+        """Close the writer (committing what is pending), then the store; log any error."""
+        try:
+            await self.writer.close()
+        except Exception:  # noqa: BLE001 -- logged; stop must finish
+            logger.exception("closing the store writer failed")
+        finally:
+            try:
+                await pynet.loop.run_in_thread(self.store.close)
+            except Exception:  # noqa: BLE001 -- logged; stop must finish
+                logger.exception("closing the store failed")
+
+    async def prune(self, now: datetime) -> int:
+        """Prune as ``Retention.prune`` does, then forget the files of runs no longer in memory."""
+        deleted = await super().prune(now)
+        self._files = {k: v for k, v in self._files.items() if self.book.get(k) is not None}
+        return deleted
+
+    def fail_stop(self, exc: BaseException) -> None:
+        """Fail the engine stop because a part of it (say, alert delivery) could not commit.
+
+        Store failures are fail-stop wherever they happen: the error is
+        recorded, ``wait_failed`` returns it, and no new work starts.
+        """
+        self._fail(exc, ())
 
     async def _wind_down(self, *, kill_running: bool) -> None:
         """Cancel the firing task and timers, then end or abandon the attempt tasks."""

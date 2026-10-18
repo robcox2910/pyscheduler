@@ -1,6 +1,7 @@
 """Test reload, validate, the health check and the error handling of the API."""
 
 import logging
+from collections.abc import Sequence
 
 import pytest
 from api_helpers import (
@@ -12,6 +13,9 @@ from api_helpers import (
     MakeApi,
     body_of,
 )
+
+from pyscheduler.api import config_actions
+from pyscheduler.config import Problem
 
 INTERNAL_ERROR = 500
 UNAVAILABLE = 503
@@ -164,5 +168,32 @@ class TestMinorChecks:
             h.engine.error = None
             assert response.status == UNAVAILABLE
             assert body_of(response) == {"error": "scheduler failed; see the scheduler log"}
+
+        h.run(body)
+
+
+class TestOnFailed:
+    """``config_actions`` tells ``on_failed`` about a reload that finds errors."""
+
+    def test_on_failed_gets_the_error_problems(self, api: MakeApi) -> None:
+        """A broken file calls it once with the errors; a good reload does not call it."""
+        h = api()
+        heard: list[list[Problem]] = []
+
+        def on_failed(problems: Sequence[Problem]) -> None:
+            """Remember the problems."""
+            heard.append(list(problems))
+
+        reload, _ = config_actions(h.engine, h.config_path, env={}, on_failed=on_failed)
+
+        async def body() -> None:
+            """Reload a good file, then a broken one."""
+            await reload("test")
+            assert heard == []
+            h.config_path.write_text(BROKEN, encoding="utf-8")
+            problems = await reload("test")
+            assert len(heard) == 1
+            assert heard[0] == [p for p in problems if p.severity == "error"]
+            assert heard[0]
 
         h.run(body)

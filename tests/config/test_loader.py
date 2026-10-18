@@ -10,10 +10,12 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from pyscheduler.config import (
+    AlertKind,
     CatchUp,
     Config,
     ConfigError,
     Criticality,
+    JobAlerts,
     JobDef,
     Overlap,
     Problem,
@@ -184,7 +186,7 @@ class TestFullExample:
             min_runtime=None,
             max_runtime=None,
             must_start_by=None,
-            alerts={},
+            alerts=JobAlerts(),
             agent=None,
             agent_tags=(),
             tags=(),
@@ -209,7 +211,7 @@ class TestFullExample:
         min_runtime: 1m
         max_runtime: 1h
         must_start_by: "07:30"
-        alerts: {on: [failure], to: ops}
+        alerts: {on: [retrying], notify: [ops]}
         agent: box1
         agent_tags: [linux]
         description: hello
@@ -227,7 +229,7 @@ class TestFullExample:
         assert job.min_runtime == timedelta(minutes=1)
         assert job.max_runtime == timedelta(hours=1)
         assert job.must_start_by == time(7, 30)
-        assert job.alerts == {"on": ["failure"], "to": "ops"}
+        assert job.alerts == JobAlerts(on=frozenset({AlertKind.RETRYING}), notify=("ops",))
         assert job.agent == "box1"
         assert job.agent_tags == ("linux",)
         assert (job.description, job.owner, job.enabled) == ("hello", "me", False)

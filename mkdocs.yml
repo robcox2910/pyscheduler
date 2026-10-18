@@ -67,5 +67,9 @@ nav:
       - "Validation (The Teacher Who Checks Your Work Before the Test)": concepts/validation.md
       - "Operator Actions (The Train Controller's Desk)": concepts/operator-actions.md
       - "Forecast (The Weather Report for Jobs)": concepts/forecast.md
+      - "Notifiers (The Ways to Reach Someone)": concepts/notifiers.md
+      - "Routing Alerts (The Post Office With a Pigeonhole per Notifier)": concepts/routing-alerts.md
+      - "Alerts (The Smoke Alarm and the Teacher Who Notices You Never Arrived)": concepts/alerts.md
+      - "File Watchers (Waiting at the Letterbox Until the Parcel Stops Rustling)": concepts/file-watchers.md
       - "The HTTP API (The Front Desk With Wristbands)": concepts/http-api.md
       - "The Service and the CLI (Opening the Shop and the Remote Control)": concepts/the-service-and-cli.md

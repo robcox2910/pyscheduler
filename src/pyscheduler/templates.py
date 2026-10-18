@@ -10,7 +10,11 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from string import Formatter
 
-PLACEHOLDERS = frozenset({"job", "run_date", "run_id", "attempt", "scheduled_at", "log_dir"})
+PLACEHOLDERS = frozenset(
+    {"job", "run_date", "run_id", "attempt", "scheduled_at", "log_dir", "files"}
+)
+WATCH_PLACEHOLDERS = PLACEHOLDERS - {"attempt", "files"}
+"""The blanks a ``watch`` pattern may use: no attempt number yet, no files found yet."""
 
 _ENV = re.compile(r"\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _FORMATTER = Formatter()

@@ -15,12 +15,16 @@ The routes, exactly as the design lists them:
 - ``GET /api/forecast?from=&to=``
 - ``POST /api/jobs/{name}/trigger``; ``POST /api/jobs/{name}/backfill``
 - ``POST /api/runs/{id}/{rerun|hold|release|kill|force-start|skip|mark-success|mark-failed}``
+- ``GET /api/alerts?kind=&job=&since=&limit=``; ``GET /api/alerts/dead?limit=``
+- ``POST /api/alerts/{id}/replay``
 - ``POST /api/reload``; ``GET /api/config/validate``
 """
 
 from pyweb.app import App
 
+from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.api.admin import Reload, Validate, add_admin_routes
+from pyscheduler.api.alerts import add_alert_routes
 from pyscheduler.api.auth import TokenHolder, TokenTable, token_middleware
 from pyscheduler.api.jobs import add_job_routes
 from pyscheduler.api.runs import add_run_routes
@@ -35,6 +39,7 @@ def build_app(
     tokens: TokenTable | TokenHolder | None,
     reload: Reload,
     validate: Validate,
+    dispatcher: Dispatcher | None = None,
 ) -> App:
     """Return the API app for ``engine``.
 
@@ -45,6 +50,8 @@ def build_app(
             with the operator role; loopback hosts only).
         reload: Reload the config for an actor (see ``config_actions``).
         validate: Check the config files on disk (see ``config_actions``).
+        dispatcher: The alert dispatcher (replays go through it); with ``None``
+            the alert routes answer 503 ``alerts are not running``.
 
     """
     app = App()
@@ -52,4 +59,5 @@ def build_app(
     add_admin_routes(app, engine, reload=reload, validate=validate)
     add_job_routes(app, engine)
     add_run_routes(app, engine)
+    add_alert_routes(app, engine, dispatcher)
     return app

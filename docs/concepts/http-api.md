@@ -78,14 +78,22 @@ reading or steering the scheduler. Use tokens on any machine you share.
 | `GET /api/jobs` | every job: owner, tags, criticality, schedules as text, next firing |
 | `GET /api/jobs/{name}` | the same plus its `definition`, its next 5 firings and its 20 latest runs |
 | `GET /api/runs?run_date=&job=&state=&limit=` | runs, newest first (`limit` 1-1000, default 100) |
-| `GET /api/runs/{id}` | one run with its `attempts` and `events` |
+| `GET /api/runs/{id}` | one run with its `attempts`, `events` and `alerts` (each with its `deliveries`) |
 | `GET /api/runs/{id}/log?stream=stdout&attempt=&tail=200` | the last lines of an attempt's log (`tail` up to 5000) |
 | `GET /api/forecast?from=&to=` | the predicted runs of a window (default the next 24 hours, at most 31 days) |
+| `GET /api/alerts?kind=&job=&since=&limit=` | alerts, newest first (`since` is a date, `limit` 1-1000, default 100), each with its `deliveries`: `notifier`, `status` (`pending`, `sent` or `dead`), `attempts`, `last_error`, `updated_at`; a bad `kind` is a 400 |
+| `GET /api/alerts/dead?limit=` | the `dead` deliveries (ones that gave up), each with its `alert` |
 | `POST /api/jobs/{name}/trigger` | a manual run; body `{"run_date": "YYYY-MM-DD"}` optional |
 | `POST /api/jobs/{name}/backfill` | body `{"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}` |
 | `POST /api/runs/{id}/{action}` | `rerun` (body `{"downstream": true}` optional), `hold`, `release`, `kill`, `force-start`, `skip`, `mark-success`, `mark-failed` |
+| `POST /api/alerts/{alert_id}/replay` | send an alert's dead deliveries again; body `{"notifier": "name"}` optional. 404 for an unknown alert, 409 `no dead delivery for <id>` when nothing is dead |
 | `POST /api/reload` | reload the config files; 400 with `problems` if they are broken (the old config stays) |
 | `GET /api/config/validate` | check the files on disk without loading them |
+
+The alert routes answer 503 `{"error": "alerts are not running"}` if the
+app was built without a dispatcher. Like job summaries, every alert
+message and delivery error has the config's `${NAME}` values put back as
+`${NAME}`, so a webhook address or password never shows.
 
 Run ids are one path segment: `/api/runs/extract-trades.2026-10-17.1/rerun`.
 

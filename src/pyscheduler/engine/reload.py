@@ -17,10 +17,12 @@ from datetime import date, datetime, time, timedelta
 
 from pyscheduler.calendars import BusinessCalendar
 from pyscheduler.config import Config, JobDef, RunDateRule
+from pyscheduler.config.model import JobKind
 from pyscheduler.engine.action_support import ActionError
 from pyscheduler.engine.actions import OperatorActions
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.model import Event, Run, RunState, Trigger
+from pyscheduler.engine.watcher import WatcherHandle
 from pyscheduler.schedule.firings import firings_between, resolve_local
 from pyscheduler.store import ConfigRecord
 
@@ -64,6 +66,9 @@ def first_firing(job: JobDef, calendar: BusinessCalendar, run_date: date) -> dat
 
 class ConfigReload(OperatorActions):
     """Give the engine ``trigger``, ``backfill`` and ``reload``."""
+
+    _dropped: dict[str, str]
+    """Watcher runs a reload stopped, with the reason their run is cancelled (set up by ``Engine``)."""
 
     async def trigger(self, job: str, *, run_date: date | None = None, actor: str) -> Run:
         """Create a manual run of ``job`` now; the run date defaults by the job's rule.
@@ -134,12 +139,30 @@ class ConfigReload(OperatorActions):
                 filled[made[0].run_id] = None
         return await self._commit(actor, "backfill", filled)
 
+    def _drop_watchers(self, new_config: Config) -> None:
+        """Stop each polling watcher whose job ``new_config`` removes, disables or makes a command.
+
+        Its attempt then ends (see ``_record_ending``) with its run
+        cancelled for ``removed by reload`` or ``disabled``.
+        """
+        for run_id, handle in list(self._handles.items()):
+            run = self.book.get(run_id)
+            if not isinstance(handle, WatcherHandle) or run is None:
+                continue
+            job = new_config.jobs.get(run.job)
+            if job is not None and job.enabled and job.kind is JobKind.FILE_WATCHER:
+                continue
+            self._dropped[run_id] = DISABLED if job is not None and not job.enabled else REMOVED
+            handle.terminate()
+
     async def reload(self, new_config: Config, *, actor: str) -> None:
         """Swap in ``new_config`` (already validated) and apply the reload rules.
 
         - Runs with a running attempt keep the definition they started
           with; when the attempt ends, a removed or disabled job does not
-          retry.
+          retry. A polling file watcher has no work to lose, so one whose
+          job is removed, disabled or no longer a ``file_watcher`` is
+          stopped at once and its run ends ``cancelled``.
         - Every other open run adopts the new definition (and version) and
           is re-evaluated at once. A queued run goes back to ``scheduled``
           to be placed again (dependencies and overlap of the new
@@ -153,7 +176,8 @@ class ConfigReload(OperatorActions):
 
         A ``ConfigRecord`` with the next version and one ``reload`` event
         (no run id) are committed with the changes. A config with the
-        same digest as the current one changes nothing.
+        same digest as the current one changes nothing. Once the commit is
+        durable the reload listeners are told (``watch_reloads``).
 
         Raises:
             ActionError: 503 if the engine is stopping or the commit failed.
@@ -182,12 +206,12 @@ class ConfigReload(OperatorActions):
                 continue
             adopted = replace(run, config_version=version, updated_at=now)
             if run.run_id in self._force and run.run_id in self.ready:
-                self._needs[run.run_id] = dict(job.pools)
-                self.ready.push(adopted, job.criticality, job.pools)
+                self._enqueue(adopted, job)
             elif run.state is RunState.QUEUED:
                 self._unqueue(run.run_id)
                 adopted = replace(adopted, state=RunState.SCHEDULED, reason="")
             self._stage(adopted)
+        self._drop_watchers(new_config)
         self._reevaluate(sorted(new_config.jobs))
         record = ConfigRecord(
             version, now, new_config.digest, json.dumps(dict(new_config.sources), sort_keys=True)
@@ -203,3 +227,4 @@ class ConfigReload(OperatorActions):
             await self._flush(configs=[record])
         except EngineFailedError as exc:
             raise ActionError(503, f"scheduler failed: {exc}") from exc
+        self._notify_reloaded()
