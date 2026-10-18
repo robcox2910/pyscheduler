@@ -31,3 +31,4 @@ something goes wrong.
 - [Operator Actions (The Train Controller's Desk)](concepts/operator-actions.md)
 - [Recovery and Catch-Up (Waking Up After a Nap and Reading the Babysitter's Notes)](concepts/recovery-and-catch-up.md)
 - [The HTTP API (The Front Desk With Wristbands)](concepts/http-api.md)
+- [The Service and the CLI (Opening the Shop and the Remote Control)](concepts/the-service-and-cli.md)
