@@ -373,8 +373,10 @@ class AttemptRunner(WatchRuns):
         final = self._changed(run, state, reason)
         events.append(self._event(run_id, "finished", state=state.value, reason=reason))
         files = {run_id: watch.files} if watch.files and state is RunState.SUCCEEDED else {}
-        await self._transition([final], attempts=[ended], events=events, run_files=files)
+        # Before the transition: it puts the run in the book at once, so a
+        # dependant woken by another run's commit may launch before ours lands.
         self._files.update(files)
+        await self._transition([final], attempts=[ended], events=events, run_files=files)
         return final
 
     def _cancel_kill_timer(self, run_id: str) -> None:
