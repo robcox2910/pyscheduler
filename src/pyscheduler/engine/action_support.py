@@ -134,6 +134,14 @@ class ActionSupport(RunCreation):
                     if dep.job == name and mapped is not None:
                         todo.append((down, mapped, False))
 
+    def memory_start(self) -> date:
+        """Return the oldest run date whose runs are all in memory (``memory_days``).
+
+        Runs dated before it may sit only in the store; readers such as
+        the API ask the store for those.
+        """
+        return self._memory_start()
+
     def _memory_start(self, now: datetime | None = None) -> date:
         """Return the oldest run date whose final runs stay in memory (``memory_days``)."""
         settings = self.config.settings
