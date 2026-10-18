@@ -2,7 +2,8 @@
 
 The monitor is a smoke alarm that also takes the register. Some alerts
 come the moment something happens: a run failed, is blocked, is retrying,
-or an attempt was lost or ended suspiciously quickly. Others come from
+an attempt was lost or ended suspiciously quickly, or a file watcher
+gave up waiting. Others come from
 noticing that something did *not* happen: an attempt still running past
 its ``max_runtime``, or a run that has not started by its
 ``must_start_by``. Those are timers, set when the run or attempt is first
@@ -33,7 +34,7 @@ from pyscheduler.alerts.model import (
     alert_id_for,
 )
 from pyscheduler.alerts.routing import destinations
-from pyscheduler.config.model import AlertKind, Criticality, JobAlerts, JobDef, Problem
+from pyscheduler.config.model import AlertKind, Criticality, JobAlerts, JobDef, JobKind, Problem
 from pyscheduler.config.redaction import redact_text
 from pyscheduler.engine.clock import Cancel
 from pyscheduler.engine.core import Engine
@@ -175,9 +176,11 @@ class AlertMonitor:
         if armed is not None:
             armed[2].cancel()
         run_id, number = attempt.run_id, attempt.attempt
+        job = self._job_of(run_id)
         if attempt.outcome is Outcome.LOST:
             self._raise_for(run_id, AlertKind.LOST, number, deadlines.lost(attempt))
-        job = self._job_of(run_id)
+        elif attempt.outcome is Outcome.TIMEOUT and job and job.kind is JobKind.FILE_WATCHER:
+            self._raise_for(run_id, AlertKind.WATCHER_TIMEOUT, number, deadlines.gave_up(attempt))
         if attempt.outcome is not Outcome.SUCCEEDED or job is None or job.min_runtime is None:
             return
         runtime = attempt.ended_at - attempt.started_at

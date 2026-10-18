@@ -10,6 +10,9 @@ The engine works the same way. It is a handful of tasks on one loop:
 - one **attempt task** per running attempt waits for its process;
 - the **store writer** commits changes in groups.
 
+File watchers (``watch_runs``) are attempts too, but they hold no
+global slot: their looks at the disk share ``watch_limit`` instead.
+
 State lives in memory (the run book) and is mirrored to the store
 write-ahead: a change is durable before it is shown or acted on.
 
@@ -27,7 +30,7 @@ import heapq
 from datetime import datetime, timedelta
 
 import pynet.loop
-from pynet.loop import Cancelled, Task
+from pynet.loop import Cancelled, Semaphore, Task
 
 from pyscheduler.config import Config
 from pyscheduler.engine.base import EngineFailedError, logger
@@ -89,6 +92,10 @@ class Engine(Recovery):
         self._firings_stale = False
         self._stopped = False
         self._pump_planned = False
+        self._watch_size = config.settings.watch_limit
+        self.watch_limit = Semaphore(self._watch_size)
+        self._files = {}
+        self.watch_reloads(self._resize_watch_limit)
 
     async def start(self) -> None:
         """Start the writer, recover, catch up, then start the firing task and prune.
@@ -141,6 +148,12 @@ class Engine(Recovery):
                     await pynet.loop.run_in_thread(self.store.close)
                 except Exception:  # noqa: BLE001 -- logged; stop must finish
                     logger.exception("closing the store failed")
+
+    async def prune(self, now: datetime) -> int:
+        """Prune as ``Retention.prune`` does, then forget the files of runs no longer in memory."""
+        deleted = await super().prune(now)
+        self._files = {k: v for k, v in self._files.items() if self.book.get(k) is not None}
+        return deleted
 
     def fail_stop(self, exc: BaseException) -> None:
         """Fail the engine stop because a part of it (say, alert delivery) could not commit.

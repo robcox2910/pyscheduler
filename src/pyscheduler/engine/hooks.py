@@ -1,4 +1,7 @@
-"""Attempt listeners: who wants to hear when an attempt starts or ends.
+"""Listeners: who wants to hear when a run changes, or an attempt starts or ends.
+
+Run subscribers hear each run once its change is durable (the API's live
+view and the service's run log listen there).
 
 Like the bell at a boxing match, which rings at the start of a round and
 again at its end, the engine calls every attempt listener twice per
@@ -13,18 +16,30 @@ durable), so anything timed from the old config can be set again.
 import logging
 from collections.abc import Callable, Iterable
 
-from pyscheduler.engine.model import Attempt
+from pyscheduler.engine.model import Attempt, Run
 
 logger = logging.getLogger("pyscheduler.engine")
 
 
 class AttemptHooks:
-    """Own the attempt and reload listeners of the engine (``EngineBase`` inherits this)."""
+    """Own the run, attempt and reload listeners of the engine (``EngineBase`` inherits this)."""
 
     def __init__(self) -> None:
         """Start with no listeners."""
+        self._subscribers: list[Callable[[Run], None]] = []
         self._attempt_listeners: list[Callable[[Attempt], None]] = []
         self._reload_listeners: list[Callable[[], None]] = []
+
+    def subscribe(self, callback: Callable[[Run], None]) -> Callable[[], None]:
+        """Call ``callback`` with each run once its change is durable; return an unsubscribe."""
+        self._subscribers.append(callback)
+
+        def unsubscribe() -> None:
+            """Stop calling ``callback`` (a second call does nothing)."""
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return unsubscribe
 
     def watch_attempts(self, callback: Callable[[Attempt], None]) -> Callable[[], None]:
         """Call ``callback`` with each attempt row once it is durable; return an unsubscribe.
@@ -57,6 +72,14 @@ class AttemptHooks:
                 self._reload_listeners.remove(callback)
 
         return unsubscribe
+
+    def _notify(self, run: Run) -> None:
+        """Tell every subscriber about ``run``; one that raises is logged and skipped."""
+        for callback in list(self._subscribers):
+            try:
+                callback(run)
+            except Exception:
+                logger.exception("subscriber failed for %s", run.run_id)
 
     def _notify_reloaded(self) -> None:
         """Tell every reload listener; one that raises is logged and skipped."""

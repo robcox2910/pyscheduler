@@ -34,6 +34,7 @@ from typing import cast
 import pynet.loop
 
 from pyscheduler.config import CatchUp, JobDef
+from pyscheduler.config.model import WatchSpec
 from pyscheduler.engine.adopted import AdoptedHandle, minder_alive, read_pid
 from pyscheduler.engine.attempts import AttemptRunner, Watch
 from pyscheduler.engine.base import EngineFailedError
@@ -82,12 +83,14 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
     async def recover(self) -> None:
         """Load the store's runs into memory and pick every open run up again.
 
-        Every store read happens first (an open run older than the memory
-        window brings back its date's final runs, so its dependencies can
-        be checked). Then all open runs are placed in one step (slots for
-        running attempts, the ready queue, retry timers, re-evaluation),
-        committed in one flush, and only then are queued runs started and
-        attempts finished, adopted or lost.
+             Every store read happens first (an open run older than the memory
+             window brings back its date's final runs, so its dependencies can
+             be checked). Then all open runs are placed in one step (slots for
+             running attempts, the ready queue, retry timers, re-evaluation),
+             committed in one flush, and only then are queued runs started and
+             attempts finished, adopted or lost.
+        A file watcher that was polling has no process to find: it simply
+        resumes, its give-up deadline still counted from its first start.
         """
         store = self.store
         newest = self._memory_start()
@@ -96,6 +99,8 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
         for run in [*finals, *open_runs]:
             self.book.put(run)
             self.book.publish(run)
+        found_ids = [run.run_id for run in finals if run.state is RunState.SUCCEEDED]
+        self._files = await pynet.loop.run_in_thread(store.run_files, found_ids)
         old_days: dict[str, set[date]] = {}
         for run in open_runs:
             if run.run_date < newest:  # its upstream runs may be older than memory too
@@ -113,8 +118,7 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
                 reason = GONE if job is None else DISABLED
                 self._stage(replace(self._changed(run, RunState.CANCELLED, reason), held_from=None))
             elif run.state is RunState.QUEUED:
-                self._needs[run.run_id] = dict(job.pools)
-                self.ready.push(run, job.criticality, job.pools)
+                self._enqueue(run, job)
             elif run.state is RunState.RETRY_WAIT:
                 row = rows[run.run_id].row
                 ended = (row.ended_at if row else None) or run.updated_at
@@ -137,13 +141,20 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
         run_id = run.run_id
         needs = dict(job.pools) if job is not None else {}
         self._needs[run_id] = needs
-        self.admission.adopt(needs)
+        spec = job.watch if job is not None else None
+        watcher = found.row if found.row is not None and not found.row.status_path else None
+        self.admission.adopt(needs, global_slot=watcher is None)
+        if watcher is not None:
+            self._slotless.add(run_id)
         self._held.add(run_id)
         if found.killer is not None:  # an operator kill was recorded: it still counts
             self._kill_requested.add(run_id)
             self._kill_actors[run_id] = found.killer
         row = found.row or self._lost_row(run)
-        if found.status is not None:
+        if job is not None and spec is not None and watcher is not None:
+            task = self._spawn(self._resume_watch(run, job, spec, watcher), f"watch-{run_id}")
+            self._attempt_tasks[run_id] = task
+        elif found.status is not None:
             self._spawn(self._finish(row, found.status, Watch()), f"recover-{run_id}")
         elif found.row is not None and found.pid is not None and found.alive:
             began = found.began or found.row.started_at
@@ -170,6 +181,28 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
             status_path=str(self._status_path(run.run_id, max(run.attempt, 1))),
             reason="",
         )
+
+    async def _resume_watch(self, run: Run, job: JobDef, spec: WatchSpec, row: Attempt) -> None:
+        """Poll again for a watcher attempt that was running when the scheduler stopped.
+
+        Its give-up deadline counts from the attempt's first start (ruling P2-R8).
+        """
+        try:
+            handle = self._watcher(run, job, spec, row.started_at, Path(row.stdout_path))
+        except (KeyError, ValueError) as exc:
+            failed = AttemptResult(None, None, None, self.clock.now(), f"bad template: {exc}")
+            await self._finish(row, failed, Watch())
+            return
+        self._handles[run.run_id] = handle
+        if run.run_id in self._kill_requested:
+            self._signal_kill(run.run_id, handle)
+        watch = Watch()
+        try:
+            result = await self._idle_while(handle)
+        finally:
+            self._handles.pop(run.run_id, None)
+        watch.note(handle)
+        await self._finish(row, result, watch)
 
     async def _adopt(self, run: Run, row: Attempt, pid: int, began: datetime) -> None:
         """Watch a minder that outlived the last scheduler until its attempt ends.
@@ -308,8 +341,8 @@ def _inspect(store: Store, run: Run) -> _Found:
     since = row.started_at if row is not None else run.updated_at
     kills = [e for e in store.events_for(run.run_id) if e.action == "kill" and e.at >= since]
     killer = kills[-1].actor if kills else None
-    if row is None:
-        return _Found(None, None, None, killer=killer)
+    if row is None or not row.status_path:  # no row yet, or a watcher (no process)
+        return _Found(row, None, None, killer=killer)
     path = Path(row.status_path)
     note = read_pid(path)
     pid = row.pid or (note.pid if note else None)

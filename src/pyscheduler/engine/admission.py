@@ -6,6 +6,10 @@ that fit get on. A **pool** is a smaller trampoline for one special
 thing (say, the database): a run that needs ``db`` waits for a ``db``
 slot, but runs that do not need it can jump on anyway.
 
+A file watcher is not a kid on the trampoline at all: it is someone
+standing by the letterbox, so it takes no global slot (``global_slot``
+false) and never keeps a jumper waiting.
+
 ``Admission`` counts the slots. ``ReadyQueue`` holds the waiting runs
 in priority order and hands out the ones that fit.
 """
@@ -14,8 +18,13 @@ import heapq
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from pyscheduler.config.model import Criticality
+from pyscheduler.config.model import Criticality, JobDef, JobKind
 from pyscheduler.engine.model import Run
+
+
+def takes_global_slot(job: JobDef | None) -> bool:
+    """Return whether a run of ``job`` holds a global slot (every job but a file watcher)."""
+    return job is None or job.kind is not JobKind.FILE_WATCHER
 
 
 def _check_needs(needs: Mapping[str, int]) -> None:
@@ -50,10 +59,10 @@ class Admission:
         """Return how much of ``pool`` is in use."""
         return self._used.get(pool, 0)
 
-    def fits(self, needs: Mapping[str, int]) -> bool:
-        """Return whether a run needing ``needs`` could start now."""
+    def fits(self, needs: Mapping[str, int], *, global_slot: bool = True) -> bool:
+        """Return whether a run needing ``needs`` (and a global slot, if so) could start now."""
         _check_needs(needs)
-        if self._running >= self._max_running:
+        if global_slot and self._running >= self._max_running:
             return False
         for pool, amount in needs.items():
             limit = self._pools.get(pool)
@@ -61,21 +70,21 @@ class Admission:
                 return False
         return True
 
-    def acquire(self, needs: Mapping[str, int]) -> None:
-        """Take a slot and the pool amounts in ``needs``.
+    def acquire(self, needs: Mapping[str, int], *, global_slot: bool = True) -> None:
+        """Take a slot (unless not ``global_slot``) and the pool amounts in ``needs``.
 
         Raises:
             ValueError: If the run does not fit.
 
         """
-        if not self.fits(needs):
+        if not self.fits(needs, global_slot=global_slot):
             msg = f"run needing {dict(needs)} does not fit"
             raise ValueError(msg)
-        self._running += 1
+        self._running += int(global_slot)
         for pool, amount in needs.items():
             self._used[pool] = self.in_use(pool) + amount
 
-    def adopt(self, needs: Mapping[str, int]) -> None:
+    def adopt(self, needs: Mapping[str, int], *, global_slot: bool = True) -> None:
         """Take a slot for a run that is already running, even over the limits.
 
         Recovery uses it for attempts that kept running while the
@@ -83,22 +92,23 @@ class Admission:
         now, just as runs do after a reload lowers a limit.
         """
         _check_needs(needs)
-        self._running += 1
+        self._running += int(global_slot)
         for pool, amount in needs.items():
             self._used[pool] = self.in_use(pool) + amount
 
-    def release(self, needs: Mapping[str, int]) -> None:
-        """Give back a slot and the pool amounts in ``needs``.
+    def release(self, needs: Mapping[str, int], *, global_slot: bool = True) -> None:
+        """Give back a slot (if ``global_slot``) and the pool amounts in ``needs``.
 
         Raises:
             ValueError: If more is released than was taken.
 
         """
         _check_needs(needs)
-        if self._running < 1 or any(self.in_use(p) < a for p, a in needs.items()):
+        short = global_slot and self._running < 1
+        if short or any(self.in_use(p) < a for p, a in needs.items()):
             msg = f"over-release of {dict(needs)}"
             raise ValueError(msg)
-        self._running -= 1
+        self._running -= int(global_slot)
         for pool, amount in needs.items():
             self._used[pool] = self.in_use(pool) - amount
 
@@ -116,6 +126,7 @@ class _Entry:
     key: tuple[int, float, str]
     needs: Mapping[str, int]
     seq: int
+    global_slot: bool = True
 
 
 def _entry_key(entry: _Entry) -> tuple[int, float, str]:
@@ -124,11 +135,15 @@ def _entry_key(entry: _Entry) -> tuple[int, float, str]:
 
 
 class ReadyQueue:
-    """Hold queued runs and hand out the ones that fit, best first."""
+    """Hold queued runs and hand out the ones that fit, best first.
+
+    Runs that need a global slot and runs that do not wait in two heaps,
+    so a full trampoline never stops a watcher from starting.
+    """
 
     def __init__(self) -> None:
         """Start empty."""
-        self._heap: list[tuple[tuple[int, float, str], int]] = []
+        self._heaps: dict[bool, list[tuple[tuple[int, float, str], int]]] = {True: [], False: []}
         self._live: dict[str, _Entry] = {}
         self._seq = 0
 
@@ -140,12 +155,19 @@ class ReadyQueue:
         """Return whether ``run_id`` is queued."""
         return run_id in self._live
 
-    def push(self, run: Run, criticality: Criticality, needs: Mapping[str, int]) -> None:
+    def push(
+        self,
+        run: Run,
+        criticality: Criticality,
+        needs: Mapping[str, int],
+        *,
+        global_slot: bool = True,
+    ) -> None:
         """Queue ``run``, replacing any entry with the same run id."""
         self._seq += 1
         key = (-int(criticality), run.scheduled_at.timestamp(), run.run_id)
-        self._live[run.run_id] = _Entry(run, key, dict(needs), self._seq)
-        heapq.heappush(self._heap, (key, self._seq))
+        self._live[run.run_id] = _Entry(run, key, dict(needs), self._seq, global_slot)
+        heapq.heappush(self._heaps[global_slot], (key, self._seq))
 
     def remove(self, run_id: str) -> bool:
         """Drop ``run_id`` from the queue; return whether it was there."""
@@ -175,23 +197,24 @@ class ReadyQueue:
                 break
             tried.add(entry.run.run_id)
             self._try(entry, admission, started)
-        skipped: list[tuple[tuple[int, float, str], int]] = []
-        while self._heap and admission.fits({}) and len(started) < room:
-            key, seq = heapq.heappop(self._heap)
-            entry = self._live.get(key[2])
-            if entry is None or entry.seq != seq:
-                continue
-            if key[2] in tried or not self._try(entry, admission, started):
-                skipped.append((key, seq))
-        for item in skipped:
-            heapq.heappush(self._heap, item)
+        for global_slot, heap in self._heaps.items():
+            skipped: list[tuple[tuple[int, float, str], int]] = []
+            while heap and admission.fits({}, global_slot=global_slot) and len(started) < room:
+                key, seq = heapq.heappop(heap)
+                entry = self._live.get(key[2])
+                if entry is None or entry.seq != seq:
+                    continue
+                if key[2] in tried or not self._try(entry, admission, started):
+                    skipped.append((key, seq))
+            for item in skipped:
+                heapq.heappush(heap, item)
         return started
 
     def _try(self, entry: _Entry, admission: Admission, started: list[Run]) -> bool:
         """Start ``entry`` if it fits; return whether it started."""
-        if not admission.fits(entry.needs):
+        if not admission.fits(entry.needs, global_slot=entry.global_slot):
             return False
-        admission.acquire(entry.needs)
+        admission.acquire(entry.needs, global_slot=entry.global_slot)
         del self._live[entry.run.run_id]
         started.append(entry.run)
         return True

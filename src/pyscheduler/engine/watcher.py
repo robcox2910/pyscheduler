@@ -16,6 +16,7 @@ import logging
 import os
 import signal
 import stat
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -68,6 +69,9 @@ class WatcherHandle:
         clock: The engine's clock.
         limit: Caps how many watchers stat the disk at once.
         log_path: The file the watcher appends its progress lines to.
+        busy: Called with ``+1`` when a look at the disk begins and ``-1``
+            when it is over (the watcher sleeps or ends), so the engine
+            can tell when it is quiet.
 
     Attributes:
         files: The stable matches, sorted; set when the watch succeeds.
@@ -84,6 +88,7 @@ class WatcherHandle:
         clock: Clock,
         limit: Semaphore,
         log_path: Path,
+        busy: Callable[[int], None] | None = None,
     ) -> None:
         """Remember what to watch; polling starts when ``wait`` is called."""
         self._pattern = pattern
@@ -92,6 +97,8 @@ class WatcherHandle:
         self._clock = clock
         self._limit = limit
         self._log_path = log_path
+        self._busy = busy
+        self._looking = False
         self._task: Task[AttemptResult] | None = None
         self._stopped = False
         self.files: tuple[str, ...] = ()
@@ -101,6 +108,23 @@ class WatcherHandle:
     def pid(self) -> int | None:
         """Return ``None``: a watcher has no process."""
         return None
+
+    @property
+    def spec(self) -> WatchSpec:
+        """Return what this watcher waits for."""
+        return self._spec
+
+    @property
+    def log_path(self) -> Path:
+        """Return the file the watcher appends its progress lines to."""
+        return self._log_path
+
+    def _look(self, *, looking: bool) -> None:
+        """Tell the ``busy`` callback when a look at the disk begins or ends."""
+        if looking != self._looking:
+            self._looking = looking
+            if self._busy is not None:
+                self._busy(1 if looking else -1)
 
     def _result(self, *, exit_code: int | None, sig: int | None) -> AttemptResult:
         """Build the result for how the watch ended, stamped with the current time."""
@@ -139,6 +163,14 @@ class WatcherHandle:
 
     async def _poll(self) -> AttemptResult:
         """Look every ``poll`` until success or the deadline; return how it ended."""
+        self._look(looking=True)
+        try:
+            return await self._polls()
+        finally:
+            self._look(looking=False)
+
+    async def _polls(self) -> AttemptResult:
+        """Run the polls for ``_poll`` (which tells ``busy`` when they start and end)."""
         deadline = self._started_at + self._spec.give_up_after
         first_seen: dict[str, tuple[Signature, datetime]] = {}
         last: dict[str, Signature] = {}
@@ -166,6 +198,8 @@ class WatcherHandle:
                 return self._result(exit_code=0, sig=None)
             if now >= deadline:
                 break
+            self._look(looking=False)
             await self._clock.sleep_until(min(now + self._spec.poll, deadline))
+            self._look(looking=True)
         self.gave_up = True
         return self._result(exit_code=None, sig=None)

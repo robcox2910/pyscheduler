@@ -71,6 +71,12 @@ def lost(attempt: Attempt) -> Wording:
     return message, detail
 
 
+def gave_up(attempt: Attempt) -> Wording:
+    """Word the alert for a file watcher attempt that gave up waiting for its file."""
+    detail: dict[str, JsonValue] = {"attempt": attempt.attempt, "reason": attempt.reason}
+    return f"{attempt.run_id} attempt {attempt.attempt} {attempt.reason}", detail
+
+
 def too_short(attempt: Attempt, runtime: timedelta, minimum: timedelta) -> Wording:
     """Word the alert for an attempt that succeeded suspiciously quickly."""
     detail: dict[str, JsonValue] = {

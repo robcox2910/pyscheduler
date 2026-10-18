@@ -76,3 +76,4 @@ with something you can run.
 22. [Notifiers (The Ways to Reach Someone)](concepts/notifiers.md): Log lines, commands and messages that carry an alert to a person.
 23. [Routing Alerts (The Post Office With a Pigeonhole per Notifier)](concepts/routing-alerts.md): Topics, `*` and `#`, retries, dead letters and replay.
 24. [Alerts (The Smoke Alarm and the Teacher Who Notices You Never Arrived)](concepts/alerts.md): Every alert kind, `must_start_by`, `max_runtime`, `min_runtime`, dedupe and a job's `alerts:`.
+25. [File Watchers (Waiting at the Letterbox Until the Parcel Stops Rustling)](concepts/file-watchers.md): Waiting for a file to arrive and sit still, `{files}`, give-up, and why no slot is used.

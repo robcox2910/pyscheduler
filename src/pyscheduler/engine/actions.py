@@ -265,8 +265,7 @@ class OperatorActions(ActionSupport):
                 self._changed(run, RunState.QUEUED, f"force-started by {actor}"), held_from=None
             )
             self._stage(queued)
-            self._needs[run_id] = dict(job.pools)
-            self.ready.push(queued, job.criticality, job.pools)
+            self._enqueue(queued, job)
             self._force.add(run_id)
             return (await self._commit(actor, "force_start", {run_id: run.state}))[0]
 

@@ -183,8 +183,7 @@ class ConfigReload(OperatorActions):
                 continue
             adopted = replace(run, config_version=version, updated_at=now)
             if run.run_id in self._force and run.run_id in self.ready:
-                self._needs[run.run_id] = dict(job.pools)
-                self.ready.push(adopted, job.criticality, job.pools)
+                self._enqueue(adopted, job)
             elif run.state is RunState.QUEUED:
                 self._unqueue(run.run_id)
                 adopted = replace(adopted, state=RunState.SCHEDULED, reason="")
