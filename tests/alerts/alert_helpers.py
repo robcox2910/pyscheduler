@@ -196,3 +196,29 @@ async def raise_alert(
     await harness.engine.writer.save(Batch(alerts=[alert], deliveries=deliveries))
     dispatcher.enqueue(alert, deliveries)
     return deliveries
+
+
+DISPATCH_CONFIG = """\
+notifiers:
+  pager:
+    type: log
+    path: logs/pager.log
+    retries: {count: 3, delay: 1s}
+  desk:
+    type: log
+    path: logs/desk.log
+    retries: {count: 1, delay: 1s}
+routes:
+  - {match: "alert.failed.#", notify: [desk, pager]}
+jobs:
+  load: {command: "true", schedule: manual}
+"""
+"""Two log notifiers: ``pager`` (3 retries) and ``desk`` (1 retry), both routed."""
+
+
+async def stored(dispatcher: Dispatcher, alert_id: str) -> dict[str, DeliveryRecord]:
+    """Settle the dispatcher, then return the alert's stored deliveries by notifier."""
+    await dispatcher.settle()
+    store = dispatcher.engine.store
+    found = await pynet.loop.run_in_thread(store.deliveries_for, [alert_id])
+    return {d.notifier: d for d in found.get(alert_id, [])}

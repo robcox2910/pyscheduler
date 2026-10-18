@@ -142,6 +142,14 @@ class Engine(Recovery):
                 except Exception:  # noqa: BLE001 -- logged; stop must finish
                     logger.exception("closing the store failed")
 
+    def fail_stop(self, exc: BaseException) -> None:
+        """Fail the engine stop because a part of it (say, alert delivery) could not commit.
+
+        Store failures are fail-stop wherever they happen: the error is
+        recorded, ``wait_failed`` returns it, and no new work starts.
+        """
+        self._fail(exc, ())
+
     async def _wind_down(self, *, kill_running: bool) -> None:
         """Cancel the firing task and timers, then end or abandon the attempt tasks."""
         if self._firing_task is not None:
