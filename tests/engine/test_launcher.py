@@ -163,7 +163,7 @@ class TestMinderLauncher:
         assert spec.stdout_path.read_text() == "err\n"
 
     def test_removes_stale_status(self, tmp_path: Path) -> None:
-        """Remove an old note and pid file before launching."""
+        """Remove an old note and pid file before launching, then write a fresh pid file."""
         spec = make_spec(tmp_path, ["true"])
         pid_path = spec.status_path.with_name(f"{spec.status_path.name}.pid")
         write_status(spec.status_path, {"exit_code": 9})
@@ -171,12 +171,15 @@ class TestMinderLauncher:
         launcher = MinderLauncher(python=fake_python(tmp_path, "exit 0"))
 
         async def main() -> AttemptResult:
-            """Launch a stand-in minder that writes nothing."""
-            return await (await launcher.launch(spec)).wait()
+            """Launch a stand-in minder that writes nothing; check the pid file at once."""
+            handle = await launcher.launch(spec)
+            note = json.loads(pid_path.read_text())
+            assert note["pid"] == handle.pid
+            assert datetime.fromisoformat(note["started_at"]).tzinfo is not None
+            return await handle.wait()
 
         result = pynet.loop.run(main())
         assert not spec.status_path.exists()
-        assert not pid_path.exists()
         assert result.exit_code == 0
         assert result.start_error is not None
         assert not result.succeeded

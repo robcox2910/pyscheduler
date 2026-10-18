@@ -38,7 +38,7 @@ attempt:
 | What it finds                                   | What it does                           |
 |-------------------------------------------------|----------------------------------------|
 | a status note                                   | finishes the attempt from the note     |
-| no note, but the minder's pid is still alive    | **adopts** it and checks every 2 s     |
+| no note, but the minder is still alive          | **adopts** it and checks every 2 s     |
 | no note and no live minder                      | marks the attempt `lost`               |
 | no attempt row at all (crashed mid-commit)      | marks it `lost` (nothing was launched) |
 
@@ -46,7 +46,10 @@ An adopted attempt is treated like any other: it keeps its slot (even
 if the limits are lower now), its `timeout` still counts from when it
 really started, and an operator `kill` signals its whole process group.
 A `lost` attempt follows the normal [retry rules](retries-and-backoff.md),
-so a job with retries is simply tried again.
+so a job with retries is simply tried again. If an operator had asked to
+`kill` the run before the restart (the logbook says so), that still
+counts: the attempt ends `killed` and is not retried, and an adopted one
+is signalled again.
 
 The other open runs are picked up too:
 
@@ -57,11 +60,34 @@ The other open runs are picked up too:
 - `scheduled`, `waiting` and `blocked` runs are checked again;
 - open runs of a job that is no longer in the config are cancelled.
 
-!!! note "A small pid risk"
-    "Is the minder alive?" is a plain pid check (`os.kill(pid, 0)`). If
-    the minder died and the computer handed its pid to a brand-new
-    process, the scheduler would think the minder was still there until
-    that process ends. This is rare, and it never starts a job twice.
+### Is It Still the Same Babysitter?
+
+When a process ends, the computer may hand its pid (process number) to
+a brand-new process. So "is the minder alive?" asks three things:
+
+1. Can we signal that pid at all (`os.kill(pid, 0)`)? A minder always
+   runs as the scheduler's own user, so a pid owned by someone else is
+   not it.
+2. Did that process start when the minder did? The `.pid` file next to
+   the status note records the minder's `started_at`; `ps -o lstart=`
+   tells when the process with that pid started, and the two must be
+   within 10 seconds.
+3. If the pid is the scheduler's own child (a minder started earlier by
+   this same process), `waitpid` answers directly.
+
+The scheduler writes the `.pid` file itself the moment the minder
+process exists (and the minder writes it again when it starts), and it
+never signals a pid that fails these checks.
+
+!!! warning "What is still left to chance"
+    - If `ps` cannot be run, the start-time check is skipped (with a
+      warning) and a reused pid of our own user could be mistaken for
+      the minder until it ends; a kill would then signal it.
+    - Two processes started within the same 10 seconds look alike.
+    - If the scheduler dies in the tiny gap between starting the minder
+      and writing its `.pid` file (and before the minder writes its own),
+      nothing records the pid: the attempt counts as `lost` and, with
+      retries left, runs again while the first copy may still be running.
 
 ## Step 3: The Missed Chores
 
@@ -78,7 +104,9 @@ Each job's `catch_up` setting decides what happens to them:
 Caught-up runs have `trigger: catch_up`. A firing whose run already
 exists is never created again: runs are unique by job and due time.
 On the very first start there is no `last_tick`, so nothing is caught
-up. The same rule is used if the computer's clock jumps forward while
+up. A job that was added while the scheduler was down (it has no runs
+at all, and the last config the store recorded did not have it) is not
+caught up either: it starts with its next firing. The same rule is used if the computer's clock jumps forward while
 the scheduler runs (say, a laptop waking from sleep).
 
 ```yaml
@@ -91,11 +119,14 @@ jobs:
 
 ## Step 4: Throw Away Old Notes
 
-Once an hour the scheduler **prunes**: final runs whose run date is
-older than `retention` (default `90d`) are deleted from the store,
-with their attempts and logbook lines, 500 at a time. Open runs are
-never pruned, however old. Final runs older than `memory_days` are
-also forgotten in memory (they can still be read back from the store).
+At start-up and then once an hour the scheduler **prunes**: final runs
+whose run date is older than `retention` (default `90d`, counted in the
+scheduler's time zone) are deleted from the store, with their attempts
+and logbook lines, 500 at a time. Final runs older than `memory_days`
+are also forgotten in memory (they can still be read back from the
+store). Two kinds of run are always kept: open runs, however old, and
+the final runs an open run's dependencies point at, so a run still
+waiting for one upstream never loses sight of the others.
 Log files are left alone: cleaning those is the operator's job.
 
 ## Try It

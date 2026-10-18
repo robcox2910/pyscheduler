@@ -34,9 +34,9 @@ FOREVER = 3600.0
 
 
 def write_config(folder: Path) -> Path:
-    """Write a config with three ``sleep 1`` jobs into ``folder``; return its path."""
+    """Write a config with three ``sleep 3`` jobs into ``folder``; return its path."""
     jobs = "".join(
-        f"  {name}:\n    command: 'sleep 1; exit 0'\n    schedule: manual\n" for name in JOBS
+        f"  {name}:\n    command: 'sleep 3; exit 0'\n    schedule: manual\n" for name in JOBS
     )
     text = textwrap.dedent(f"""\
         scheduler:

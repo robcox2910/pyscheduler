@@ -22,36 +22,36 @@ A run is never started twice: an attempt is only ever finished from its
 note, adopted, or lost, and runs are unique by ``(job, scheduled_at)``.
 """
 
+import json
 import logging
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
+from typing import cast
 
 import pynet.loop
 
 from pyscheduler.config import CatchUp, JobDef
-from pyscheduler.engine.adopted import AdoptedHandle, pid_alive, read_pid
+from pyscheduler.engine.adopted import AdoptedHandle, minder_alive, read_pid
 from pyscheduler.engine.attempts import AttemptRunner, Watch
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.launcher import AttemptResult, read_status
 from pyscheduler.engine.model import Attempt, Run, RunState, Trigger
 from pyscheduler.engine.reload import DISABLED, ConfigReload
+from pyscheduler.engine.retention import Retention, prune
 from pyscheduler.schedule.firings import Firing, firings_between
-from pyscheduler.store import Batch, Store
+from pyscheduler.store import ConfigRecord, Store
+from pyscheduler.yamlish import Map, YamlError, parse
+
+__all__ = ["ADOPT_POLL", "LAST_TICK", "MAX_CATCH_UP", "Recovery", "catch_up", "prune", "recover"]
 
 ADOPT_POLL = 2.0
 """How often (in seconds) an adopted attempt's status note and pid are looked at."""
 
 MAX_CATCH_UP = 1000
 """The most missed firings one job catches up with ``catch_up: all`` (the latest are kept)."""
-
-PRUNE_BATCH = 500
-"""How many old runs one pruning commit deletes."""
-
-RETENTION_EVERY = timedelta(hours=1)
-"""How often old history is pruned."""
 
 LAST_TICK = "last_tick"
 """The engine key holding the instant of the latest firing handled."""
@@ -69,9 +69,11 @@ class _Found:
     row: Attempt | None
     status: AttemptResult | None
     pid: int | None
+    alive: bool = False
+    killer: str | None = None
 
 
-class Recovery(ConfigReload, AttemptRunner):
+class Recovery(ConfigReload, AttemptRunner, Retention):
     """Give the engine recovery, catch-up and retention (see the module docstring)."""
 
     # -- recovery ----------------------------------------------------------
@@ -136,10 +138,13 @@ class Recovery(ConfigReload, AttemptRunner):
         self._needs[run_id] = needs
         self.admission.adopt(needs)
         self._held.add(run_id)
+        if found.killer is not None:  # an operator kill was recorded: it still counts
+            self._kill_requested.add(run_id)
+            self._kill_actors[run_id] = found.killer
         row = found.row or self._lost_row(run)
         if found.status is not None:
             self._spawn(self._finish(row, found.status, Watch()), f"recover-{run_id}")
-        elif found.row is not None and found.pid is not None and pid_alive(found.pid):
+        elif found.row is not None and found.pid is not None and found.alive:
             task = self._spawn(self._adopt(run, found.row, found.pid), f"adopt-{run_id}")
             self._attempt_tasks[run_id] = task
         else:
@@ -168,9 +173,15 @@ class Recovery(ConfigReload, AttemptRunner):
 
         Its timeout counts from the attempt's real start, and an operator
         kill signals its process group, just as for an attempt started now.
+        A kill recorded before the restart is signalled again at once.
         """
-        handle = AdoptedHandle(self.clock, pid, Path(row.status_path), poll=ADOPT_POLL)
+        path = Path(row.status_path)
+        note = read_pid(path)
+        began = note.started_at if note and note.pid == pid and note.started_at else None
+        handle = AdoptedHandle(self.clock, pid, began or row.started_at, path, poll=ADOPT_POLL)
         self._handles[run.run_id] = handle
+        if run.run_id in self._kill_requested:
+            self._signal_kill(run.run_id, handle)
         row = replace(row, pid=pid)  # the pid may only have reached the minder's .pid file
         adopted = self._event(run.run_id, "attempt_adopted", attempt=row.attempt, pid=pid)
         try:
@@ -193,22 +204,44 @@ class Recovery(ConfigReload, AttemptRunner):
         """Create the runs of the firings missed in ``(last_tick, now]``, per ``catch_up``.
 
         With no ``last_tick`` (the very first start) nothing is caught up.
+        A job added while the scheduler was down (not in the latest stored
+        config record, and with no runs at all) is not caught up either.
         Either way ``last_tick`` becomes ``now``.
         """
         stored = await pynet.loop.run_in_thread(self.store.get_engine, LAST_TICK)
         if stored is not None:
             after = datetime.fromisoformat(stored)
-            plan = [
-                (job.name, firing)
-                for job in sorted(self.config.jobs.values(), key=lambda j: j.name)
-                if job.enabled and job.schedules
-                for firing in self._missed(job, after, now)
-            ]
-            await self._prepare([(name, firing.run_date) for name, firing in plan])
-            for name, firing in plan:
-                if name in self.config.jobs:
-                    self._create_run(name, firing.run_date, firing.scheduled_at, Trigger.CATCH_UP)
+            jobs = await self._catch_up_jobs()
+            await self._create_missed(
+                [(job.name, firing) for job in jobs for firing in self._missed(job, after, now)]
+            )
         await self._flush(engine={LAST_TICK: now.isoformat()})
+
+    async def _catch_up_jobs(self) -> list[JobDef]:
+        """Return the enabled, scheduled jobs to catch up, leaving out brand-new ones."""
+        jobs = sorted(
+            (job for job in self.config.jobs.values() if job.enabled and job.schedules),
+            key=lambda job: job.name,
+        )
+        record = await pynet.loop.run_in_thread(self.store.latest_config)
+        known = recorded_jobs(record)
+        if known is None:
+            return jobs
+        store = self.store
+        unknown = [job.name for job in jobs if job.name not in known]
+        new = await pynet.loop.run_in_thread(
+            lambda: {name for name in unknown if not store.query_runs(job=name, limit=1)}
+        )
+        for name in sorted(new):
+            logger.info("job %s is new since the last config: its missed firings are skipped", name)
+        return [job for job in jobs if job.name not in new]
+
+    async def _create_missed(self, plan: list[tuple[str, Firing]]) -> None:
+        """Create ``catch_up`` runs for ``plan``, after loading the old dates it touches."""
+        await self._prepare([(name, firing.run_date) for name, firing in plan])
+        for name, firing in plan:
+            if name in self.config.jobs:  # a reload may have come meanwhile
+                self._create_run(name, firing.run_date, firing.scheduled_at, Trigger.CATCH_UP)
 
     async def _prepare(self, slots: Iterable[tuple[str, date]]) -> None:
         """Load the old dates catch-up runs land on, so uniqueness and numbering hold."""
@@ -238,80 +271,50 @@ class Recovery(ConfigReload, AttemptRunner):
             )
         return list(kept)
 
-    # -- retention ---------------------------------------------------------
 
-    async def prune(self, now: datetime) -> int:
-        """Delete final runs dated before ``now - retention``; forget old ones in memory.
-
-        Runs go in batches of ``PRUNE_BATCH``, each with its attempts and
-        events, in one commit. A run whose lock is held (an action is on
-        it) or that memory has reopened is left for the next round. Open
-        runs are never pruned, however old. Return how many were deleted.
-        """
-        cutoff = (now - self.config.settings.retention).date()
-        deleted = 0
-        while not self._stopping:
-            ids = await pynet.loop.run_in_thread(
-                self.store.final_run_ids_before, cutoff, PRUNE_BATCH
-            )
-            locked = [run_id for run_id in ids if self._prunable(run_id)]
-            try:
-                if locked:
-                    await self._delete(locked)
-            finally:
-                for run_id in locked:
-                    self._run_locks.give_back(run_id)
-            deleted += len(locked)
-            if len(ids) < PRUNE_BATCH or not locked:
-                break
-        self.book.evict_final_before(self._memory_start(now))
-        return deleted
-
-    def _prunable(self, run_id: str) -> bool:
-        """Lock ``run_id`` if it may be deleted now (final in memory too, and not busy)."""
-        run = self.book.get(run_id)
-        if run is not None and not run.is_final:
-            return False
-        return self._run_locks.try_take(run_id)
-
-    async def _delete(self, run_ids: list[str]) -> None:
-        """Delete ``run_ids`` durably, then forget them (a failed commit fails the engine)."""
-        try:
-            await self.writer.save(Batch(deleted_run_ids=run_ids))
-        except Exception as exc:
-            self._fail(exc, ())
-            raise EngineFailedError(str(exc)) from exc
-        for run_id in run_ids:
-            self.book.drop(run_id)
-
-    def _arm_retention(self) -> None:
-        """Plan the next pruning round ``RETENTION_EVERY`` from now (unless stopping)."""
-        if self._stopping:
-            return
-        when = self.clock.now() + RETENTION_EVERY
-        self._retention_timer = self.clock.call_at(when, self._guard(self._retention_due))
-
-    def _retention_due(self) -> None:
-        """Start a pruning round in its own task."""
-        self._retention_timer = None
-        self._spawn(self._retention_round(), "engine-retention")
-
-    async def _retention_round(self) -> None:
-        """Prune, then plan the next round."""
-        try:
-            await self.prune(self.clock.now())
-        finally:
-            self._arm_retention()
+def recorded_jobs(record: ConfigRecord | None) -> frozenset[str] | None:
+    """Return the job names in a stored config record, or ``None`` if they cannot be told."""
+    if record is None:
+        return None
+    names: set[str] = set()
+    try:
+        sources: object = json.loads(record.sources_json)
+        if not isinstance(sources, dict):
+            return None
+        for text in cast("dict[str, object]", sources).values():
+            root = parse(text) if isinstance(text, str) else None
+            jobs = root.items.get("jobs") if isinstance(root, Map) else None
+            if isinstance(jobs, Map):
+                names.update(jobs.items)
+    except ValueError, YamlError:
+        return None
+    return frozenset(names) or None
 
 
 def _inspect(store: Store, run: Run) -> _Found:
-    """Read a running or retry-waiting run's latest attempt, its note and its pid (blocking)."""
+    """Read a running or retry-waiting run's latest attempt, note, pid and kill (blocking).
+
+    The pid is the attempt row's, or else the ``.pid`` file's. It counts
+    as alive only if it is still the minder (``minder_alive``: same user,
+    same start time as the ``.pid`` file says, or as the attempt row says
+    when there is no file). A ``kill`` event logged after the attempt
+    started names the operator who asked for it.
+    """
     attempts = store.attempts_for(run.run_id)
     row = next((a for a in attempts if a.attempt == run.attempt), None)
-    if row is None or run.state is not RunState.RUNNING:
+    if run.state is not RunState.RUNNING:
         return _Found(row, None, None)
+    since = row.started_at if row is not None else run.updated_at
+    kills = [e for e in store.events_for(run.run_id) if e.action == "kill" and e.at >= since]
+    killer = kills[-1].actor if kills else None
+    if row is None:
+        return _Found(None, None, None, killer=killer)
     path = Path(row.status_path)
-    return _Found(row, read_status(path), row.pid or read_pid(path))
+    note = read_pid(path)
+    pid = row.pid or (note.pid if note else None)
+    began = note.started_at if note and note.pid == pid and note.started_at else row.started_at
+    alive = pid is not None and minder_alive(pid, began)
+    return _Found(row, read_status(path), pid, alive, killer)
 
 
 async def recover(engine: Recovery) -> None:
@@ -322,8 +325,3 @@ async def recover(engine: Recovery) -> None:
 async def catch_up(engine: Recovery, now: datetime) -> None:
     """Create the runs of missed firings per policy (see ``Recovery.catch_up``)."""
     await engine.catch_up(now)
-
-
-async def prune(engine: Recovery, now: datetime) -> int:
-    """Delete old final runs and forget old ones in memory (see ``Recovery.prune``)."""
-    return await engine.prune(now)

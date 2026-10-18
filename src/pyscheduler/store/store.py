@@ -15,8 +15,7 @@ Every method is synchronous and holds PyDB's re-entrant lock, so the
 store can be used from worker threads while another thread commits.
 """
 
-import contextlib
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Self, cast
@@ -27,15 +26,7 @@ from pydb.record import Record, Value
 from pydb.table import Table
 from pydb.transaction import Transaction
 
-from pyscheduler.engine.model import (
-    FINAL_STATES,
-    Attempt,
-    Event,
-    Outcome,
-    Run,
-    RunState,
-    parse_run_id,
-)
+from pyscheduler.engine.model import FINAL_STATES, Attempt, Event, Outcome, Run, RunState
 from pyscheduler.store.schema import (
     ATTEMPTS,
     CONFIGS,
@@ -244,14 +235,29 @@ class Store:
             runs = (run_from_row(r.data) for r in self._date_range(run_date, date.max))
             return [run for run in runs if run.is_final]
 
-    def final_run_ids_before(self, run_date: date, limit: int) -> list[str]:
-        """Return up to ``limit`` ids of final runs dated before ``run_date``, oldest first."""
+    def final_run_ids_before(
+        self,
+        run_date: date,
+        limit: int,
+        *,
+        keep: Collection[tuple[str, date]] = (),
+        skip: Collection[str] = (),
+    ) -> list[str]:
+        """Return up to ``limit`` ids of final runs dated before ``run_date``, oldest first.
+
+        Runs whose ``(job, run_date)`` is in ``keep``, and run ids in
+        ``skip``, are passed over (they do not use up the limit).
+        """
         if run_date == date.min:
             return []
         with self._db.lock:
             records = self._date_range(date.min, run_date - timedelta(days=1))
             runs = [run_from_row(r.data) for r in records]
-        final = sorted((r for r in runs if r.is_final), key=lambda r: (r.run_date, r.run_id))
+        wanted = [r for r in runs if r.is_final and r.run_id not in skip]
+        final = sorted(
+            (r for r in wanted if (r.job, r.run_date) not in keep),
+            key=lambda r: (r.run_date, r.run_id),
+        )
         return [run.run_id for run in final[:limit]]
 
     def max_seq(self, job: str, run_date: date) -> int:
@@ -259,11 +265,8 @@ class Store:
         with self._db.lock:
             records = self._by_index(self._runs, "runs_run_date", run_date)
             ids = [cast(str, r["run_id"]) for r in records if r["job"] == job]
-        seqs = [0]
-        for run_id in ids:
-            with contextlib.suppress(ValueError):
-                seqs.append(parse_run_id(run_id)[2])
-        return max(seqs)
+        seqs = [int(tail) for i in ids if (tail := i.rsplit(".", 1)[-1]).isdigit()]
+        return max(seqs, default=0)
 
     def query_runs(
         self,

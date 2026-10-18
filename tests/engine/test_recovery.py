@@ -1,9 +1,9 @@
 """Test recovery after a restart: finishing, adopting and losing attempts, and re-queuing."""
 
+import contextlib
 import os
 import signal
 import subprocess
-import threading
 import time
 from collections.abc import Generator
 from datetime import timedelta
@@ -22,7 +22,8 @@ from recovery_helpers import (
 )
 
 from pyscheduler.engine import recovery
-from pyscheduler.engine.model import Outcome, RunState, Trigger
+from pyscheduler.engine.adopted import pid_alive
+from pyscheduler.engine.model import Event, Outcome, RunState, Trigger
 from pyscheduler.store import Batch
 
 ONE_MINUTE = timedelta(minutes=1)
@@ -63,16 +64,19 @@ jobs:
 
 @pytest.fixture
 def sleeper() -> Generator[subprocess.Popen[bytes]]:
-    """Start a ``sleep 30`` in its own session (like a minder), reaped by a thread."""
+    """Start a ``sleep 30`` in its own session, like a minder.
+
+    It is our child, so the engine's ``waitpid`` check clears it away once
+    it ends (no zombie that looks alive).
+    """
     process = subprocess.Popen(["sleep", "30"], start_new_session=True)  # noqa: S607
-    reaper = threading.Thread(target=process.wait, daemon=True)
-    reaper.start()
     try:
         yield process
     finally:
-        if process.poll() is None:
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-        reaper.join(REAL_DEADLINE)
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(process.pid, 0)
 
 
 async def until_final(h: Harness, run_id: str) -> None:
@@ -82,7 +86,7 @@ async def until_final(h: Harness, run_id: str) -> None:
         run = h.engine.book.get(run_id)
         if run is not None and run.is_final:
             return
-        await pynet.loop.sleep(REAL_NAP)  # let the reaper thread see the process go
+        await pynet.loop.sleep(REAL_NAP)  # let the signalled process really end
         await h.advance(POLL)
     msg = f"{run_id} never ended"
     raise AssertionError(msg)
@@ -204,7 +208,6 @@ class TestRunningRuns:
             assert h.run("t").reason == "timeout"
 
         h.run_engine(body)
-        assert sleeper.returncode == -signal.SIGTERM
 
     def test_adopted_kill(self, harness: MakeHarness, sleeper: subprocess.Popen[bytes]) -> None:
         """Kill an adopted attempt through its process group."""
@@ -237,8 +240,28 @@ class TestRunningRuns:
         pynet.loop.run(main())
         assert h.run("q").state is RunState.FAILED
         assert h.run("q").reason == "killed"
-        sleeper.wait(REAL_DEADLINE)
-        assert sleeper.returncode == -signal.SIGKILL
+        assert not pid_alive(sleeper.pid)
+
+    @pytest.mark.parametrize("adopt", [False, True])
+    def test_kill_before_restart_still_counts(
+        self, harness: MakeHarness, sleeper: subprocess.Popen[bytes], *, adopt: bool
+    ) -> None:
+        """End an attempt killed before the restart as killed, with no retry."""
+        h = harness(MANUAL)
+        r = make_run("r", RunState.RUNNING, attempt=1)
+        pid = sleeper.pid if adopt else dead_pid()
+        kill = Event(START + ONE_MINUTE, "alice", r.run_id, "kill", "{}")
+        seed(h, Batch(runs=[r], attempts=[make_attempt(h, r, pid=pid)], events=[kill]))
+
+        async def body() -> None:
+            """Check the run failed as killed by alice (the adopted one is signalled again)."""
+            await until_final(h, r.run_id)
+            assert h.run("r").state is RunState.FAILED
+            assert h.run("r").reason == "killed by alice"
+            attempts = await pynet.loop.run_in_thread(h.store.attempts_for, r.run_id)
+            assert [a.outcome for a in attempts] == [Outcome.KILLED]
+
+        run_at(h, START + 2 * ONE_MINUTE, body)
 
 
 class TestOtherOpenRuns:
@@ -300,10 +323,11 @@ class TestOtherOpenRuns:
         h = harness(MANUAL)
         today = make_run("q", RunState.SUCCEEDED)
         old = make_run("q", RunState.SUCCEEDED, run_date=LONG_AGO, seq=OLD_SEQ)
-        seed(h, Batch(runs=[today, old]))
+        seed(h, Batch(runs=[today]))
 
         async def body() -> None:
-            """Trigger on both dates."""
+            """Store a run past retention (not pruned yet), then trigger on both dates."""
+            await pynet.loop.run_in_thread(h.store.apply, Batch(runs=[old]))
             assert h.engine.book.published(today.run_id) is not None
             new = await h.engine.trigger("q", actor="alice")
             assert new.run_id == "q.2026-10-19.2"

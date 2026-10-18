@@ -12,6 +12,7 @@ job ends. Tests use ``pyscheduler.testing.FakeLauncher`` instead.
 
 import contextlib
 import json
+import logging
 import signal
 import sys
 from collections.abc import Mapping
@@ -22,7 +23,11 @@ from typing import Protocol, cast
 
 from pynet.process import Process, create_process
 
+from pyscheduler.minder import utc_now, write_status
+
 CORRUPT_PREFIX = "corrupt status file: "
+
+logger = logging.getLogger("pyscheduler.engine.launcher")
 
 
 @dataclass(frozen=True)
@@ -267,6 +272,12 @@ class MinderLauncher:
     async def launch(self, spec: LaunchSpec) -> MinderHandle:
         """Remove any old note and pid file, then start the minder in a new session.
 
+        The ``.pid`` file is written here, by the scheduler, as soon as the
+        process exists and before anything else can run, so a scheduler
+        that dies right after the launch still leaves the pid behind for
+        recovery (the minder writes the same file again when it starts).
+        Only a crash between the fork and this write leaves no trace.
+
         Raises:
             OSError: If the minder itself cannot be started.
 
@@ -282,4 +293,9 @@ class MinderLauncher:
             stderr=False,
             new_session=True,
         )
+        note = {"pid": process.pid, "started_at": utc_now()}
+        try:
+            write_status(pid_path(spec.status_path), note)
+        except OSError:  # the minder writes it too; recovery copes without it
+            logger.warning("cannot write the pid file of %s", spec.run_id, exc_info=True)
         return MinderHandle(process, spec.status_path)

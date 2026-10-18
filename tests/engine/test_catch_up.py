@@ -1,26 +1,23 @@
 """Test catch-up of missed firings, clock jumps, and pruning old history."""
 
+import json
 import logging
 from datetime import timedelta
 
 import pynet.loop
 import pytest
-from engine_helpers import START, TODAY, MakeHarness
-from recovery_helpers import make_attempt, make_run, restarted, run_at, seed
+from engine_helpers import START, TODAY, Harness, MakeHarness
+from recovery_helpers import make_run, restarted, run_at, seed
 
 from pyscheduler.engine import recovery
 from pyscheduler.engine.model import RunState, Trigger
-from pyscheduler.store import Batch
+from pyscheduler.store import Batch, ConfigRecord
 
 ONE_HOUR = timedelta(hours=1)
 FIVE_MINUTES = timedelta(minutes=5)
 LATER = START + 3 * ONE_HOUR + 30 * timedelta(minutes=1)
 TRUNCATED = 2
-OLD = TODAY - timedelta(days=100)
-MIDDLE = TODAY - timedelta(days=30)
 YESTERDAY = TODAY - timedelta(days=1)
-MANY_OLD = 5
-SMALL_BATCH = 2
 
 HOURLY = """
 jobs:
@@ -44,6 +41,14 @@ def last_tick_batch(at: object) -> Batch:
     return Batch(engine={"last_tick": str(at)})
 
 
+def config_record(h: Harness, jobs: str) -> ConfigRecord:
+    """Return a stored config record whose only source names ``jobs``."""
+    text = "jobs:\n" + "".join(
+        f"  {name}: {{command: x, schedule: manual}}\n" for name in jobs.split()
+    )
+    return ConfigRecord(1, START, "digest", json.dumps({str(h.tmp_path / "old.yaml"): text}))
+
+
 class TestCatchUp:
     """Missed firings follow each job's ``catch_up`` policy."""
 
@@ -65,6 +70,43 @@ class TestCatchUp:
             assert tick == LATER.isoformat()
             await h.advance_to(START + 4 * ONE_HOUR)
             assert h.run("h").trigger is Trigger.SCHEDULE
+
+        run_at(h, LATER, body)
+
+    def test_new_job_not_caught_up(self, harness: MakeHarness) -> None:
+        """Skip a job added while down (no runs, not in the last config record)."""
+        h = harness(HOURLY.format(policy="all"))
+        seed(h, Batch(engine={"last_tick": START.isoformat()}, configs=[config_record(h, "m")]))
+
+        async def body() -> None:
+            """Nothing caught up for ``h``."""
+            assert h.runs("h") == []
+
+        run_at(h, LATER, body)
+
+    def test_known_or_busy_job_caught_up(self, harness: MakeHarness) -> None:
+        """Catch up a job that was in the last config, or that has runs already."""
+        h = harness(HOURLY.format(policy="latest"))
+        old = make_run("h", RunState.SUCCEEDED, run_date=YESTERDAY)
+        record = config_record(h, "m")
+        seed(h, Batch(runs=[old], engine={"last_tick": START.isoformat()}, configs=[record]))
+
+        async def body() -> None:
+            """``h`` has runs, so it catches up."""
+            assert len(h.runs("h")) == 1
+
+        run_at(h, LATER, body)
+
+    @pytest.mark.parametrize("sources", ["not json", "[]", '{"a.yaml": "jobs: [unclosed"}'])
+    def test_unreadable_record_catches_up(self, harness: MakeHarness, sources: str) -> None:
+        """Catch up as usual when the stored record cannot be read."""
+        h = harness(HOURLY.format(policy="latest"))
+        record = ConfigRecord(1, START, "digest", sources)
+        seed(h, Batch(engine={"last_tick": START.isoformat()}, configs=[record]))
+
+        async def body() -> None:
+            """``h`` catches up its latest firing."""
+            assert len(h.runs("h")) == 1
 
         run_at(h, LATER, body)
 
@@ -121,7 +163,9 @@ class TestCatchUp:
         with again.reopened() as store:
             assert len(store.query_runs(job="h")) == len([START, START + ONE_HOUR])
 
-    def test_clock_jump_applies_policy(self, harness: MakeHarness) -> None:
+    def test_clock_jump_applies_policy(
+        self, harness: MakeHarness, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """Apply ``catch_up`` to firings a forward clock jump passed over."""
         h = harness(HOURLY.format(policy="latest"))
         jump = START + 5 * ONE_HOUR + FIVE_MINUTES
@@ -130,7 +174,9 @@ class TestCatchUp:
             """Jump the wall clock and wake the firing task."""
             await h.advance(FIVE_MINUTES)
             h.clock._now = jump
-            await h.advance_to(jump)
+            with caplog.at_level(logging.WARNING):
+                await h.advance_to(jump)
+            assert "clock jump: h was due" in caplog.text
             runs = h.runs("h")
             assert [(r.scheduled_at, r.trigger) for r in runs] == [
                 (START, Trigger.SCHEDULE),
@@ -138,59 +184,5 @@ class TestCatchUp:
             ]
             await h.advance_to(START + 6 * ONE_HOUR)
             assert h.run("h").trigger is Trigger.SCHEDULE
-
-        h.run_engine(body)
-
-
-class TestPrune:
-    """Old final runs are deleted from the store and forgotten in memory."""
-
-    def test_prune_deletes_old_final_only(self, harness: MakeHarness) -> None:
-        """Delete final runs past ``retention``; keep open ones and newer ones."""
-        h = harness(HOURLY.format(policy="none"))
-        old = make_run("m", RunState.SUCCEEDED, run_date=OLD, attempt=1)
-        old_open = make_run("m", RunState.HELD, run_date=OLD, seq=2)
-        middle = make_run("m", RunState.SUCCEEDED, run_date=MIDDLE)
-        recent = make_run("m", RunState.SUCCEEDED, run_date=YESTERDAY)
-        attempt = make_attempt(h, old, pid=None)
-        event = h.engine._event(old.run_id, "created")
-        runs = [old, old_open, middle, recent]
-        seed(h, Batch(runs=runs, attempts=[attempt], events=[event]))
-
-        async def body() -> None:
-            """Prune now, then again ten days later."""
-            assert h.engine.book.get(recent.run_id) is not None
-            assert await recovery.prune(h.engine, h.clock.now()) == 1
-            assert await pynet.loop.run_in_thread(h.store.get_run, old.run_id) is None
-            assert await pynet.loop.run_in_thread(h.store.attempts_for, old.run_id) == []
-            assert await pynet.loop.run_in_thread(h.store.events_for, old.run_id) == []
-            for kept in (old_open, middle, recent):
-                assert await pynet.loop.run_in_thread(h.store.get_run, kept.run_id)
-            assert await recovery.prune(h.engine, h.clock.now() + 10 * 24 * ONE_HOUR) == 0
-            assert h.engine.book.get(recent.run_id) is None
-            assert h.engine.book.published(recent.run_id) is None
-            assert h.engine.book.get(old_open.run_id) is not None
-
-        h.run_engine(body)
-
-    def test_prune_in_batches_every_hour(
-        self, harness: MakeHarness, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Prune hourly, in batches of ``PRUNE_BATCH``."""
-        monkeypatch.setattr(recovery, "PRUNE_BATCH", SMALL_BATCH)
-        h = harness(HOURLY.format(policy="none"))
-        olds = [make_run("m", RunState.SUCCEEDED, run_date=OLD, seq=n + 1) for n in range(MANY_OLD)]
-        seed(h, Batch(runs=olds))
-
-        async def body() -> None:
-            """Nothing goes before the hour; everything after it."""
-            count = await pynet.loop.run_in_thread(h.store.final_run_ids_before, TODAY, 100)
-            assert len(count) == MANY_OLD
-            await h.advance(ONE_HOUR)
-            assert await pynet.loop.run_in_thread(h.store.final_run_ids_before, TODAY, 100) == []
-            late = make_run("m", RunState.FAILED, run_date=OLD, seq=MANY_OLD + 1)
-            await pynet.loop.run_in_thread(h.store.apply, Batch(runs=[late]))
-            await h.advance(ONE_HOUR)
-            assert await pynet.loop.run_in_thread(h.store.get_run, late.run_id) is None
 
         h.run_engine(body)

@@ -82,7 +82,7 @@ class Engine(Recovery):
         self._stopped = False
 
     async def start(self) -> None:
-        """Start the writer, recover, catch up, then start the firing task and retention.
+        """Start the writer, recover, catch up, then start the firing task and prune.
 
         After a restart the firing task starts strictly after the
         catch-up instant (catch-up has handled everything up to it); on
@@ -100,7 +100,7 @@ class Engine(Recovery):
         await self.catch_up(now)
         self._firings_after = None if first else now
         self._firing_task = pynet.loop.spawn(self._fire_loop(), name="engine-firings")
-        self._arm_retention()
+        self._retention_due()  # prune once now; it plans the hourly rounds
 
     async def stop(self, *, kill_running: bool = False) -> None:
         """Stop creating and starting runs, flush the writer and close the store.
@@ -201,7 +201,9 @@ class Engine(Recovery):
                     return
                 self._busy += 1
                 try:
-                    tick = self._fire_due(heap)
+                    tick, jumped = self._fire_due(heap)
+                    if jumped:
+                        await self._create_missed(jumped)
                     if tick is not None:
                         await self._flush(engine={LAST_TICK: tick.isoformat()})
                 finally:
@@ -230,15 +232,18 @@ class Engine(Recovery):
         else:
             self._firings_stale = True
 
-    def _fire_due(self, heap: list[_Due]) -> datetime | None:
+    def _fire_due(self, heap: list[_Due]) -> tuple[datetime | None, list[tuple[str, Firing]]]:
         """Create the runs of every firing due now; return the latest instant handled.
 
         A firing more than ``LATE`` behind the clock means the clock
         jumped: that job's firings up to now follow its ``catch_up`` policy
-        (as ``catch_up`` runs) instead of all being created.
+        instead of all being created. Those are returned (as
+        ``(job, firing)``) for the caller to create as ``catch_up`` runs
+        once their dates are loaded.
         """
         now = self.clock.now()
         tick: datetime | None = None
+        jumped: list[tuple[str, Firing]] = []
         while heap and heap[0][0] <= now:
             when, name, firing = heapq.heappop(heap)
             tick = max(tick or when, when)
@@ -247,15 +252,21 @@ class Engine(Recovery):
                 continue
             after = when
             if when < now - LATE:
-                for missed in self._missed(job, when - JUST_BEFORE, now):
-                    self._create_run(name, missed.run_date, missed.scheduled_at, Trigger.CATCH_UP)
+                logger.warning(
+                    "clock jump: %s was due at %s but it is %s; applying catch_up %s",
+                    name,
+                    when.isoformat(),
+                    now.isoformat(),
+                    job.catch_up.value,
+                )
+                jumped += [(name, missed) for missed in self._missed(job, when - JUST_BEFORE, now)]
                 after = tick = now
             else:
                 self._create_run(name, firing.run_date, when, Trigger.SCHEDULE)
             upcoming = next_firing(job, self.config.calendar_for(job), after)
             if upcoming is not None:
                 heapq.heappush(heap, (upcoming.scheduled_at, name, upcoming))
-        return tick
+        return tick, jumped
 
     # -- starting queued runs --------------------------------------------
 
