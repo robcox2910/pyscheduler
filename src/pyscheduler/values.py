@@ -11,6 +11,9 @@ from datetime import date, time, timedelta
 _DURATION = re.compile(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", re.ASCII)
 _TIME = re.compile(r"([01]\d|2[0-3]):([0-5]\d)", re.ASCII)
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_HOUR = 3600
+SECONDS_PER_DAY = 86400
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}", re.ASCII)
 
 
@@ -38,6 +41,20 @@ def parse_duration(text: str) -> timedelta:
         msg = f"invalid duration {text!r}: must be greater than zero"
         raise ValueError(msg)
     return result
+
+
+def format_duration(value: timedelta) -> str:
+    """Write a duration the way ``parse_duration`` reads it: ``1h30m``, ``4h``, ``0s``.
+
+    Fractions of a second are dropped.
+    """
+    total = int(value.total_seconds())
+    days, rest = divmod(total, SECONDS_PER_DAY)
+    hours, rest = divmod(rest, SECONDS_PER_HOUR)
+    minutes, seconds = divmod(rest, SECONDS_PER_MINUTE)
+    parts = ((days, "d"), (hours, "h"), (minutes, "m"), (seconds, "s"))
+    text = "".join(f"{number}{unit}" for number, unit in parts if number)
+    return text or "0s"
 
 
 def parse_time(text: str) -> time:

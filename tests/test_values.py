@@ -4,7 +4,7 @@ from datetime import date, time, timedelta
 
 import pytest
 
-from pyscheduler.values import check_name, parse_date, parse_duration, parse_time
+from pyscheduler.values import check_name, format_duration, parse_date, parse_duration, parse_time
 
 MAX_NAME = 64
 SECONDS_90 = 90
@@ -66,3 +66,27 @@ class TestCheckName:
         for bad in ["a.b", "", "a" * (MAX_NAME + 1), "é", "a\n", "a b"]:
             with pytest.raises(ValueError, match="name"):
                 check_name(bad)
+
+
+SECONDS_4H = 4 * 3600
+
+
+class TestFormatDuration:
+    """Durations are written back the way ``parse_duration`` reads them."""
+
+    @pytest.mark.parametrize(
+        ("value", "text"),
+        [
+            (timedelta(hours=1, minutes=30), "1h30m"),
+            (timedelta(seconds=SECONDS_90), "1m30s"),
+            (timedelta(seconds=SECONDS_4H), "4h"),
+            (timedelta(days=1), "1d"),
+            (timedelta(0), "0s"),
+            (timedelta(days=1, hours=2, minutes=3, seconds=4), "1d2h3m4s"),
+        ],
+    )
+    def test_format_duration(self, value: timedelta, text: str) -> None:
+        """Format a duration, and read it back to the same value."""
+        assert format_duration(value) == text
+        if value:
+            assert parse_duration(text) == value

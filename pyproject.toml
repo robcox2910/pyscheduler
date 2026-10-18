@@ -137,6 +137,7 @@ docstring-code-format = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests/alerts"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -166,7 +167,7 @@ venv = ".venv"
 
 [[tool.pyright.executionEnvironments]]
 root = "tests"
-extraPaths = ["."]
+extraPaths = [".", "tests/alerts"]
 reportPrivateUsage = false
 
 [tool.commitizen]
