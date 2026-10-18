@@ -192,3 +192,57 @@ def _by_index(table: Table, index_name: str, key: Value) -> list[Record]:
 def _oldest_first(alerts: list[AlertRecord]) -> list[AlertRecord]:
     """Return ``alerts`` sorted by raised-at, then id."""
     return sorted(alerts, key=lambda a: (a.raised_at, a.alert_id))
+
+
+class AlertReads:
+    """Give the ``Store`` its alert reads, each taking PyDB's lock (see ``Store``)."""
+
+    _db: Database
+    _alerts: AlertTables
+
+    def get_alert(self, alert_id: str) -> AlertRecord | None:
+        """Return the alert with this id, or ``None``."""
+        with self._db.lock:
+            return self._alerts.get_alert(alert_id)
+
+    def alerts_for(self, run_id: str) -> list[AlertRecord]:
+        """Return a run's alerts, oldest first."""
+        with self._db.lock:
+            return self._alerts.alerts_for(run_id)
+
+    def query_alerts(
+        self,
+        *,
+        kind: AlertKind | None = None,
+        job: str | None = None,
+        since: datetime | None = None,
+        limit: int = 500,
+    ) -> list[AlertRecord]:
+        """Return alerts matching every given filter, newest first."""
+        with self._db.lock:
+            return self._alerts.query_alerts(kind=kind, job=job, since=since, limit=limit)
+
+    def deliveries_for(self, alert_ids: Collection[str]) -> dict[str, list[DeliveryRecord]]:
+        """Return the deliveries of each given alert that has any."""
+        with self._db.lock:
+            return self._alerts.deliveries_for(alert_ids)
+
+    def deliveries_with(self, status: DeliveryStatus, limit: int = 500) -> list[DeliveryRecord]:
+        """Return up to ``limit`` deliveries in ``status``, oldest first."""
+        with self._db.lock:
+            return self._alerts.deliveries_with(status, limit)
+
+    def alert_ids_since(self, when: datetime) -> set[str]:
+        """Return the ids of alerts raised at ``when`` or later."""
+        with self._db.lock:
+            return self._alerts.alert_ids_since(when)
+
+    def runless_alert_ids_before(self, when: datetime, limit: int) -> list[str]:
+        """Return up to ``limit`` ids of run-less alerts raised before ``when``, oldest first."""
+        with self._db.lock:
+            return self._alerts.runless_alert_ids_before(when, limit)
+
+    def run_files(self, run_ids: Collection[str]) -> dict[str, tuple[str, ...]]:
+        """Return the matched files of each given run that has some."""
+        with self._db.lock:
+            return self._alerts.run_files(run_ids)

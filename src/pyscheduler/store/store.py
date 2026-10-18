@@ -16,7 +16,7 @@ store can be used from worker threads while another thread commits.
 """
 
 from collections.abc import Collection, Iterable
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Self, cast
 
@@ -26,10 +26,8 @@ from pydb.record import Record, Value
 from pydb.table import Table
 from pydb.transaction import Transaction
 
-from pyscheduler.alerts.model import AlertRecord, DeliveryRecord, DeliveryStatus
-from pyscheduler.config.model import AlertKind
 from pyscheduler.engine.model import FINAL_STATES, Attempt, Event, Outcome, Run, RunState
-from pyscheduler.store.alert_store import AlertStage, AlertTables
+from pyscheduler.store.alert_store import AlertReads, AlertStage, AlertTables
 from pyscheduler.store.schema import (
     ATTEMPTS,
     CONFIGS,
@@ -69,7 +67,7 @@ OPEN_STATES = tuple(state for state in RunState if state not in FINAL_STATES)
 """The states a run can be in before it is final, in lifecycle order."""
 
 
-class Store:
+class Store(AlertReads):
     """Hide PyDB behind a small typed API for the engine.
 
     Every read takes PyDB's lock, so it can wait for a group commit that
@@ -342,55 +340,6 @@ class Store:
                 return None
             record_id = self._config_ids[max(self._config_ids)]
             return config_from_row(self._configs.get(record_id).data)
-
-    # Alerts (see ``alert_store``) --------------------------------------
-
-    def get_alert(self, alert_id: str) -> AlertRecord | None:
-        """Return the alert with this id, or ``None``."""
-        with self._db.lock:
-            return self._alerts.get_alert(alert_id)
-
-    def alerts_for(self, run_id: str) -> list[AlertRecord]:
-        """Return a run's alerts, oldest first."""
-        with self._db.lock:
-            return self._alerts.alerts_for(run_id)
-
-    def query_alerts(
-        self,
-        *,
-        kind: AlertKind | None = None,
-        job: str | None = None,
-        since: datetime | None = None,
-        limit: int = 500,
-    ) -> list[AlertRecord]:
-        """Return alerts matching every given filter, newest first."""
-        with self._db.lock:
-            return self._alerts.query_alerts(kind=kind, job=job, since=since, limit=limit)
-
-    def deliveries_for(self, alert_ids: Collection[str]) -> dict[str, list[DeliveryRecord]]:
-        """Return the deliveries of each given alert that has any."""
-        with self._db.lock:
-            return self._alerts.deliveries_for(alert_ids)
-
-    def deliveries_with(self, status: DeliveryStatus, limit: int = 500) -> list[DeliveryRecord]:
-        """Return up to ``limit`` deliveries in ``status``, oldest first."""
-        with self._db.lock:
-            return self._alerts.deliveries_with(status, limit)
-
-    def alert_ids_since(self, when: datetime) -> set[str]:
-        """Return the ids of alerts raised at ``when`` or later."""
-        with self._db.lock:
-            return self._alerts.alert_ids_since(when)
-
-    def runless_alert_ids_before(self, when: datetime, limit: int) -> list[str]:
-        """Return up to ``limit`` ids of run-less alerts raised before ``when``, oldest first."""
-        with self._db.lock:
-            return self._alerts.runless_alert_ids_before(when, limit)
-
-    def run_files(self, run_ids: Collection[str]) -> dict[str, tuple[str, ...]]:
-        """Return the matched files of each given run that has some."""
-        with self._db.lock:
-            return self._alerts.run_files(run_ids)
 
     # Helpers -----------------------------------------------------------
 
