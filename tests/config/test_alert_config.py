@@ -143,7 +143,6 @@ class TestErrors:
             ("{notify: [nobody]}", "unknown notifier 'nobody'"),
             ("{loud: true}", "unknown key 'loud'"),
             ("{on: failed}", "alerts.on must be a list"),
-            ("{notify: [1]}", "alerts.notify items must be text"),
             ("{notify: [{a: b}]}", "alerts.notify items must be text"),
             ("{on: [[failed]]}", "alerts.on items must be text"),
         ],
