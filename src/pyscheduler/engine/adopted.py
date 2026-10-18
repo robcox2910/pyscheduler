@@ -13,10 +13,11 @@ system may give its pid to a brand-new process. So a pid only counts as
 the minder (``minder_alive``) if it can be signalled by us (a minder
 always runs as our user) *and* the process started within
 ``ADOPT_START_TOLERANCE`` of the ``started_at`` in the minder's ``.pid``
-file, read with ``ps -o lstart=``. Where ``ps`` cannot be used, the pid
-check alone is trusted (with a warning). A pid that is our own child
-(a minder started earlier by this same process) is checked with
-``waitpid``, which also clears it away once it has ended.
+file (now minus the elapsed time ``ps -o etime=`` reports). Where ``ps``
+cannot be used, the pid check alone is trusted (with a warning). An
+ended child of ours (a minder started earlier by this same process) is
+reaped with ``waitpid``, so its zombie never looks alive. The ``ps``
+check runs on a worker thread, never on the event loop.
 """
 
 import contextlib
@@ -25,13 +26,14 @@ import logging
 import os
 import signal
 import subprocess
-import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
-from pynet.loop import Future, get_running_loop
+import pynet.loop
+from pynet.loop import Future, Task, get_running_loop
 
 from pyscheduler.engine import launcher
 from pyscheduler.engine.clock import Clock
@@ -43,8 +45,11 @@ ADOPT_START_TOLERANCE = timedelta(seconds=10)
 PS_TIMEOUT = 5.0
 """How long (in seconds) ``ps`` may take to report a start time."""
 
-LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
-"""The layout of ``ps -o lstart=`` in the C locale, such as ``Sun Oct 18 10:23:45 2026``."""
+MIN_ETIME_PARTS = 2
+"""``ps`` elapsed time has at least minutes and seconds (``mm:ss``)."""
+
+MAX_ETIME_PARTS = 3
+"""... and at most hours too (``hh:mm:ss``), after an optional ``dd-``."""
 
 logger = logging.getLogger("pyscheduler.engine.adopted")
 
@@ -80,7 +85,14 @@ def read_pid(status_path: Path) -> PidNote | None:
 
 
 def _own_child(pid: int) -> bool | None:
-    """Return whether our own child ``pid`` still runs (reaping it if not); ``None`` if not ours."""
+    """Return whether our own child ``pid`` still runs (reaping it if not); ``None`` if not ours.
+
+    A minder this process launched and still watches belongs to PyNet's
+    child watcher: it is never ``waitpid``-ed here (that would steal its
+    exit status), just reported as not ours.
+    """
+    if pid in launcher.live_minder_pids():
+        return None
     try:
         done, _ = os.waitpid(pid, os.WNOHANG)
     except ChildProcessError:
@@ -91,14 +103,14 @@ def _own_child(pid: int) -> bool | None:
 def pid_alive(pid: int) -> bool:
     """Return whether ``pid`` is a live process of ours (cheap: no start-time check).
 
-    A pid of 0 or less never is. A process we may not signal belongs to
+    A pid of 0 or less never is. An ended child of ours is reaped (so a
+    zombie never looks alive). A process we may not signal belongs to
     another user, so it cannot be a minder: it counts as gone.
     """
     if pid <= 0:
         return False
-    child = _own_child(pid)
-    if child is not None:
-        return child
+    if _own_child(pid) is False:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError, PermissionError:
@@ -106,8 +118,32 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def parse_etime(text: str) -> timedelta:
+    """Turn ``ps`` elapsed time, ``[[dd-]hh:]mm:ss``, into a ``timedelta``.
+
+    Raises:
+        ValueError: If ``text`` is not in that form.
+
+    """
+    days_text, _, clock = text.strip().rpartition("-")
+    parts = clock.split(":")
+    if not MIN_ETIME_PARTS <= len(parts) <= MAX_ETIME_PARTS or not all(p.isdigit() for p in parts):
+        msg = f"bad elapsed time {text!r}"
+        raise ValueError(msg)
+    if days_text and (not days_text.isdigit() or len(parts) != MAX_ETIME_PARTS):
+        msg = f"bad elapsed time {text!r}"
+        raise ValueError(msg)
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return timedelta(days=int(days_text or 0), seconds=seconds)
+
+
 def process_start(pid: int) -> datetime | None:
-    """Return when ``pid`` started (from ``ps``), or ``None`` if there is no such process.
+    """Return about when ``pid`` started, or ``None`` if there is no such process.
+
+    It is now minus the elapsed time ``ps -o etime=`` reports, which has
+    no time zone in it (so no daylight-saving guess), to the second.
 
     Raises:
         OSError: If ``ps`` cannot be run or its answer cannot be read.
@@ -116,7 +152,7 @@ def process_start(pid: int) -> datetime | None:
     env = {**os.environ, "LC_ALL": "C"}
     try:
         done = subprocess.run(  # noqa: S603 -- a fixed command
-            ["ps", "-o", "lstart=", "-p", str(pid)],  # noqa: S607 -- ps from PATH
+            ["ps", "-o", "etime=", "-p", str(pid)],  # noqa: S607 -- ps from PATH
             capture_output=True,
             text=True,
             env=env,
@@ -126,30 +162,25 @@ def process_start(pid: int) -> datetime | None:
     except subprocess.TimeoutExpired as exc:
         msg = "ps timed out"
         raise OSError(msg) from exc
-    text = " ".join(done.stdout.split())
+    now = datetime.now(UTC)
+    text = done.stdout.strip()
     if done.returncode != 0 or not text:
         return None
     try:
-        parsed = time.strptime(text, LSTART_FORMAT)
+        return now - parse_etime(text)
     except ValueError as exc:
-        msg = f"unreadable ps start time {text!r}"
-        raise OSError(msg) from exc
-    return datetime.fromtimestamp(time.mktime(parsed), UTC)
+        raise OSError(str(exc)) from exc
 
 
 def minder_alive(pid: int, started_at: datetime) -> bool:
-    """Return whether ``pid`` is still the minder that started at ``started_at``.
+    """Return whether ``pid`` is still the minder that started at ``started_at`` (blocking).
 
-    Our own child is known for sure (``waitpid``). Any other pid must be
-    ours to signal and have started within ``ADOPT_START_TOLERANCE`` of
-    ``started_at``; if ``ps`` cannot tell, the pid check alone is trusted
-    and a warning is logged.
+    The pid must be alive and ours to signal (an ended child of ours is
+    reaped), and must have started within ``ADOPT_START_TOLERANCE`` of
+    ``started_at``, even if it is our own child. If ``ps`` cannot tell,
+    the pid check alone is trusted and a warning is logged. This runs
+    ``ps``: call it from a worker thread, never on the event loop.
     """
-    if pid <= 0:
-        return False
-    child = _own_child(pid)
-    if child is not None:
-        return child
     if not pid_alive(pid):
         return False
     try:
@@ -179,6 +210,8 @@ class AdoptedHandle:
         self._status_path = status_path
         self._killed = False
         self._waker: Future[None] | None = None
+        self._queued: deque[int] = deque()
+        self._sender: Task[None] | None = None
         self.lost = False
 
     @property
@@ -231,21 +264,34 @@ class AdoptedHandle:
             self._waker.set_result(None)
 
     def terminate(self) -> None:
-        """Send SIGTERM to the minder's process group (it leads its own session)."""
-        self._signal_group(signal.SIGTERM)
+        """Send SIGTERM to the minder's process group (it leads its own session), soon."""
+        self._spawn_signal(signal.SIGTERM)
 
     def kill(self) -> None:
-        """Send SIGKILL to the minder's process group; ``wait`` then returns at once."""
-        self._signal_group(signal.SIGKILL)
-        self._killed = True
-        self._wake()
+        """Send SIGKILL to the minder's process group, soon; ``wait`` then returns."""
+        self._spawn_signal(signal.SIGKILL)
 
-    def _signal_group(self, sig: int) -> None:
-        """Signal the group, but only if the pid is still our minder (never a stranger).
+    def _spawn_signal(self, sig: int) -> None:
+        """Queue ``sig``; one task sends the queued signals in order, checking identity first."""
+        self._queued.append(sig)
+        if self._sender is None or self._sender.done():
+            self._sender = pynet.loop.spawn(self._send_queued(), name=f"signal-{self._pid}")
 
-        One that has already gone is not an error.
+    async def _send_queued(self) -> None:
+        """Send every queued signal, in the order asked, each after an identity check.
+
+        The check runs ``ps``, so it runs on a worker thread. A group that
+        has already gone is not an error, and a pid that is no longer our
+        minder is never signalled. Once SIGKILL (which cannot be caught)
+        has had its turn, the attempt counts as ended.
         """
-        if not minder_alive(self._pid, self._started_at):
-            return
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(self._pid, sig)
+        while self._queued:
+            sig = self._queued.popleft()
+            try:
+                if await pynet.loop.run_in_thread(minder_alive, self._pid, self._started_at):
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(self._pid, sig)
+            finally:
+                if sig == signal.SIGKILL:
+                    self._killed = True
+                    self._wake()

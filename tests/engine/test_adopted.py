@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import subprocess
+import time
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,12 +14,13 @@ import pynet.loop
 import pytest
 from recovery_helpers import dead_pid
 
-from pyscheduler.engine import adopted
+from pyscheduler.engine import adopted, launcher
 from pyscheduler.engine.adopted import (
     ADOPT_START_TOLERANCE,
     AdoptedHandle,
     PidNote,
     minder_alive,
+    parse_etime,
     pid_alive,
     process_start,
     read_pid,
@@ -29,6 +31,8 @@ START = datetime(2026, 10, 19, tzinfo=UTC)
 POLL = 2.0
 ANSWER = 42
 HOUR = timedelta(hours=1)
+SLOW_PS = 1.0
+NAP = 0.05
 
 
 @pytest.fixture
@@ -177,14 +181,98 @@ class TestAdoptedHandle:
             assert result.exit_code is None
             assert result.start_error is None
 
+            handle.terminate()  # a gone minder is never signalled
+            await pynet.loop.sleep(NAP)
+
         pynet.loop.run(main())
         assert handle.lost
         assert handle.pid > 0
-        handle.terminate()  # a gone minder is never signalled
 
     def test_never_signals_a_stranger(self, tmp_path: Path, orphan: int) -> None:
         """Leave a live pid alone when its start time says it is not our minder."""
         clock = FakeClock(START)
         handle = AdoptedHandle(clock, orphan, START, tmp_path / "s.json", poll=POLL)
-        handle.kill()
+
+        async def main() -> None:
+            """Ask for a kill and wait for the handle to give up on the attempt."""
+            handle.kill()
+            await handle.wait()
+
+        pynet.loop.run(main())
         assert pid_alive(orphan)
+
+    def test_slow_ps_never_blocks_the_loop(
+        self, tmp_path: Path, orphan: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Check identity on a worker thread: a slow ``ps`` does not hold up timers."""
+        real = adopted.process_start
+
+        def slow(pid: int) -> datetime | None:
+            """Answer like ``ps``, a second late."""
+            time.sleep(SLOW_PS)
+            return real(pid)
+
+        monkeypatch.setattr(adopted, "process_start", slow)
+        sent: list[tuple[int, int]] = []
+
+        def record(pid: int, sig: int) -> None:
+            """Note the signal instead of sending it."""
+            sent.append((pid, sig))
+
+        monkeypatch.setattr(os, "killpg", record)
+        handle = AdoptedHandle(
+            FakeClock(START), orphan, datetime.now(UTC), tmp_path / "s.json", poll=POLL
+        )
+        late: list[float] = []
+
+        async def main() -> None:
+            """Kill, and time a short nap taken meanwhile."""
+            handle.terminate()
+            handle.kill()
+            began = time.monotonic()
+            await pynet.loop.sleep(NAP)
+            late.append(time.monotonic() - began - NAP)
+            await handle.wait()
+
+        pynet.loop.run(main())
+        assert late[0] < SLOW_PS / 2
+        assert sent == [(orphan, signal.SIGTERM), (orphan, signal.SIGKILL)]  # in order
+
+
+class TestElapsedTime:
+    """``ps -o etime=`` gives ``[[dd-]hh:]mm:ss``, with no time zone."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("00:05", timedelta(seconds=5)),
+            ("  12:34\n", timedelta(minutes=12, seconds=34)),
+            ("01:02:03", timedelta(hours=1, minutes=2, seconds=3)),
+            ("2-01:02:03", timedelta(days=2, hours=1, minutes=2, seconds=3)),
+        ],
+    )
+    def test_parse_etime(self, text: str, expected: timedelta) -> None:
+        """Read every layout ``ps`` uses."""
+        assert parse_etime(text) == expected
+
+    @pytest.mark.parametrize("text", ["5", "1:2:3:4", "x-01:02:03", "2-02:03", "ab:cd", ""])
+    def test_bad_etime(self, text: str) -> None:
+        """Refuse anything else."""
+        with pytest.raises(ValueError, match="bad elapsed time"):
+            parse_etime(text)
+
+    def test_fall_back_hour(self, orphan: int, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Match a minder started in the repeated hour of a DST change (no local time used)."""
+        # ``ps`` runs in a zone with a fall-back hour (01:30 EDT and 01:30
+        # EST on 1 Nov 2026 are an hour apart). Only the elapsed time is
+        # read, so the local clock never has to be guessed.
+        monkeypatch.setenv("TZ", "America/New_York")
+        assert minder_alive(orphan, datetime.now(UTC))
+
+    def test_live_launched_minder_is_not_reaped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Never ``waitpid`` a minder PyNet's child watcher still owns."""
+        child = subprocess.Popen(["true"])  # noqa: S607 -- a harmless system command
+        monkeypatch.setattr(launcher, "_LIVE_MINDERS", {child.pid})
+        time.sleep(NAP)
+        assert pid_alive(child.pid)  # still a zombie: its exit status was left alone
+        assert child.wait() == 0

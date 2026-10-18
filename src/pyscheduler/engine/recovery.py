@@ -71,6 +71,7 @@ class _Found:
     pid: int | None
     alive: bool = False
     killer: str | None = None
+    began: datetime | None = None
 
 
 class Recovery(ConfigReload, AttemptRunner, Retention):
@@ -145,7 +146,9 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
         if found.status is not None:
             self._spawn(self._finish(row, found.status, Watch()), f"recover-{run_id}")
         elif found.row is not None and found.pid is not None and found.alive:
-            task = self._spawn(self._adopt(run, found.row, found.pid), f"adopt-{run_id}")
+            began = found.began or found.row.started_at
+            adopt = self._adopt(run, found.row, found.pid, began)
+            task = self._spawn(adopt, f"adopt-{run_id}")
             self._attempt_tasks[run_id] = task
         else:
             lost = AttemptResult(None, None, None, self.clock.now(), None)
@@ -168,7 +171,7 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
             reason="",
         )
 
-    async def _adopt(self, run: Run, row: Attempt, pid: int) -> None:
+    async def _adopt(self, run: Run, row: Attempt, pid: int, began: datetime) -> None:
         """Watch a minder that outlived the last scheduler until its attempt ends.
 
         Its timeout counts from the attempt's real start, and an operator
@@ -176,9 +179,7 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
         A kill recorded before the restart is signalled again at once.
         """
         path = Path(row.status_path)
-        note = read_pid(path)
-        began = note.started_at if note and note.pid == pid and note.started_at else None
-        handle = AdoptedHandle(self.clock, pid, began or row.started_at, path, poll=ADOPT_POLL)
+        handle = AdoptedHandle(self.clock, pid, began, path, poll=ADOPT_POLL)
         self._handles[run.run_id] = handle
         if run.run_id in self._kill_requested:
             self._signal_kill(run.run_id, handle)
@@ -314,7 +315,7 @@ def _inspect(store: Store, run: Run) -> _Found:
     pid = row.pid or (note.pid if note else None)
     began = note.started_at if note and note.pid == pid and note.started_at else row.started_at
     alive = pid is not None and minder_alive(pid, began)
-    return _Found(row, read_status(path), pid, alive, killer)
+    return _Found(row, read_status(path), pid, alive, killer, began)
 
 
 async def recover(engine: Recovery) -> None:

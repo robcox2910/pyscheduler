@@ -29,6 +29,16 @@ CORRUPT_PREFIX = "corrupt status file: "
 
 logger = logging.getLogger("pyscheduler.engine.launcher")
 
+_LIVE_MINDERS: set[int] = set()
+
+
+def live_minder_pids() -> frozenset[int]:
+    """Return the pids of the minders this process launched and is still waiting for.
+
+    PyNet's child watcher owns those, so nothing else may ``waitpid`` them.
+    """
+    return frozenset(_LIVE_MINDERS)
+
 
 @dataclass(frozen=True)
 class LaunchSpec:
@@ -223,6 +233,7 @@ class MinderHandle:
         if self._result is not None:
             return self._result
         code = await self._process.wait()
+        _LIVE_MINDERS.discard(self._process.pid)
         if self._result is None:
             self._result = read_status(self._status_path) or _synthesise(code)
         return self._result
@@ -293,6 +304,7 @@ class MinderLauncher:
             stderr=False,
             new_session=True,
         )
+        _LIVE_MINDERS.add(process.pid)
         note = {"pid": process.pid, "started_at": utc_now()}
         try:
             write_status(pid_path(spec.status_path), note)

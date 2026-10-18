@@ -63,17 +63,22 @@ The other open runs are picked up too:
 ### Is It Still the Same Babysitter?
 
 When a process ends, the computer may hand its pid (process number) to
-a brand-new process. So "is the minder alive?" asks three things:
+a brand-new process. So "is the minder alive?" asks two things:
 
 1. Can we signal that pid at all (`os.kill(pid, 0)`)? A minder always
    runs as the scheduler's own user, so a pid owned by someone else is
-   not it.
+   not it. (If the pid is an ended child of the scheduler itself,
+   `waitpid` clears it away first, so its leftover entry never looks
+   alive.)
 2. Did that process start when the minder did? The `.pid` file next to
-   the status note records the minder's `started_at`; `ps -o lstart=`
-   tells when the process with that pid started, and the two must be
-   within 10 seconds.
-3. If the pid is the scheduler's own child (a minder started earlier by
-   this same process), `waitpid` answers directly.
+   the status note records the minder's `started_at`. `ps -o etime=`
+   tells how long the process with that pid has been running; "now
+   minus that" must be within 10 seconds of `started_at`. Elapsed time
+   has no time zone in it, so the hour when the clocks go back cannot
+   confuse it.
+
+The `ps` check runs on a worker thread, so a slow `ps` never holds up
+the scheduler.
 
 The scheduler writes the `.pid` file itself the moment the minder
 process exists (and the minder writes it again when it starts), and it

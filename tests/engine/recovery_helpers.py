@@ -2,7 +2,7 @@
 
 import json
 import subprocess
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pynet.loop
@@ -84,6 +84,14 @@ def write_status(path: Path, *, exit_code: int = 0, ended_at: datetime = START) 
         "start_error": None,
     }
     path.write_text(json.dumps(note), encoding="utf-8")
+
+
+def note_pid(h: Harness, run: Run, pid: int) -> None:
+    """Write the minder's ``.pid`` file for ``run``, started (really) just now."""
+    path = status_path(h, run.run_id, run.attempt)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    note = {"pid": pid, "started_at": datetime.now(UTC).isoformat()}
+    path.with_name(f"{path.name}.pid").write_text(json.dumps(note), encoding="utf-8")
 
 
 def seed(h: Harness, batch: Batch) -> None:

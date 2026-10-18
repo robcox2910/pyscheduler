@@ -1,6 +1,7 @@
 """Test recovery after a restart: finishing, adopting and losing attempts, and re-queuing."""
 
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -15,6 +16,7 @@ from recovery_helpers import (
     dead_pid,
     make_attempt,
     make_run,
+    note_pid,
     run_at,
     seed,
     status_path,
@@ -156,6 +158,7 @@ class TestRunningRuns:
         h = harness(MANUAL)
         q = make_run("q", RunState.RUNNING, attempt=1)
         seed(h, Batch(runs=[q], attempts=[make_attempt(h, q, pid=sleeper.pid)]))
+        note_pid(h, q, sleeper.pid)
 
         async def body() -> None:
             """Check the run is adopted, then finished by its note."""
@@ -177,9 +180,7 @@ class TestRunningRuns:
         h = harness(MANUAL)
         q = make_run("q", RunState.RUNNING, attempt=1)
         seed(h, Batch(runs=[q], attempts=[make_attempt(h, q, pid=None)]))
-        note = status_path(h, q.run_id)
-        note.parent.mkdir(parents=True)
-        note.with_name(f"{note.name}.pid").write_text(f'{{"pid": {sleeper.pid}}}')
+        note_pid(h, q, sleeper.pid)
 
         async def body() -> None:
             """Check the run is adopted and its pid recorded."""
@@ -200,6 +201,7 @@ class TestRunningRuns:
         t = make_run("t", RunState.RUNNING, attempt=1)
         row = make_attempt(h, t, pid=sleeper.pid, started_at=START - 5 * ONE_MINUTE)
         seed(h, Batch(runs=[t], attempts=[row]))
+        note_pid(h, t, sleeper.pid)
 
         async def body() -> None:
             """Wait for the group to be signalled and the run to fail."""
@@ -214,6 +216,7 @@ class TestRunningRuns:
         h = harness(MANUAL)
         q = make_run("q", RunState.RUNNING, attempt=1)
         seed(h, Batch(runs=[q], attempts=[make_attempt(h, q, pid=sleeper.pid)]))
+        note_pid(h, q, sleeper.pid)
 
         async def body() -> None:
             """Kill the run and wait for it to end."""
@@ -230,6 +233,7 @@ class TestRunningRuns:
         h = harness(MANUAL)
         q = make_run("q", RunState.RUNNING, attempt=1)
         seed(h, Batch(runs=[q], attempts=[make_attempt(h, q, pid=sleeper.pid)]))
+        note_pid(h, q, sleeper.pid)
 
         async def main() -> None:
             """Start, then stop killing everything."""
@@ -252,6 +256,8 @@ class TestRunningRuns:
         pid = sleeper.pid if adopt else dead_pid()
         kill = Event(START + ONE_MINUTE, "alice", r.run_id, "kill", "{}")
         seed(h, Batch(runs=[r], attempts=[make_attempt(h, r, pid=pid)], events=[kill]))
+        if adopt:
+            note_pid(h, r, pid)
 
         async def body() -> None:
             """Check the run failed as killed by alice (the adopted one is signalled again)."""
@@ -262,6 +268,26 @@ class TestRunningRuns:
             assert [a.outcome for a in attempts] == [Outcome.KILLED]
 
         run_at(h, START + 2 * ONE_MINUTE, body)
+
+    def test_stranger_with_the_pid_is_lost(
+        self, harness: MakeHarness, sleeper: subprocess.Popen[bytes]
+    ) -> None:
+        """Lose an attempt whose pid now belongs to a process started at another time."""
+        h = harness(MANUAL)
+        q = make_run("q", RunState.RUNNING, attempt=1)
+        seed(h, Batch(runs=[q], attempts=[make_attempt(h, q, pid=sleeper.pid)]))
+        path = status_path(h, q.run_id)
+        path.parent.mkdir(parents=True)
+        note = {"pid": sleeper.pid, "started_at": "2020-01-01T00:00:00+00:00"}
+        path.with_name(f"{path.name}.pid").write_text(json.dumps(note))
+
+        async def body() -> None:
+            """Check the run was lost and the stranger left alone."""
+            assert h.run("q").state is RunState.FAILED
+            assert h.run("q").reason == "lost"
+            assert sleeper.poll() is None
+
+        h.run_engine(body)
 
 
 class TestOtherOpenRuns:
