@@ -266,6 +266,8 @@ class AttemptRunner(EngineBase):
         actor = self._kill_actors.pop(run_id, None)
         self._cancel_kill_timer(run_id)
         self._attempt_tasks.pop(run_id, None)
+        # The process has ended, so its slots are free now; until the commit
+        # lands, published copies may briefly show a pool over its limit.
         self._release(run_id)
         outcome, reason = classify(result, timed_out=watch.timed_out, killed=killed)
         if outcome is Outcome.KILLED and actor is not None:

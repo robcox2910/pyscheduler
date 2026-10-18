@@ -30,6 +30,9 @@ _HOLDABLE = frozenset(
     {RunState.SCHEDULED, RunState.WAITING, RunState.BLOCKED, RunState.QUEUED, RunState.RETRY_WAIT}
 )
 _FORCEABLE = _HOLDABLE | {RunState.HELD}
+LOCK_ROUNDS = 100
+"""How often a downstream rerun re-plans after meeting a busy run before giving up."""
+
 _REEVALUATED = frozenset({RunState.SCHEDULED, RunState.WAITING, RunState.BLOCKED})
 
 
@@ -54,11 +57,13 @@ class OperatorActions(ActionSupport):
         Only the latest run of each downstream ``(job, run date)`` is
         reopened, and only if it is final; the search goes on through the
         runs it reopens. Downstream jobs that are removed or disabled are
-        left alone. Every run reopened is locked first.
+        left alone. Every run reopened is locked first: the rerun waits
+        only for the root's lock, and takes the others without waiting (see
+        ``_lock_plan``).
 
         Raises:
             ActionError: 404 unknown run, 409 run not final or job gone or
-                disabled, 503 if stopping.
+                disabled (or its downstream runs stay busy), 503 if stopping.
 
         """
         async with AsyncExitStack() as stack:
@@ -67,17 +72,9 @@ class OperatorActions(ActionSupport):
             if not run.is_final:
                 raise ActionError(409, f"run {run_id} is {run.state.value}, not final")
             self._usable_job(run.job, status=409)
-            locked = {run_id}
             plan = [run]
-            while downstream:  # lock the plan's runs; re-plan until it is all locked
-                plan = self._rerun_plan(run)
-                missing = [r.run_id for r in plan if r.run_id not in locked]
-                if not missing:
-                    break
-                for other in missing:
-                    await stack.enter_async_context(self._run_lock(other))
-                    locked.add(other)
-                self._check_usable()
+            if downstream:
+                plan = await self._lock_plan(run, stack)
             now = self.clock.now()
             for current in plan:
                 reopened = replace(
@@ -91,6 +88,41 @@ class OperatorActions(ActionSupport):
                 self._stage(reopened)
             self._reevaluate(dict.fromkeys(r.job for r in plan))
             return await self._commit(actor, "rerun", {r.run_id: r.state for r in plan})
+
+    async def _lock_plan(self, root: Run, stack: AsyncExitStack) -> list[Run]:
+        """Plan the downstream rerun of ``root`` (whose lock is held) and lock all of it.
+
+        The plan and its locks are taken in one step with no waiting, so
+        the plan cannot change under it. If a lock is busy, every lock
+        taken so far (but the root's) is given back, the busy one is
+        waited for on its own, and the plan is made again. Waiting while
+        holding only the root (which is upstream of everything planned)
+        can never close a circle of waiters.
+
+        Raises:
+            ActionError: 409 if the plan stays busy for ``LOCK_ROUNDS`` tries.
+
+        """
+        locks = self._run_locks
+        for _ in range(LOCK_ROUNDS):
+            plan = self._rerun_plan(root)
+            taken: list[str] = []
+            busy: str | None = None
+            for other in plan[1:]:
+                if not locks.try_take(other.run_id):
+                    busy = other.run_id
+                    break
+                taken.append(other.run_id)
+            if busy is None:
+                for run_id in taken:
+                    stack.callback(locks.give_back, run_id)
+                return plan
+            for run_id in taken:
+                locks.give_back(run_id)
+            await locks.wait_free(busy)
+            self._check_usable()
+        msg = f"downstream runs of {root.run_id} are busy, try again"
+        raise ActionError(409, msg)
 
     def _rerun_plan(self, root: Run) -> list[Run]:
         """Return ``root`` and the final downstream runs a rerun of it reopens, in order."""

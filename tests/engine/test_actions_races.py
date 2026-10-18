@@ -232,3 +232,54 @@ class TestKillRaces:
         kills = [e for e in actor_events(h, "m.2026-10-19.1") if e.action == "kill"]
         assert len(kills) == 1
         assert_slots_free(h)
+
+
+class TestDownstreamLocks:
+    """Two downstream reruns never wait for each other in a circle."""
+
+    def test_crossing_downstream_reruns(
+        self, harness: MakeHarness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Finish both reruns of ``a`` and ``b`` (both reaching ``c``) without deadlock."""
+        h = harness(
+            """
+            jobs:
+              a: {command: run-a, schedule: manual}
+              b: {command: run-b, depends_on: [a]}
+              c: {command: run-c, depends_on: [a, b]}
+            """
+        )
+        h.launcher.plan("b", FakeResult(duration=TWO_HOURS), FakeResult())
+        gate = Gate(
+            h,
+            monkeypatch,
+            lambda b: any(r.job == "c" and r.state is RunState.SUCCEEDED for r in b.runs),
+        )
+
+        async def body() -> None:
+            """Hold ``c``'s lock in a mark, start both reruns, then let go."""
+            first = await h.engine.trigger("a", actor=ALICE)
+            await h.advance(ONE_MINUTE)
+            b_run = h.runs("b")[0]
+            c_run = h.runs("c")[0]
+            marking = pynet.loop.spawn(h.engine.mark_success(c_run.run_id, actor=ALICE))
+            await gate.wait_reached()
+            rerun_a = pynet.loop.spawn(h.engine.rerun(first.run_id, downstream=True, actor=ALICE))
+            await pynet.loop.sleep(POLL)
+            moving = pynet.loop.spawn(h.clock.advance_to(h.clock.now() + TWO_HOURS + ONE_MINUTE))
+            await pynet.loop.sleep(POLL)
+            rerun_b = pynet.loop.spawn(h.engine.rerun(b_run.run_id, downstream=True, actor=ALICE))
+            await pynet.loop.sleep(POLL)
+            gate.open()
+            await marking
+            await moving
+            a_runs = await rerun_a
+            b_runs = await rerun_b
+            assert a_runs[0].run_id == first.run_id
+            assert b_runs[0].run_id == b_run.run_id
+            await h.advance(TWO_HOURS)
+
+        h.run_engine(body)
+        assert len(h.engine._run_locks) == 0
+        for job in ("a", "b", "c"):
+            assert h.run(job).state is RunState.SUCCEEDED
