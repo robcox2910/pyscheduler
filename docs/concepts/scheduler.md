@@ -56,6 +56,15 @@ the same rule, called **write-ahead**:
 If the computer crashes in the middle, the store never shows a run as
 "not started" when it really was started.
 
+## When the Register Cannot Be Written
+
+If the store ever fails to write a change, the engine does not guess.
+It **fails stop**: it stops creating and starting runs, puts every
+run whose change was lost back to its last safely written copy, and
+reports the error (`engine.error`, or `await engine.wait_failed()`).
+The next start reads the store and carries on from what was truly
+written down.
+
 ## The Life of a Run
 
 1. **Created.** The bell rings (or an upstream run is created, for a

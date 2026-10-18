@@ -24,6 +24,8 @@ GATE_TIMEOUT = 5.0
 TURNS = 20
 LONG = timedelta(minutes=50)
 FOUR_HOURS = timedelta(hours=4)
+WAITERS = 300
+ROWS_PER_RUN = 6
 
 CHAIN = """
 jobs:
@@ -267,10 +269,16 @@ class TestWriteAhead:
         real_apply = h.store.apply
         real_launch = h.launcher.launch
 
+        carried: dict[str, bool] = {}
+
         def apply(batch: Batch) -> None:
             """Commit, then note every run state that is now durable."""
             real_apply(batch)
             log.extend(("apply", run.run_id, run.state) for run in batch.runs)
+            rows = {(row.run_id, row.attempt) for row in batch.attempts}
+            for run in batch.runs:
+                if run.state is RunState.RUNNING:
+                    carried[run.run_id] = (run.run_id, run.attempt) in rows
 
         async def launch(spec: LaunchSpec) -> FakeHandle:
             """Note the launch, then really launch."""
@@ -300,6 +308,7 @@ class TestWriteAhead:
             run_id = log[index][1]
             assert ("apply", run_id, RunState.RUNNING) in log[:index]
         assert ("b.2026-10-19.1", RunState.SUCCEEDED) in seen
+        assert carried == {"a.2026-10-19.1": True, "b.2026-10-19.1": True}
 
     def test_published_view_lags_until_durable(
         self, harness: MakeHarness, monkeypatch: pytest.MonkeyPatch
@@ -514,3 +523,50 @@ class TestCreateRun:
             assert older.reason == "superseded"
 
         h.run_engine(body)
+
+
+class TestWriteVolume:
+    """Durable writes stay proportional to the number of runs."""
+
+    def test_overlap_waiters_written_linearly(
+        self, harness: MakeHarness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Write O(N) run rows for 300 overlap waiters of one busy job."""
+        h = harness(
+            """
+            jobs:
+              q:
+                command: tick
+                schedule: manual
+            """
+        )
+        h.launcher.plan("q", FakeResult(duration=FOUR_HOURS))
+        rows = {"n": 0}
+        real_apply = h.store.apply
+
+        def apply(batch: Batch) -> None:
+            """Count run rows, then commit."""
+            rows["n"] += len(batch.runs)
+            real_apply(batch)
+
+        monkeypatch.setattr(h.store, "apply", apply)
+
+        async def body() -> None:
+            """Start one run, then add 300 runs of other run dates, one commit each."""
+            engine = h.engine
+            engine._create_run("q", TODAY, START, Trigger.MANUAL)
+            await engine.settle()
+            for n in range(1, WAITERS + 1):
+                day = TODAY - timedelta(days=n)
+                engine._create_run("q", day, START - timedelta(minutes=n), Trigger.BACKFILL)
+                await engine.settle()
+            assert all(
+                run.state is RunState.WAITING and run.reason == OVERLAP_REASON
+                for run in engine.book.open_for("q")
+                if run.run_date != TODAY
+            )
+            await h.advance(FOUR_HOURS * (WAITERS + 1))
+            assert engine.book.open_for("q") == []
+
+        h.run_engine(body)
+        assert rows["n"] <= ROWS_PER_RUN * WAITERS

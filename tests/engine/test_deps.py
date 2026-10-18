@@ -111,8 +111,8 @@ class TestEvaluate:
         if state is not None:
             add(book, "up", MONDAY, state)
         result = check((Dependency("up", on),), book)
-        shown = state.value if state else "no run yet"
-        assert result == DepResult(Verdict.WAIT, f"waiting for up (2026-10-19): {shown}")
+        shown = "waiting for up (2026-10-19)" + ("" if state else ": no run yet")
+        assert result == DepResult(Verdict.WAIT, shown)
 
     @pytest.mark.parametrize("state", [RunState.SUCCEEDED, RunState.SKIPPED])
     def test_success_ok(self, state: RunState) -> None:

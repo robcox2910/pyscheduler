@@ -163,24 +163,31 @@ class RunCreation(EngineBase):
     def _ready(self, run: Run, job: JobDef) -> list[str]:
         """Queue ``run`` unless the overlap rule holds it back or cancels it.
 
-        Return the jobs of runs that became final.
+        A run that already had attempts (a retry, or a rerun) is part of an
+        attempt chain: it only ever waits for the active run, and is never
+        skipped, superseded, or the cause of superseding. The waiting
+        reason is the plain ``OVERLAP_REASON``, so a run already waiting is
+        not written again. Return the jobs of runs that became final.
         """
         active = [other for other in self.book.active_for(job.name) if other.run_id != run.run_id]
         if not active or job.overlap is Overlap.ALLOW:
             self._queue(run, job)
             return []
-        if job.overlap is Overlap.SKIP:
+        fresh = run.attempt == 0
+        if job.overlap is Overlap.SKIP and fresh:
             self._stage(self._changed(run, RunState.CANCELLED, SKIPPED_OVERLAP))
             return [job.name]
         finals: list[str] = []
-        waiting = self.book.overlap_waiting(job.name, run.run_date)
-        if waiting is not None and waiting.run_id != run.run_id:
-            if (waiting.scheduled_at, waiting.run_id) > (run.scheduled_at, run.run_id):
-                self._stage(self._changed(run, RunState.CANCELLED, SUPERSEDED))
-                return [job.name]
-            self._stage(self._changed(waiting, RunState.CANCELLED, SUPERSEDED))
-            finals.append(job.name)
-        reason = f"{OVERLAP_REASON} {active[0].run_id}"
-        if run.state is not RunState.WAITING or run.reason != reason:
-            self._stage(self._changed(run, RunState.WAITING, reason))
+        if fresh:
+            mine = (run.scheduled_at, run.run_id)
+            for waiting in self.book.overlap_waiters(job.name, run.run_date):
+                if waiting.run_id == run.run_id or waiting.attempt:
+                    continue
+                if (waiting.scheduled_at, waiting.run_id) > mine:
+                    self._stage(self._changed(run, RunState.CANCELLED, SUPERSEDED))
+                    return [job.name]
+                self._stage(self._changed(waiting, RunState.CANCELLED, SUPERSEDED))
+                finals.append(job.name)
+        if run.state is not RunState.WAITING or run.reason != OVERLAP_REASON:
+            self._stage(self._changed(run, RunState.WAITING, OVERLAP_REASON))
         return finals

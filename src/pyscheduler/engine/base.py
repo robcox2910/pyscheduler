@@ -14,6 +14,12 @@ Only then may the engine act on it, for example start a process.
 the run book, the slots, the store writer and the staging tray. The
 synchronous parts of the engine (creating runs, re-checking
 dependencies) only *stage* their changes; ``_flush`` commits the tray.
+
+If a commit ever fails, the engine **fails stop**: it records the error
+(``error``, and ``wait_failed()`` returns it), stops creating and
+starting runs, launches nothing more, and puts the runs whose change was
+lost back to their last durable copy. Recovery on the next start
+reconciles the rest from the store.
 """
 
 import json
@@ -24,6 +30,7 @@ from dataclasses import replace
 from typing import Any
 
 import pynet.loop
+from pynet.loop import Event as LoopEvent
 from pynet.loop import Task
 
 from pyscheduler.config import Config, JobDef
@@ -49,6 +56,10 @@ WRITER_NAP = 0.001
 logger = logging.getLogger("pyscheduler.engine")
 
 
+class EngineFailedError(RuntimeError):
+    """Raised inside the engine after a failed commit; the failure is already recorded."""
+
+
 class EngineBase(ABC):
     """Hold the engine's shared state and commit changes write-ahead.
 
@@ -58,6 +69,7 @@ class EngineBase(ABC):
         admission: The global cap and pool counters.
         ready: The queued runs waiting for a slot.
         writer: The group-commit store writer.
+        error: The error that made the engine fail stop, or ``None``.
 
     """
 
@@ -92,7 +104,10 @@ class EngineBase(ABC):
         self._force: set[str] = set()
         self._kill_requested: set[str] = set()
         self._retry_timers: dict[str, Cancel] = {}
+        self._held: set[str] = set()
         self._stopping = False
+        self.error: BaseException | None = None
+        self._failed = LoopEvent()
 
     # -- subscribers and settling ----------------------------------------
 
@@ -127,6 +142,70 @@ class EngineBase(ABC):
         msg = "engine did not settle"
         raise RuntimeError(msg)
 
+    async def wait_failed(self) -> BaseException:
+        """Wait until the engine fails stop, and return the error that caused it."""
+        await self._failed.wait()
+        if self.error is None:  # pragma: no cover -- the event is only set with an error
+            msg = "engine failed without an error"
+            raise RuntimeError(msg)
+        return self.error
+
+    # -- failing stop ----------------------------------------------------
+
+    def _fail(self, exc: BaseException, run_ids: Iterable[str]) -> None:
+        """Record ``exc`` as fatal, stop starting work, and roll back ``run_ids``.
+
+        Each run goes back to its published (durable) copy, or is
+        forgotten if it never had one; its slots are released and its
+        queue entry and attempt task are dropped. Later failures (other
+        saves of the same broken commit) only log and roll back.
+        """
+        ids = sorted(set(run_ids))
+        first = self.error is None
+        if first:
+            self.error = exc
+            self._stopping = True
+            self._failed.set()
+            for timer in self._retry_timers.values():
+                timer.cancel()
+            self._retry_timers.clear()
+        logger.error(
+            "engine %s after a failure (runs %s): %r",
+            "failing stop" if first else "already stopped",
+            ", ".join(ids) or "none",
+            exc,
+            exc_info=exc,
+        )
+        for run_id in ids:
+            published = self.book.published(run_id)
+            if published is None:
+                self.book.forget(run_id)
+            else:
+                self.book.put(published)
+            self.ready.remove(run_id)
+            self._release(run_id)
+            self._attempt_tasks.pop(run_id, None)
+            self._staged.pop(run_id, None)
+
+    def _release(self, run_id: str) -> None:
+        """Give back the slots ``run_id`` holds (if any) and forget its needs."""
+        needs = self._needs.pop(run_id, {})
+        if run_id in self._held:
+            self._held.discard(run_id)
+            self.admission.release(needs)
+
+    def _guard(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Wrap a timer callback so an error in it fails the engine instead of escaping."""
+
+        def guarded() -> None:
+            """Run the callback, sending any error down the fail path."""
+            try:
+                callback()
+            except Exception as exc:  # noqa: BLE001 -- routed to the fail path
+                self._fail(exc, ())
+
+        return guarded
+
     # -- write-ahead transitions -----------------------------------------
 
     async def _transition(
@@ -148,11 +227,20 @@ class EngineBase(ABC):
                 events=list(events),
                 engine=dict(engine or {}),
             )
-            await self.writer.save(batch)
+            ids = [run.run_id for run in changes] + [a.run_id for a in batch.attempts]
+            try:
+                await self.writer.save(batch)
+            except Exception as exc:
+                self._fail(exc, ids)
+                raise EngineFailedError(str(exc)) from exc
             for run in changes:
                 self.book.publish(run)
             for run in changes:
                 self._notify(run)
+            if self.error is not None:
+                # Durable, but the engine failed while this save waited: act on nothing.
+                self._fail(self.error, ids)
+                raise EngineFailedError(str(self.error))
         finally:
             self._busy -= 1
 
@@ -215,13 +303,14 @@ class EngineBase(ABC):
         task.add_done_callback(done)
         return task
 
-    @staticmethod
-    async def _guarded(coro: Coroutine[Any, Any, None]) -> None:
-        """Run ``coro``, logging (not raising) any error so one bug does not stop the loop."""
+    async def _guarded(self, coro: Coroutine[Any, Any, None]) -> None:
+        """Run ``coro``, sending any error down the fail path (it is already there if failed)."""
         try:
             await coro
-        except Exception:
-            logger.exception("engine task failed")
+        except EngineFailedError:
+            pass  # recorded and logged by _fail
+        except Exception as exc:  # noqa: BLE001 -- routed to the fail path
+            self._fail(exc, ())
 
     # -- small helpers ---------------------------------------------------
 
@@ -246,6 +335,10 @@ class EngineBase(ABC):
     @abstractmethod
     def _pump(self) -> None:
         """Start the queued runs that fit."""
+
+    @abstractmethod
+    def _ready(self, run: Run, job: JobDef) -> list[str]:
+        """Queue ``run`` unless the overlap rule holds it back; return newly final jobs."""
 
     @abstractmethod
     def _reevaluate(self, job_names: Iterable[str]) -> None:

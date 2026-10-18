@@ -10,6 +10,7 @@ from engine_helpers import START, Harness, MakeHarness
 
 from pyscheduler.engine.launcher import LaunchSpec
 from pyscheduler.engine.model import Attempt, Outcome, RunState
+from pyscheduler.engine.runbook import OVERLAP_REASON
 from pyscheduler.testing import FakeHandle, FakeResult
 
 ONE_MINUTE = timedelta(minutes=1)
@@ -213,3 +214,42 @@ class TestLaunchSpec:
         assert spec.stderr_path is None
         assert spec.cwd == "/tmp"  # noqa: S108 -- just a path in the config
         assert isinstance(spec.stdout_path, Path)
+
+
+class TestRetryOverlap:
+    """A retry obeys ``overlap: queue`` like any run that becomes ready."""
+
+    def test_retry_waits_for_active_run(self, harness: MakeHarness) -> None:
+        """Never run two attempts of one job at once, even when one is a retry."""
+        h = harness(
+            """
+            jobs:
+              q:
+                command: tick
+                schedule: {every: 15m, between: "00:00-01:00"}
+                retries: {count: 1, delay: 10m}
+            """
+        )
+        half_hour = timedelta(minutes=30)
+        h.launcher.plan(
+            "q",
+            FakeResult(duration=timedelta(minutes=10), exit_code=1),
+            FakeResult(duration=half_hour),
+        )
+        first = "q.2026-10-19.1"
+
+        async def body() -> None:
+            """Fail the first run while a second one is running, then go on."""
+            await h.advance_to(START + timedelta(minutes=20))
+            retrying = h.engine.book.get(first)
+            assert retrying is not None
+            assert retrying.state is RunState.WAITING
+            assert retrying.reason == OVERLAP_REASON
+            await h.advance_to(START + timedelta(hours=3))
+
+        h.run_engine(body)
+        assert h.launcher.max_concurrent == 1
+        done = h.engine.book.get(first)
+        assert done is not None
+        assert done.state is RunState.SUCCEEDED
+        assert done.attempt == TWO

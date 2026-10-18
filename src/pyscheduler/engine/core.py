@@ -19,7 +19,6 @@ write-ahead rule), ``creation`` (runs, dependencies, overlap) and
 together with the firing task and the pump that starts queued runs.
 """
 
-import contextlib
 import heapq
 from datetime import datetime, timedelta
 
@@ -28,6 +27,7 @@ from pynet.loop import Cancelled, Task
 
 from pyscheduler.config import Config
 from pyscheduler.engine.attempts import AttemptRunner
+from pyscheduler.engine.base import EngineFailedError, logger
 from pyscheduler.engine.clock import Clock
 from pyscheduler.engine.creation import RunCreation
 from pyscheduler.engine.launcher import Launcher
@@ -83,12 +83,32 @@ class Engine(RunCreation, AttemptRunner):
 
         Running attempts are left running (their minders carry on) unless
         ``kill_running``, in which case each is killed and recorded as
-        killed. Calling ``stop`` again does nothing.
+        killed. An attempt caught between its ``running`` commit and its
+        launch is cancelled instead, so with ``kill_running`` a process
+        that was mid-launch can still be left running; recovery finds it
+        on the next start. ``stop`` never raises because of a task's
+        error (those are logged), always closes the writer and the store,
+        and does nothing when called again.
         """
         if self._stopped:
             return
         self._stopped = True
         self._stopping = True
+        try:
+            await self._wind_down(kill_running=kill_running)
+        finally:
+            try:
+                await self.writer.close()
+            except Exception:  # noqa: BLE001 -- logged; stop must finish
+                logger.exception("closing the store writer failed")
+            finally:
+                try:
+                    await pynet.loop.run_in_thread(self.store.close)
+                except Exception:  # noqa: BLE001 -- logged; stop must finish
+                    logger.exception("closing the store failed")
+
+    async def _wind_down(self, *, kill_running: bool) -> None:
+        """Cancel the firing task and timers, then end or abandon the attempt tasks."""
         if self._firing_task is not None:
             self._firing_task.cancel()
             await _quietly(self._firing_task)
@@ -107,8 +127,6 @@ class Engine(RunCreation, AttemptRunner):
             await _quietly(task)
         while self._tasks:  # flushes, including any the attempts above started
             await _quietly(next(iter(self._tasks)))
-        await self.writer.close()
-        await pynet.loop.run_in_thread(self.store.close)
 
     # -- the firing task -------------------------------------------------
 
@@ -126,17 +144,30 @@ class Engine(RunCreation, AttemptRunner):
         return heap
 
     async def _fire_loop(self) -> None:
-        """Sleep until the next firing, create its runs, and repeat."""
-        heap = self._first_firings()
-        while heap and not self._stopping:
-            await self.clock.sleep_until(heap[0][0])
-            self._busy += 1
-            try:
-                tick = self._fire_due(heap)
-                if tick is not None:
-                    await self._flush(engine={LAST_TICK: tick.isoformat()})
-            finally:
-                self._busy -= 1
+        """Sleep until the next firing, create its runs, and repeat.
+
+        Any error fails the engine (see ``EngineBase._fail``). If the wall
+        clock jumps forward, every firing passed over is created on wake,
+        each once; the catch-up policy for missed firings (``catch_up``)
+        is applied at start-up by recovery, not here.
+        """
+        try:
+            heap = self._first_firings()
+            while heap and not self._stopping:
+                await self.clock.sleep_until(heap[0][0])
+                if self._stopping:
+                    return
+                self._busy += 1
+                try:
+                    tick = self._fire_due(heap)
+                    if tick is not None:
+                        await self._flush(engine={LAST_TICK: tick.isoformat()})
+                finally:
+                    self._busy -= 1
+        except EngineFailedError:
+            return  # already recorded by _fail
+        except Exception as exc:  # noqa: BLE001 -- routed to the fail path
+            self._fail(exc, ())
 
     def _fire_due(self, heap: list[_Due]) -> datetime | None:
         """Create the runs of every firing due now; return the latest instant handled."""
@@ -158,19 +189,26 @@ class Engine(RunCreation, AttemptRunner):
 
     def _pump(self) -> None:
         """Start every queued run that fits, best first."""
-        if self._stopping:
-            return
-        force = frozenset(self._force)
-        for queued in self.ready.take_startable(self.admission, force=force):
-            self._force.discard(queued.run_id)
-            current = self.book.get(queued.run_id)
-            if current is None or current.state is not RunState.QUEUED:
-                self._release(queued.run_id)
-                continue
-            self._start_attempt(current)
+        freed = True
+        while freed and not self._stopping:  # go again if a slot was handed straight back
+            freed = False
+            force = frozenset(self._force)
+            for queued in self.ready.take_startable(self.admission, force=force):
+                self._force.discard(queued.run_id)
+                self._held.add(queued.run_id)
+                current = self.book.get(queued.run_id)
+                if current is None or current.state is not RunState.QUEUED:
+                    self._release(queued.run_id)
+                    freed = True
+                elif not self._start_attempt(current):
+                    freed = True
 
 
 async def _quietly(task: Task[None]) -> None:
-    """Wait for ``task`` to end, ignoring its cancellation (its errors were logged)."""
-    with contextlib.suppress(Cancelled):
+    """Wait for ``task`` to end, ignoring its cancellation and logging any error."""
+    try:
         await task
+    except Cancelled:
+        pass
+    except Exception:  # noqa: BLE001 -- logged; stop must finish
+        logger.exception("engine task %s failed", task.get_name())

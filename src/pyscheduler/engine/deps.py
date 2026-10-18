@@ -58,12 +58,13 @@ def evaluate(job: JobDef, run_date: date, calendar: BusinessCalendar, book: RunB
 def _check(dep: Dependency, upstream_date: date, book: RunBook) -> DepResult:
     """Judge one dependency against the latest upstream run for ``upstream_date``."""
     upstream = book.latest_for(dep.job, upstream_date)
-    if upstream is None or not upstream.is_final:
-        state = upstream.state.value if upstream else "no run yet"
-        return DepResult(
-            Verdict.WAIT, f"waiting for {dep.job} ({upstream_date.isoformat()}): {state}"
-        )
     label = f"{dep.job} ({upstream_date.isoformat()})"
+    if upstream is None:
+        return DepResult(Verdict.WAIT, f"waiting for {label}: no run yet")
+    if not upstream.is_final:
+        # No upstream state in the text: it changes often (queued, running,
+        # retry_wait) and every change would mean rewriting each waiting run.
+        return DepResult(Verdict.WAIT, f"waiting for {label}")
     state = upstream.state
     if dep.on is DepOn.SUCCESS and state in _BAD_ON_SUCCESS:
         return DepResult(Verdict.BLOCK, f"blocked: {label} {state.value}")

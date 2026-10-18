@@ -65,15 +65,16 @@ def classify(result: AttemptResult, *, timed_out: bool, killed: bool) -> tuple[O
 class AttemptRunner(EngineBase):
     """Start attempts, arm their timeouts, and turn their endings into run states."""
 
-    def _start_attempt(self, run: Run) -> None:
+    def _start_attempt(self, run: Run) -> bool:
         """Mark ``run`` running (in memory now), then commit and launch it in a task.
 
-        The slots were already acquired by the ready queue.
+        The slots were already acquired by the ready queue. Return False
+        (with the slots given back) if the run's job is gone.
         """
         job = self.config.jobs.get(run.job)
         if job is None:  # removed by a reload while queued: nothing to start
             self._release(run.run_id)
-            return
+            return False
         now = self.clock.now()
         number = run.attempt + 1
         running = replace(
@@ -109,6 +110,7 @@ class AttemptRunner(EngineBase):
         self.book.put(running)
         task = self._spawn(self._attempt(running, row, spec, error), f"attempt-{run.run_id}")
         self._attempt_tasks[run.run_id] = task
+        return True
 
     def _status_path(self, run_id: str, attempt: int) -> Path:
         """Return where the minder writes the status note of this attempt."""
@@ -158,6 +160,11 @@ class AttemptRunner(EngineBase):
         self, running: Run, row: Attempt, spec: LaunchSpec | None, error: str | None
     ) -> None:
         """Commit ``running``, launch, commit the pid, wait, then record the ending."""
+        if self.book.get(running.run_id) is not running:  # changed before our turn came
+            self._attempt_tasks.pop(running.run_id, None)
+            self._release(running.run_id)
+            self._pump()
+            return
         started = self._event(running.run_id, "attempt_started", attempt=row.attempt)
         await self._transition([running], attempts=[row], events=[started])
         handle: AttemptHandle | None = None
@@ -201,9 +208,9 @@ class AttemptRunner(EngineBase):
             """Ask the attempt to stop, and plan the kill."""
             watch.timed_out = True
             handle.terminate()
-            watch.kill = self.clock.call_at(self.clock.now() + grace, handle.kill)
+            watch.kill = self.clock.call_at(self.clock.now() + grace, self._guard(handle.kill))
 
-        watch.term = self.clock.call_at(self.clock.now() + job.timeout, ring)
+        watch.term = self.clock.call_at(self.clock.now() + job.timeout, self._guard(ring))
         return watch
 
     async def _finish(self, row: Attempt, result: AttemptResult, watch: _Watch) -> None:
@@ -243,7 +250,8 @@ class AttemptRunner(EngineBase):
             await self._transition([waiting], attempts=[ended], events=events)
             self._release(run_id)
             if not self._stopping:
-                self._retry_timers[run_id] = self.clock.call_at(when, lambda: self._retry(run_id))
+                retry = self._guard(lambda: self._retry(run_id))
+                self._retry_timers[run_id] = self.clock.call_at(when, retry)
             self._pump()
             return
         state = RunState.SUCCEEDED if outcome is Outcome.SUCCEEDED else RunState.FAILED
@@ -254,10 +262,6 @@ class AttemptRunner(EngineBase):
         self._reevaluate([run.job])
         await self._flush()
 
-    def _release(self, run_id: str) -> None:
-        """Give back the slots ``run_id`` held."""
-        self.admission.release(self._needs.pop(run_id, {}))
-
     def _retry(self, run_id: str) -> None:
         """Queue a run whose retry wait is over (if it is still waiting)."""
         self._retry_timers.pop(run_id, None)
@@ -265,4 +269,4 @@ class AttemptRunner(EngineBase):
         job = self.config.jobs.get(run.job) if run else None
         if run is None or job is None or run.state is not RunState.RETRY_WAIT:
             return
-        self._queue(run, job)
+        self._reevaluate(self._ready(run, job))

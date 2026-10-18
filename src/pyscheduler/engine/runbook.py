@@ -97,6 +97,16 @@ class RunBook:
         best = max(ids, key=lambda run_id: (self._runs[run_id].scheduled_at, run_id))
         return self._runs[best]
 
+    def overlap_waiters(self, job: str, run_date: date) -> list[Run]:
+        """Return every run of ``job`` for ``run_date`` waiting for its job's previous run."""
+        return self._ordered(self._overlap.get((job, run_date), ()))
+
+    def forget(self, run_id: str) -> None:
+        """Drop ``run_id`` from the current runs (its published copy, if any, is kept)."""
+        run = self._runs.pop(run_id, None)
+        if run is not None:
+            self._unindex(run)
+
     def next_seq(self, job: str, run_date: date) -> int:
         """Return the next unused sequence number for ``job`` on ``run_date``."""
         return self._max_seq.get((job, run_date), 0) + 1

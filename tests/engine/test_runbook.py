@@ -220,6 +220,23 @@ class TestRunBook:
         book.put(replace(mine, state=RunState.FAILED))
         assert book.open_for("a") == []
 
+    def test_overlap_waiters_and_forget(self) -> None:
+        """List every overlap waiter of a slot, and forget a run entirely."""
+        book = RunBook()
+        first = make_run(state=RunState.WAITING, reason=OVERLAP_REASON)
+        second = make_run(
+            seq=2, state=RunState.WAITING, reason=OVERLAP_REASON, trigger=Trigger.MANUAL
+        )
+        book.put(first)
+        book.put(second)
+        assert book.overlap_waiters("a", DAY) == [first, second]
+        book.publish(first)
+        book.forget(first.run_id)
+        book.forget("nobody")
+        assert book.get(first.run_id) is None
+        assert book.overlap_waiters("a", DAY) == [second]
+        assert book.published(first.run_id) == first
+
     def test_reopened_run_returns_to_indexes(self) -> None:
         """A final run reopened comes back to open, active and overlap views."""
         book = RunBook()
