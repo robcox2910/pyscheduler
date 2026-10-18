@@ -95,6 +95,7 @@ class Engine(Recovery):
         self._watch_size = config.settings.watch_limit
         self.watch_limit = Semaphore(self._watch_size)
         self._files = {}
+        self._dropped = {}
         self.last_active = None
         self.watch_reloads(self._resize_watch_limit)
 

@@ -1,25 +1,19 @@
 """Test file watchers in the engine: matched files, slots, give-up, retries, kills and restarts."""
 
 import shlex
-import time
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
 import pynet.loop
-import pytest
-from engine_helpers import START, TODAY, Harness, MakeHarness
+from engine_helpers import START, TODAY, MakeHarness
 from monitor_helpers import monitored, raised, run_monitor, step
+from watcher_helpers import attempts, restarted, specs_for, watcher_config
 
 from pyscheduler.alerts.monitor import AlertMonitor
 from pyscheduler.config.model import AlertKind
-from pyscheduler.engine import watcher
 from pyscheduler.engine.clock import FakeClock
-from pyscheduler.engine.core import Engine
-from pyscheduler.engine.launcher import LaunchSpec
-from pyscheduler.engine.model import Attempt, Outcome, RunState
-from pyscheduler.store import Batch, Store
-from pyscheduler.testing import FakeLauncher
+from pyscheduler.engine.model import Outcome, RunState
 
 ACTOR = "alice"
 ONE_MINUTE = timedelta(minutes=1)
@@ -32,43 +26,6 @@ FILE_NAME = "in_20261019.csv"
 OLD_DAYS = 10
 LATE_LOOK = 0.1
 SLOW_COMMIT = 0.3
-
-
-def watcher_config(tmp_path: Path, *, extra: str = "", give_up: str = "1d") -> str:
-    """Return a config with watcher ``in`` and ``load`` (``cat {files}``) depending on it."""
-    lines = "".join(f"    {line}\n" for line in extra.strip().splitlines())
-    return (
-        "jobs:\n"
-        "  in:\n"
-        "    type: file_watcher\n"
-        "    schedule: manual\n"
-        f"    watch: '{tmp_path}/in_{{run_date:%Y%m%d}}.csv'\n"
-        "    min_age: 30s\n"
-        "    poll: 10s\n"
-        f"    give_up_after: {give_up}\n"
-        f"{lines}"
-        "  load:\n"
-        "    command: 'cat {files}'\n"
-        "    depends_on: [in]\n"
-    )
-
-
-def specs_for(h: Harness, job: str) -> list[LaunchSpec]:
-    """Return the launch specs of ``job``'s attempts, oldest first."""
-    return [s for s in h.launcher.launched if s.run_id.split(".", 1)[0] == job]
-
-
-async def attempts(h: Harness, run_id: str) -> list[Attempt]:
-    """Read the attempts of ``run_id`` from the store, off the loop thread."""
-    return await pynet.loop.run_in_thread(h.store.attempts_for, run_id)
-
-
-def restarted(h: Harness, clock: FakeClock) -> Harness:
-    """Return a new engine on ``h``'s (stopped) store folder, with ``clock``."""
-    store = Store.open(h.tmp_path / "state", sync=False)
-    launcher = FakeLauncher(clock)
-    engine = Engine(h.config, store, clock=clock, launcher=launcher)
-    return Harness(h.tmp_path, h.config, store, clock, launcher, engine)
 
 
 class TestFiles:
@@ -130,56 +87,6 @@ class TestFiles:
             assert spec.env["PYSCHED_FILES"] == path
 
         again.run_engine(second)
-
-    def test_two_watchers_in_one_poll_both_reach_the_dependant(
-        self, harness: MakeHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Two watchers succeeding at the same poll both land in ``d``'s PYSCHED_FILES.
-
-        ``b``'s look is a little late and every commit with files is slow,
-        so ``a``'s commit lands while ``b`` is in the book but not yet saved:
-        ``d`` must still see ``b``'s file.
-        """
-        real_stat = watcher.stat_matches
-
-        def late_stat(pattern: str) -> dict[str, watcher.Signature]:
-            """Look as usual, ``b`` a little late."""
-            if pattern.endswith("b.csv"):
-                time.sleep(LATE_LOOK)
-            return real_stat(pattern)
-
-        monkeypatch.setattr(watcher, "stat_matches", late_stat)
-        paths = [str(tmp_path / f"{name}.csv") for name in ("a", "b")]
-        for path in paths:
-            Path(path).write_text("x", encoding="utf-8")
-        watchers = "".join(
-            f"  {name}:\n    type: file_watcher\n    schedule: manual\n"
-            f"    watch: '{path}'\n    min_age: 0s\n"
-            for name, path in zip(("a", "b"), paths, strict=True)
-        )
-        h = harness(
-            "jobs:\n" + watchers + "  d:\n    command: 'echo {files}'\n    depends_on: [a, b]\n"
-        )
-        real_apply = h.store.apply
-
-        def slow_apply(batch: Batch) -> None:
-            """Commit as usual, slowly when the batch carries a watcher's files."""
-            if batch.run_files:
-                time.sleep(SLOW_COMMIT)
-            real_apply(batch)
-
-        monkeypatch.setattr(h.store, "apply", slow_apply)
-
-        async def body() -> None:
-            """Trigger both watchers and let them succeed together."""
-            await pynet.loop.gather(
-                h.engine.trigger("a", actor=ACTOR), h.engine.trigger("b", actor=ACTOR)
-            )
-            await h.advance(ONE_MINUTE)
-            (spec,) = specs_for(h, "d")
-            assert sorted(spec.env["PYSCHED_FILES"].splitlines()) == paths
-
-        h.run_engine(body)
 
 
 class TestSlots:

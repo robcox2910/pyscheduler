@@ -15,13 +15,12 @@ for it (see ``watch_runs``), and its found files go in the final commit.
 """
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from pyscheduler.config import JobDef
 from pyscheduler.engine.base import EngineFailedError
-from pyscheduler.engine.clock import Cancel
 from pyscheduler.engine.launcher import (
     CANCELLED_MESSAGE,
     AttemptHandle,
@@ -29,7 +28,8 @@ from pyscheduler.engine.launcher import (
     LaunchSpec,
 )
 from pyscheduler.engine.model import Attempt, Outcome, Run, RunState
-from pyscheduler.engine.watch_runs import WatchRuns, give_up_reason
+from pyscheduler.engine.outcomes import LOST, Watch, classify
+from pyscheduler.engine.watch_runs import WatchRuns
 from pyscheduler.engine.watcher import WatcherHandle
 from pyscheduler.templates import render
 
@@ -41,66 +41,7 @@ MERGED = "stdout"
 
 _NO_RETRY = frozenset({Outcome.SUCCEEDED, Outcome.KILLED})
 
-
-LOST = "lost"
-"""The reason on an attempt whose process vanished without leaving a status note."""
-
-
-@dataclass
-class Watch:
-    """The timers and flags of one running attempt.
-
-    Attributes:
-        timed_out: The timeout rang (the attempt was asked to stop).
-        lost: The process vanished without a status note (found by recovery).
-        term: The timer that rings the timeout.
-        kill: The timer that sends SIGKILL after the grace.
-        files: The files a watcher attempt found (``()`` for others).
-        why: The reason to show for a timeout instead of ``"timeout"``.
-
-    """
-
-    timed_out: bool = False
-    lost: bool = False
-    term: Cancel | None = None
-    kill: Cancel | None = None
-    files: tuple[str, ...] = ()
-    why: str = ""
-
-    def note(self, handle: AttemptHandle) -> None:
-        """Take what a watcher found, or that it gave up, from its ended ``handle``."""
-        if isinstance(handle, WatcherHandle):
-            self.files = handle.files
-            if handle.gave_up:
-                self.timed_out = True
-                self.why = give_up_reason(handle)
-
-    def cancel(self) -> None:
-        """Call off both timers."""
-        for timer in (self.term, self.kill):
-            if timer is not None:
-                timer.cancel()
-
-
-def classify(
-    result: AttemptResult, *, timed_out: bool, killed: bool, lost: bool = False
-) -> tuple[Outcome, str]:
-    """Return the outcome of an attempt and the reason to show for it.
-
-    A ``lost`` attempt (no status note, process gone) is ``lost`` unless
-    it was being timed out or killed, which explains its end better.
-    """
-    if result.start_error is not None:
-        return Outcome.START_ERROR, f"start error: {result.start_error}"
-    if result.succeeded:
-        return Outcome.SUCCEEDED, ""
-    flags = ((timed_out, Outcome.TIMEOUT, "timeout"), (killed, Outcome.KILLED, "killed"))
-    for flag, outcome, reason in (*flags, (lost, Outcome.LOST, LOST)):
-        if flag:
-            return outcome, reason
-    if result.signal is not None:
-        return Outcome.FAILED, f"signal {result.signal}"
-    return Outcome.FAILED, f"exit {result.exit_code}"
+__all__ = ["LOST", "MERGED", "SHELL", "AttemptRunner", "Watch", "classify"]
 
 
 def _log_paths(spec: LaunchSpec | WatcherHandle | None) -> tuple[str, str]:
@@ -307,6 +248,7 @@ class AttemptRunner(WatchRuns):
         The run's lock is held across the commit, so no operator action
         sees the run halfway. A killed attempt never retries, and neither
         does one whose job was removed or disabled by a reload while it ran.
+        A watcher a reload stopped (see ``reload``) ends its run cancelled.
         """
         run_id = row.run_id
         async with self._run_lock(run_id):
@@ -335,6 +277,11 @@ class AttemptRunner(WatchRuns):
             reason = f"killed by {actor}"
         if outcome is Outcome.TIMEOUT and watch.why:
             reason = watch.why
+        dropped = self._dropped.pop(run_id, None)  # a reload stopped this watcher
+        if dropped is not None and outcome is not Outcome.SUCCEEDED:
+            reason = dropped
+        else:
+            dropped = None
         now = self.clock.now()
         ended = replace(
             row,
@@ -356,7 +303,7 @@ class AttemptRunner(WatchRuns):
         tries = run.attempt - run.rerun
         count = job.retries.count if job is not None and job.enabled else 0
         cancelled = result.start_error == CANCELLED_MESSAGE  # the scheduler is stopping
-        retry = outcome not in _NO_RETRY and not killed and not cancelled
+        retry = outcome not in _NO_RETRY and not (killed or cancelled or dropped)
         if retry and tries <= count and job is not None:
             when = now + job.retries.delay_for(tries)
             waiting = self._changed(
@@ -370,6 +317,7 @@ class AttemptRunner(WatchRuns):
                 self._retry_timers[run_id] = self.clock.call_at(when, retry)
             return None
         state = RunState.SUCCEEDED if outcome is Outcome.SUCCEEDED else RunState.FAILED
+        state = RunState.CANCELLED if dropped else state
         final = self._changed(run, state, reason)
         events.append(self._event(run_id, "finished", state=state.value, reason=reason))
         files = {run_id: watch.files} if watch.files and state is RunState.SUCCEEDED else {}

@@ -327,6 +327,9 @@ def build_job(r: Reader, name: str, f: JobFields, source: SourceRef, zone: ZoneI
     schedules, manual = f.schedule or ((), False)
     watcher = f.type is JobKind.FILE_WATCHER
     calendar = None if f.calendar in {None, NO_CALENDAR} else f.calendar
+    watch = build_watch(f.watch, f.min_age, f.poll, f.give_up_after) if watcher else None
+    if watch is not None and watch.min_age > watch.give_up_after:
+        r.add(source.line, "min_age must not be longer than give_up_after")
     return JobDef(
         name=name,
         command=() if watcher else f.command or "",
@@ -358,5 +361,5 @@ def build_job(r: Reader, name: str, f: JobFields, source: SourceRef, zone: ZoneI
         enabled=True if f.enabled is None else f.enabled,
         source=source,
         kind=JobKind.FILE_WATCHER if watcher else JobKind.COMMAND,
-        watch=build_watch(f.watch, f.min_age, f.poll, f.give_up_after) if watcher else None,
+        watch=watch,
     )

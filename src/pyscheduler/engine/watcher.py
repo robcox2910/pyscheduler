@@ -17,7 +17,7 @@ import os
 import signal
 import stat
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pynet.loop
@@ -31,12 +31,18 @@ __all__ = ["WatcherHandle", "stat_matches"]
 
 logger = logging.getLogger("pyscheduler.engine.watcher")
 
-type Signature = tuple[int, int]
-"""A file's ``(size, mtime_ns)``: if it is unchanged the file is still."""
+NANOSECONDS = 1_000_000_000
+"""Nanoseconds in a second (``st_mtime_ns`` counts in them)."""
+
+type Signature = tuple[int, int, int]
+"""A file's ``(size, mtime_ns, inode)``: if it is unchanged the file is still.
+
+The inode catches a file swapped for another of the same size and time.
+"""
 
 
 def stat_matches(pattern: str) -> dict[str, Signature]:
-    """Map each regular file matching ``pattern`` to its ``(size, mtime_ns)``.
+    """Map each regular file matching ``pattern`` to its ``(size, mtime_ns, inode)``.
 
     This blocks, so call it on a helper thread. Directories are ignored and
     files that vanish between the glob and the stat are skipped.
@@ -48,8 +54,14 @@ def stat_matches(pattern: str) -> dict[str, Signature]:
         except OSError:
             continue
         if stat.S_ISREG(info.st_mode):
-            found[path] = (info.st_size, info.st_mtime_ns)
+            found[path] = (info.st_size, info.st_mtime_ns, info.st_ino)
     return found
+
+
+def _modified(sig: Signature, now: datetime) -> datetime:
+    """Return when the file of ``sig`` last changed, as UTC (never later than ``now``)."""
+    changed = datetime.fromtimestamp(sig[1] / NANOSECONDS, tz=UTC)
+    return min(changed, now)
 
 
 def _append(path: Path, text: str) -> None:
@@ -72,6 +84,9 @@ class WatcherHandle:
         busy: Called with ``+1`` when a look at the disk begins and ``-1``
             when it is over (the watcher sleeps or ends), so the engine
             can tell when it is quiet.
+        resumed: Whether this attempt was polling before a restart. Its
+            first look then counts each match as still since its
+            modification time: nobody was watching meanwhile.
 
     Attributes:
         files: The stable matches, sorted; set when the watch succeeds.
@@ -89,6 +104,7 @@ class WatcherHandle:
         limit: Semaphore,
         log_path: Path,
         busy: Callable[[int], None] | None = None,
+        resumed: bool = False,
     ) -> None:
         """Remember what to watch; polling starts when ``wait`` is called."""
         self._pattern = pattern
@@ -98,6 +114,7 @@ class WatcherHandle:
         self._limit = limit
         self._log_path = log_path
         self._busy = busy
+        self._resumed = resumed
         self._looking = False
         self._task: Task[AttemptResult] | None = None
         self._stopped = False
@@ -170,10 +187,17 @@ class WatcherHandle:
             self._look(looking=False)
 
     async def _polls(self) -> AttemptResult:
-        """Run the polls for ``_poll`` (which tells ``busy`` when they start and end)."""
+        """Run the polls for ``_poll`` (which tells ``busy`` when they start and end).
+
+        A file counts as stable once it has been still for ``min_age`` by
+        the time of the look, or, for a watcher resumed after its deadline,
+        by the deadline itself (a file that came later came too late).
+        """
         deadline = self._started_at + self._spec.give_up_after
+        min_age = self._spec.min_age
         first_seen: dict[str, tuple[Signature, datetime]] = {}
         last: dict[str, Signature] = {}
+        resumed = self._resumed
         while True:
             async with self._limit:
                 matches = await pynet.loop.run_in_thread(stat_matches, self._pattern)
@@ -181,11 +205,13 @@ class WatcherHandle:
             first_seen = {
                 path: first_seen[path]
                 if path in first_seen and first_seen[path][0] == sig
-                else (sig, now)
+                else (sig, _modified(sig, now) if resumed else now)
                 for path, sig in matches.items()
             }
+            resumed = False
+            cutoff = min(now, deadline)
             stable = sorted(
-                path for path, (_, since) in first_seen.items() if now - since >= self._spec.min_age
+                path for path, (_, since) in first_seen.items() if cutoff - since >= min_age
             )
             lines = [f"{now:%H:%M:%S} {len(matches)} match(es)\n"] if matches != last else []
             last = matches

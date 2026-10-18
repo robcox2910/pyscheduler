@@ -46,6 +46,8 @@ class WatchRuns(EngineBase):
     """The files each succeeded watcher run found, by run id (set up by ``Engine``)."""
     _watch_size: int
     """The size ``watch_limit`` was built with (set up by ``Engine``)."""
+    _dropped: dict[str, str]
+    """Watcher runs a reload stopped, with the reason their run is cancelled (set up by ``Engine``)."""
 
     def files_for(self, run_id: str) -> tuple[str, ...]:
         """Return the files the watcher run ``run_id`` found, or ``()`` if none are known."""
@@ -97,9 +99,18 @@ class WatchRuns(EngineBase):
         return Path(render(DEFAULT_STDOUT, self._values(run, job)))
 
     def _watcher(
-        self, run: Run, job: JobDef, watch: WatchSpec, started_at: datetime, log: Path
+        self,
+        run: Run,
+        job: JobDef,
+        watch: WatchSpec,
+        started_at: datetime,
+        log: Path,
+        *,
+        resumed: bool = False,
     ) -> WatcherHandle:
         """Build the watcher of ``run``'s attempt (``job``'s ``watch``), timed from ``started_at``.
+
+        ``resumed`` marks an attempt picked up again after a restart.
 
         Raises:
             KeyError: If the ``watch`` pattern names an unknown value.
@@ -114,6 +125,7 @@ class WatchRuns(EngineBase):
             limit=self.watch_limit,
             log_path=log,
             busy=self._poll_busy,
+            resumed=resumed,
         )
 
     def _fail(self, exc: BaseException, run_ids: Iterable[str]) -> None:

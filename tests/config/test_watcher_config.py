@@ -121,6 +121,10 @@ class TestErrors:
             (_watcher("    watch: /x\n    poll: 0s\n"), "must be greater than zero"),
             (_watcher("    watch: /x\n    give_up_after: 0s\n"), "must be greater than zero"),
             (
+                _watcher("    watch: /x\n    min_age: 2h\n    give_up_after: 1h\n"),
+                "min_age must not be longer than give_up_after",
+            ),
+            (
                 "defaults: {type: file_watcher}\n" + _watcher("    watch: /x\n"),
                 "type is not allowed",
             ),

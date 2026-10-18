@@ -197,7 +197,8 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
         Its give-up deadline counts from the attempt's first start (ruling P2-R8).
         """
         try:
-            handle = self._watcher(run, job, spec, row.started_at, Path(row.stdout_path))
+            log = Path(row.stdout_path)
+            handle = self._watcher(run, job, spec, row.started_at, log, resumed=True)
         except (KeyError, ValueError) as exc:
             failed = AttemptResult(None, None, None, self.clock.now(), f"bad template: {exc}")
             await self._finish(row, failed, Watch())
