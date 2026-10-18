@@ -25,3 +25,4 @@ something goes wrong.
 - [Runs and States (The Traffic Lights of a Run)](concepts/runs-and-states.md)
 - [Group Commit (One Trip to the Post Box for Many Letters)](concepts/group-commit.md)
 - [Dependencies (You Can't Ice the Cake Before It's Baked)](concepts/dependencies.md)
+- [Pools and Limits (Only Two Kids on the Trampoline)](concepts/pools-and-limits.md)
