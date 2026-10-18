@@ -318,3 +318,53 @@ class TestWatcherHandle:
             assert clock.next_due() is None
 
         run(main)
+
+    def test_terminate_before_wait(self, tmp_path: Path) -> None:
+        """Return SIGTERM at once, with no polling, when stopped before waiting."""
+
+        async def main() -> None:
+            """Stop first, then wait."""
+            clock = FakeClock(START)
+            handle = make(clock, tmp_path, str(tmp_path / "*.csv"))
+            handle.terminate()
+            result = await handle.wait()
+            assert result.signal == signal.SIGTERM
+            assert clock.next_due() is None
+            assert clock.now() == START
+
+        run(main)
+
+    def test_unwritable_log_does_not_stop_the_watch(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Warn and keep polling when the log cannot be written."""
+        (tmp_path / "in.csv").write_text("x")
+        blocker = tmp_path / "logs"
+        blocker.write_text("not a folder")
+
+        async def main() -> None:
+            """Watch with a log path under a plain file."""
+            clock = FakeClock(START)
+            handle = make(clock, tmp_path, str(tmp_path / "*.csv"))
+            task = pynet.loop.spawn(handle.wait())
+            await run_until(clock, [task], START + GIVE_UP)
+            assert (await task).succeeded
+
+        with caplog.at_level("WARNING", logger="pyscheduler.engine.watcher"):
+            run(main)
+        assert "cannot write watcher log" in caplog.text
+
+    def test_file_stable_exactly_at_the_deadline(self, tmp_path: Path) -> None:
+        """Poll once more at the deadline, so min_age == give_up_after still succeeds."""
+        (tmp_path / "in.csv").write_text("x")
+
+        async def main() -> None:
+            """Watch with min_age equal to the give-up time."""
+            clock = FakeClock(START)
+            handle = make(clock, tmp_path, str(tmp_path / "*.csv"), give_up_after=MIN_AGE)
+            task = pynet.loop.spawn(handle.wait())
+            await run_until(clock, [task], START + MIN_AGE)
+            assert (await task).succeeded
+            assert not handle.gave_up
+
+        run(main)

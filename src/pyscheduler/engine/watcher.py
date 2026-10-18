@@ -12,6 +12,7 @@ how many watchers look at the disk at once.
 """
 
 import glob
+import logging
 import os
 import signal
 import stat
@@ -26,6 +27,8 @@ from pyscheduler.engine.clock import Clock
 from pyscheduler.engine.status_note import AttemptResult
 
 __all__ = ["WatcherHandle", "stat_matches"]
+
+logger = logging.getLogger("pyscheduler.engine.watcher")
 
 type Signature = tuple[int, int]
 """A file's ``(size, mtime_ns)``: if it is unchanged the file is still."""
@@ -105,6 +108,8 @@ class WatcherHandle:
 
     async def wait(self) -> AttemptResult:
         """Poll until a file is stable, the deadline passes, or the watch is stopped."""
+        if self._stopped:
+            return self._result(exit_code=None, sig=signal.SIGTERM)
         if self._task is None:
             self._task = pynet.loop.spawn(self._poll(), name="watcher-poll")
         try:
@@ -126,8 +131,11 @@ class WatcherHandle:
         self.terminate()
 
     async def _write(self, text: str) -> None:
-        """Append ``text`` to the log on a helper thread."""
-        await pynet.loop.run_in_thread(_append, self._log_path, text)
+        """Append ``text`` to the log on a helper thread; a failing log never stops the watch."""
+        try:
+            await pynet.loop.run_in_thread(_append, self._log_path, text)
+        except OSError:
+            logger.warning("cannot write watcher log %s", self._log_path, exc_info=True)
 
     async def _poll(self) -> AttemptResult:
         """Look every ``poll`` until success or the deadline; return how it ended."""
@@ -159,7 +167,5 @@ class WatcherHandle:
             if now >= deadline:
                 break
             await self._clock.sleep_until(min(now + self._spec.poll, deadline))
-            if self._clock.now() >= deadline:
-                break
         self.gave_up = True
         return self._result(exit_code=None, sig=None)
