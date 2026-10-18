@@ -208,6 +208,8 @@ class TestForecast:
 HIDDEN_VALUE = "s3cr3t-value"
 SHORT = "abc"
 HIDDEN_JOBS = """
+notifiers:
+  ops: {type: log, path: "alerts/${SECRET}.log"}
 jobs:
   s:
     command: run-s --password ${SECRET} --user ${SHORT}
@@ -215,7 +217,7 @@ jobs:
     description: uses ${SECRET}
     schedule: manual
     env: {PW: "${SECRET}"}
-    alerts: {webhook: "https://hooks/${SECRET}", to: [ops]}
+    alerts: {on: [retrying], off: [too_short, failed], notify: [ops]}
 """
 
 
@@ -242,7 +244,11 @@ class TestSecrets:
             assert definition["description"] == "uses ${SECRET}"
             assert definition["env"] == {"PW": "***"}
             if headers is OPERATOR:
-                assert definition["alerts"] == {"webhook": "https://hooks/${SECRET}", "to": ["ops"]}
+                assert definition["alerts"] == {
+                    "on": ["retrying"],
+                    "off": ["failed", "too_short"],
+                    "notify": ["ops"],
+                }
             else:
                 assert definition["alerts"] == "***"
 

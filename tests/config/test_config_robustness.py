@@ -5,7 +5,7 @@ from collections.abc import Callable
 from datetime import time
 from pathlib import Path
 
-from pyscheduler.config import Problem, build_config
+from pyscheduler.config import AlertKind, JobAlerts, Problem, build_config
 
 type WriteYaml = Callable[[str, str], Path]
 
@@ -44,7 +44,7 @@ class TestNestedDefaults:
             defaults:
               env: {A: "1", B: "2"}
               pools: {db: 1, cpu: 1}
-              alerts: {on: [failure], email: {to: ops, cc: boss}}
+              alerts: {on: [retrying], notify: [a]}
             """).lstrip() + _job(
             "j",
             """
@@ -52,7 +52,7 @@ class TestNestedDefaults:
             schedule: manual
             env: {B: "3"}
             pools: {db: 2}
-            alerts: {email: {to: me}}
+            alerts: {off: [failed], notify: [b]}
             """,
         )
         config, problems = build_config(write_yaml("s.yaml", text), env={})
@@ -60,7 +60,9 @@ class TestNestedDefaults:
         job = config.jobs["j"]
         assert job.env == {"A": "1", "B": "3"}
         assert job.pools == {"db": POOL_SLOTS, "cpu": 1}
-        assert job.alerts == {"on": ["failure"], "email": {"to": "me", "cc": "boss"}}
+        assert job.alerts == JobAlerts(
+            on=frozenset({AlertKind.RETRYING}), off=frozenset({AlertKind.FAILED}), notify=("b",)
+        )
 
 
 class TestNoCrashes:

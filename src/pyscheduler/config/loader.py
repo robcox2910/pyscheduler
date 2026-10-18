@@ -16,6 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pyscheduler.calendars import BusinessCalendar, merge_calendars
+from pyscheduler.config.alert_fields import read_notifiers, read_routes
 from pyscheduler.config.calendar_fields import RawCalendar, reachable, read_calendar
 from pyscheduler.config.calendar_inheritance import resolve_calendars
 from pyscheduler.config.fields import (
@@ -30,18 +31,30 @@ from pyscheduler.config.fields import (
     read_zone,
 )
 from pyscheduler.config.job_fields import JobFields, build_job, merge_fields, read_job_fields
-from pyscheduler.config.model import Config, ConfigError, JobDef, Problem, Settings, SourceRef
+from pyscheduler.config.model import (
+    Config,
+    ConfigError,
+    JobDef,
+    NotifierDef,
+    Problem,
+    Route,
+    Settings,
+    SourceRef,
+)
 from pyscheduler.config.redaction import redactor
 from pyscheduler.config.validate import validate_config
 from pyscheduler.values import check_name
 from pyscheduler.yamlish import Map, Node, YamlError, parse
 
-MAIN_KEYS = ("scheduler", "include", "calendars", "pools", "defaults", "jobs")
+MAIN_KEYS = (
+    "scheduler", "include", "calendars", "pools", "defaults", "jobs", "notifiers", "routes",
+)  # fmt: skip
 INCLUDED_KEYS = ("include", "calendars", "pools", "jobs")
 SCHEDULER_KEYS = (
     "name", "timezone", "state_dir", "log_dir", "max_running", "listen",
     "api_tokens_file", "kill_grace", "retention", "memory_days",
 )  # fmt: skip
+RESERVED_JOB = "_scheduler"
 GLOB_CHARS = frozenset("*?[")
 _PORT = re.compile(r"\d{1,5}", re.ASCII)
 MAX_PORT = 65535
@@ -137,12 +150,29 @@ class _Loader:
                     out.append((r, mapping))
         return out
 
+    def main_node(self, key: str) -> Node | None:
+        """Return the node for ``key`` in the main file only."""
+        if not self.docs or self.docs[0].path != self.main:
+            return None
+        return self.docs[0].root.items.get(key)
+
     def main_section(self, key: str) -> tuple[Reader, Map] | None:
         """Return the reader and mapping for ``key`` in the main file only."""
-        if not self.docs or self.docs[0].path != self.main or key not in self.docs[0].root.items:
+        node = self.main_node(key)
+        if node is None:
             return None
-        mapping = read_map(self.r, self.docs[0].root.items[key], key)
+        mapping = read_map(self.r, node, key)
         return None if mapping is None else (self.r, mapping)
+
+    def notifiers(self) -> dict[str, NotifierDef]:
+        """Read the ``notifiers:`` section."""
+        found = self.main_section("notifiers")
+        return {} if found is None else read_notifiers(*found)
+
+    def routes(self) -> tuple[Route, ...]:
+        """Read the ``routes:`` list."""
+        node = self.main_node("routes")
+        return () if node is None else read_routes(self.r, node)
 
     # --- sections ------------------------------------------------------
 
@@ -210,7 +240,7 @@ class _Loader:
                 fields = merge_fields(defaults, own)
                 if fields.command is None and "command" not in mapping.items.keys() | suggested:
                     jr.add(line, "missing required key 'command'")
-                jobs[name] = build_job(name, fields, SourceRef(r.file, line), zone)
+                jobs[name] = build_job(jr, name, fields, SourceRef(r.file, line), zone)
         return jobs
 
 
@@ -223,6 +253,8 @@ def _named(r: Reader, name: str, line: int, first: SourceRef | None, kind: str) 
         check_name(name)
     except ValueError as exc:
         r.add(line, str(exc))
+    if kind == "job" and name == RESERVED_JOB:
+        r.add(line, f"job name {name!r} is reserved")
     if first is None:
         return True
     r.add(line, f"duplicate {kind} {name!r}: first defined at {first.file}:{first.line}")
@@ -328,6 +360,8 @@ def build_config(
     calendars, raw = loader.calendars()
     pools = loader.pools()
     jobs = loader.jobs(settings.timezone)
+    notifiers = loader.notifiers()
+    routes = loader.routes()
     order = {name: i for i, name in enumerate(loader.sources)}
     expansions = {value: name for name, value in loader.env.used.items()}
     problems = sorted(
@@ -346,6 +380,8 @@ def build_config(
         calendar_sources={n: c.source for n, c in raw.items()},
         effective_calendars=resolve_calendars(jobs).effective,
         expansions=expansions,
+        notifiers=notifiers,
+        routes=routes,
     )
     return config, problems
 

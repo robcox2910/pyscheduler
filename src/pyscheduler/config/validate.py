@@ -24,6 +24,7 @@ from pyscheduler.config.run_dates import (
     WAIT_HORIZON_DAYS,
     RunDateIndex,
 )
+from pyscheduler.config.validate_alerts import check_alerts
 from pyscheduler.schedule.firings import next_firing
 from pyscheduler.schedule.specs import BusinessDaySchedule
 from pyscheduler.templates import PLACEHOLDERS, placeholders_in
@@ -130,6 +131,7 @@ class _Checker:
         """Run every check and return the problems found."""
         self.check_calendars()
         self.check_cycles()
+        check_alerts(self, self.config)
         for job in self.config.jobs.values():
             if job.name in self.broken:
                 continue

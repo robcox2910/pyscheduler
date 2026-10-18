@@ -20,17 +20,23 @@ from pyscheduler.schedule.firings import RunDateRule
 from pyscheduler.schedule.specs import Schedule
 
 __all__ = [
+    "DEFAULT_OFF",
+    "AlertKind",
     "CatchUp",
     "Config",
     "ConfigError",
     "Criticality",
     "DepOn",
     "Dependency",
+    "JobAlerts",
     "JobDef",
     "MustStartBy",
+    "NotifierDef",
+    "NotifyRetry",
     "Overlap",
     "Problem",
     "RetryPolicy",
+    "Route",
     "RunDateRule",
     "Settings",
     "SourceRef",
@@ -91,6 +97,24 @@ class CatchUp(StrEnum):
     NONE = "none"
 
 
+class AlertKind(StrEnum):
+    """The kinds of thing that can raise an alert."""
+
+    FAILED = "failed"
+    RETRYING = "retrying"
+    NEVER_STARTED = "never_started"
+    TOO_LONG = "too_long"
+    TOO_SHORT = "too_short"
+    LOST = "lost"
+    BLOCKED = "blocked"
+    RELOAD_FAILED = "reload_failed"
+    WATCHER_TIMEOUT = "watcher_timeout"
+
+
+DEFAULT_OFF: frozenset[AlertKind] = frozenset({AlertKind.RETRYING})
+"""The kinds that stay quiet unless a job turns them on."""
+
+
 @dataclass(frozen=True)
 class SourceRef:
     """Where something was written: a file and a 1-based line."""
@@ -138,6 +162,55 @@ class RetryPolicy:
 
 
 @dataclass(frozen=True)
+class NotifyRetry:
+    """How patiently a notifier tries to deliver one alert."""
+
+    count: int = 5
+    delay: timedelta = timedelta(seconds=10)
+    max_delay: timedelta = timedelta(minutes=10)
+
+
+@dataclass(frozen=True)
+class NotifierDef:
+    """One named way of telling people about an alert.
+
+    ``options`` holds every key except ``type``, ``retries`` and
+    ``timeout``, with ``${NAME}`` already expanded.
+    """
+
+    name: str
+    type: str
+    options: Mapping[str, object]
+    retries: NotifyRetry
+    timeout: timedelta
+    source: SourceRef
+
+
+@dataclass(frozen=True)
+class Route:
+    """Send alerts whose topic fits ``match`` to the ``notify`` notifiers."""
+
+    match: str
+    notify: tuple[str, ...]
+    source: SourceRef
+
+
+@dataclass(frozen=True)
+class JobAlerts:
+    """A job's alert settings: kinds forced on or off, and extra notifiers."""
+
+    on: frozenset[AlertKind] = frozenset()
+    off: frozenset[AlertKind] = frozenset()
+    notify: tuple[str, ...] = ()
+
+    def enabled(self, kind: AlertKind) -> bool:
+        """Return whether this job raises alerts of ``kind`` (``on`` wins over ``off``)."""
+        if kind in self.on:
+            return True
+        return kind not in self.off and kind not in DEFAULT_OFF
+
+
+@dataclass(frozen=True)
 class JobDef:
     """One job, exactly as configured, with every default filled in."""
 
@@ -162,7 +235,7 @@ class JobDef:
     min_runtime: timedelta | None
     max_runtime: timedelta | None
     must_start_by: MustStartBy | None
-    alerts: Mapping[str, object]
+    alerts: JobAlerts
     agent: str | None
     agent_tags: tuple[str, ...]
     tags: tuple[str, ...]
@@ -229,7 +302,7 @@ def _frozen[K, V](mapping: Mapping[K, V]) -> Mapping[K, V]:
 
 @dataclass(frozen=True)
 class Config:
-    """A whole loaded config: settings, calendars, pools and jobs.
+    """A whole loaded config: settings, calendars, pools, jobs and alert setup.
 
     The mappings are read-only. ``calendar_includes`` and
     ``calendar_sources`` keep each calendar's raw ``include`` list and
@@ -254,6 +327,8 @@ class Config:
     calendar_sources: Mapping[str, SourceRef] = field(default_factory=dict[str, SourceRef])
     effective_calendars: Mapping[str, str | None] = field(default_factory=dict[str, str | None])
     expansions: Mapping[str, str] = field(default_factory=dict[str, str])
+    notifiers: Mapping[str, NotifierDef] = field(default_factory=dict[str, NotifierDef])
+    routes: tuple[Route, ...] = ()
     _dependents: Mapping[str, frozenset[str]] = field(
         init=False, repr=False, compare=False, default_factory=dict[str, frozenset[str]]
     )
@@ -269,6 +344,7 @@ class Config:
             "calendar_sources",
             "effective_calendars",
             "expansions",
+            "notifiers",
         ):
             object.__setattr__(self, name, _frozen(getattr(self, name)))
         index: dict[str, set[str]] = {}

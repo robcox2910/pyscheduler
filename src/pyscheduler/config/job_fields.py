@@ -15,6 +15,7 @@ from types import MappingProxyType
 from typing import cast
 from zoneinfo import ZoneInfo
 
+from pyscheduler.config.alert_fields import to_job_alerts
 from pyscheduler.config.fields import (
     Reader,
     check_keys,
@@ -187,7 +188,7 @@ def _read_pools(r: Reader, node: Node) -> dict[str, int] | None:
 
 
 def _read_alerts(r: Reader, node: Node) -> dict[str, object] | None:
-    """Read ``alerts`` as plain values (checked in phase 2)."""
+    """Read ``alerts`` as plain values (turned into ``JobAlerts`` by ``build_job``)."""
     if read_map(r, node, "alerts") is None:
         return None
     return cast("dict[str, object]", read_plain(r, node, "alerts"))
@@ -300,10 +301,11 @@ def _retry_policy(given: RetryFields | None) -> RetryPolicy:
     )
 
 
-def build_job(name: str, f: JobFields, source: SourceRef, zone: ZoneInfo) -> JobDef:
+def build_job(r: Reader, name: str, f: JobFields, source: SourceRef, zone: ZoneInfo) -> JobDef:
     """Turn merged fields into a ``JobDef``, filling every gap with its default.
 
     ``zone`` is the scheduler's time zone, used when the job names none.
+    ``r`` collects problems found in the merged ``alerts``.
     """
     schedules, manual = f.schedule or ((), False)
     calendar = None if f.calendar in {None, NO_CALENDAR} else f.calendar
@@ -329,7 +331,7 @@ def build_job(name: str, f: JobFields, source: SourceRef, zone: ZoneInfo) -> Job
         min_runtime=f.min_runtime,
         max_runtime=f.max_runtime,
         must_start_by=f.must_start_by,
-        alerts=MappingProxyType(f.alerts or {}),
+        alerts=to_job_alerts(r, f.alerts, source.line),
         agent=f.agent,
         agent_tags=f.agent_tags or (),
         tags=f.tags or (),
