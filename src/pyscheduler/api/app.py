@@ -79,8 +79,10 @@ def build_app(
 
     """
     from pyscheduler.ui import add_ui  # noqa: PLC0415 - ui imports api, so load it late
+    from pyscheduler.ui.layout import secure_html  # noqa: PLC0415 - as above
 
     app = App()
+    app.middleware(secure_html)  # first, so outermost: pyweb's error pages too
     token_holder = tokens if isinstance(tokens, TokenHolder) else TokenHolder(tokens)
     people = users or UserHolder(None)
     key = session_key

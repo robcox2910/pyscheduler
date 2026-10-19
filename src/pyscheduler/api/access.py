@@ -17,7 +17,7 @@ cookie's ``POST``. Inside it, the access middleware turns pyweb's
   must say it is JSON (415);
 - every other path is the web UI: it needs a users file (403 "the web UI
   needs a users_file" otherwise) and a logged-in caller (401, or a 303
-  to ``/login?next=...`` for a browser), except ``/login`` itself.
+  to ``/login?next=<path and query>`` for a browser), except ``/login`` itself.
 
 With no tokens file and no users file there is no doorman, only a
 **development mode** guard: the ``Host`` must be this machine (every
@@ -26,7 +26,7 @@ be JSON (the cross-site guard when there is no login).
 """
 
 from collections.abc import Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from pyweb.app import App, CallNext, Middleware
 from pyweb.auth import SessionAuth, User
@@ -168,7 +168,9 @@ async def _stranger(request: HttpRequest, call_next: CallNext) -> Outcome:
     if request.path == LOGIN_PATH:
         return await call_next(request)
     if request.wants_html:
-        return redirect(f"{LOGIN_PATH}?next={quote(request.path)}")
+        query = request.query.items()
+        wanted = f"{request.path}?{urlencode(query)}" if query else request.path
+        return redirect(f"{LOGIN_PATH}?next={quote(wanted)}")
     return _unauthorised()
 
 

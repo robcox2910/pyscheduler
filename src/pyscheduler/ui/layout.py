@@ -11,8 +11,9 @@ our own files.
 from collections.abc import Mapping
 from pathlib import Path
 
+from pyweb.app import CallNext
 from pyweb.html import html_template
-from pyweb.messages import HttpRequest, HttpResponse, html
+from pyweb.messages import HTTPError, HttpRequest, HttpResponse, Outcome, html
 
 from pyscheduler.api.access import CSRF_STATE
 from pyscheduler.api.auth import Role, allows
@@ -20,7 +21,15 @@ from pyscheduler.api.support import actor_of, role_of
 from pyscheduler.ui.html import Safe, h
 from pyscheduler.ui.live import LIVE_STATE
 
-__all__ = ["NAV", "SECURITY_HEADERS", "TEMPLATES", "page", "secure", "sign_out_form"]
+__all__ = [
+    "NAV",
+    "SECURITY_HEADERS",
+    "TEMPLATES",
+    "page",
+    "secure",
+    "secure_html",
+    "sign_out_form",
+]
 
 TEMPLATES = Path(__file__).parent / "templates"
 """Where the page shells live (shipped inside the package)."""
@@ -54,6 +63,24 @@ def secure(response: HttpResponse) -> HttpResponse:
         response.headers.set(name, value)
     response.headers.set("Cache-Control", "no-store")
     return response
+
+
+async def secure_html(request: HttpRequest, call_next: CallNext) -> Outcome:
+    """Stamp the security headers on any HTML answer that lacks them (pyweb's error pages).
+
+    Install it outermost, so the 404 for an unknown path, a refused CSRF
+    token (raised as ``HTTPError`` by the session layer), the "needs a
+    users_file" page and the generic 500 are covered as well.
+    """
+    try:
+        outcome = await call_next(request)
+    except HTTPError as exc:
+        outcome = exc.to_response(request)
+    if isinstance(outcome, HttpResponse):
+        kind = (outcome.headers.get("Content-Type") or "").partition(";")[0].strip().lower()
+        if kind == "text/html" and outcome.headers.get("Content-Security-Policy") is None:
+            secure(outcome)
+    return outcome
 
 
 def sign_out_form(csrf: str) -> Safe:
