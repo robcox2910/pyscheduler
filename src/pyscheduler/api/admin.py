@@ -89,7 +89,8 @@ def config_actions(
     ``api_tokens_file`` and swaps it into the holder once the config is
     in. A tokens file that cannot be read, or a change between
     development mode and tokens, fails the whole reload. ``users`` works
-    the same way for the ``users_file``.
+    the same way for the ``users_file``. Each swap tells the holder's
+    watchers (the web UI then ends its open streams).
 
     A reload that comes back with errors (the files, the tokens or the users)
     calls ``on_failed`` with those error problems, whoever asked for it.
@@ -134,9 +135,9 @@ def config_actions(
             return trouble + problems
         await engine.reload(config, actor=actor)
         if tokens is not None:
-            tokens.table = token_table
+            tokens.swap(token_table)
         if users is not None:
-            users.table = user_table
+            users.swap(user_table)
         return problems
 
     async def validate() -> list[Problem]:

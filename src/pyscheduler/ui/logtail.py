@@ -17,12 +17,18 @@ the top.
 
 The file is read on a helper thread every ``LOG_POLL`` seconds, at most
 ``LOG_CHUNK`` bytes at a time. The path on the server never leaves it.
+
+``LogTails.close_all`` ends every open tail at its next look, without
+``end`` (a reload that swaps the users or the tokens does this): the
+browser reconnects, is checked again at the door, and starts the tail
+afresh.
 """
 
 import json
 import logging
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from pynet.loop import run_in_thread, sleep
@@ -36,7 +42,7 @@ from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Attempt
 from pyscheduler.ui.live import EMPTY, KEEPALIVE, LIVE_PATH
 
-__all__ = ["LOG_CHUNK", "LOG_POLL", "add_log_tail", "read_from"]
+__all__ = ["LOG_CHUNK", "LOG_POLL", "LogTails", "TailTicket", "add_log_tail", "read_from"]
 
 logger = logging.getLogger("pyscheduler.ui")
 
@@ -45,6 +51,37 @@ LOG_POLL = 1.0
 
 LOG_CHUNK = 65536
 """The most bytes read from the log file per look (and the longest held-back line)."""
+
+
+@dataclass(eq=False)
+class TailTicket:
+    """One open tail's ticket: ``closed`` once the tail must stop."""
+
+    closed: bool = False
+
+
+class LogTails:
+    """Keep a ticket for every open log tail, so they can all be stopped at once."""
+
+    def __init__(self) -> None:
+        """Start with no tails open."""
+        self._open: set[TailTicket] = set()
+
+    def open(self) -> TailTicket:
+        """Return a new open ticket for a tail that is starting."""
+        ticket = TailTicket()
+        self._open.add(ticket)
+        return ticket
+
+    def release(self, ticket: TailTicket) -> None:
+        """Forget ``ticket`` (its tail has ended)."""
+        self._open.discard(ticket)
+
+    def close_all(self) -> None:
+        """Close every open ticket; each tail stops at its next look."""
+        for ticket in self._open:
+            ticket.closed = True
+        self._open.clear()
 
 
 def read_from(path: Path, offset: int, limit: int) -> tuple[bytes, int, bool]:
@@ -128,8 +165,14 @@ def _unreadable(path: Path, error: OSError) -> ServerEvent:
     return _END
 
 
-async def _tail(engine: Engine, attempt: Attempt, path: Path) -> AsyncIterator[ServerEvent]:
-    """Yield the tail of ``path``, then its new lines, then ``end`` once ``attempt`` is over."""
+async def _tail(
+    engine: Engine, attempt: Attempt, path: Path, tails: LogTails
+) -> AsyncIterator[ServerEvent]:
+    """Yield the tail of ``path``, then its new lines, then ``end`` once ``attempt`` is over.
+
+    It holds a ticket from ``tails`` and stops early, without ``end``,
+    once that ticket is closed.
+    """
     run_id, number = attempt.run_id, attempt.attempt
     ended = [attempt.ended_at is not None]
 
@@ -139,6 +182,7 @@ async def _tail(engine: Engine, attempt: Attempt, path: Path) -> AsyncIterator[S
             ended[0] = True
 
     unwatch = engine.watch_attempts(heard)
+    ticket = tails.open()
     try:
         store = engine.store
 
@@ -159,6 +203,8 @@ async def _tail(engine: Engine, attempt: Attempt, path: Path) -> AsyncIterator[S
         rest = b""
         while True:
             await sleep(LOG_POLL)
+            if ticket.closed:
+                return
             final = ended[0]  # noted before this read, so the read sees all it wrote
             try:
                 data, offset, shrank = await run_in_thread(read_from, path, offset, LOG_CHUNK)
@@ -176,11 +222,16 @@ async def _tail(engine: Engine, attempt: Attempt, path: Path) -> AsyncIterator[S
                 yield _END
                 return
     finally:
+        tails.release(ticket)
         unwatch()
 
 
-def add_log_tail(app: App, engine: Engine) -> None:
-    """Add ``GET /events/log/<run_id>`` (any logged-in user, like ``/api/runs/<id>/log``)."""
+def add_log_tail(app: App, engine: Engine, tails: LogTails | None = None) -> None:
+    """Add ``GET /events/log/<run_id>`` (any logged-in user, like ``/api/runs/<id>/log``).
+
+    The open tails are kept in ``tails`` (a new ``LogTails`` by default).
+    """
+    held = tails if tails is not None else LogTails()
 
     @app.get(f"{LIVE_PATH}/log/<run_id>")
     async def log_tail(request: HttpRequest, run_id: str) -> HttpResponse | EventStream:
@@ -193,6 +244,6 @@ def add_log_tail(app: App, engine: Engine) -> None:
                 raise not_found(msg)
         except ApiError as exc:
             return exc.response()
-        return EventStream(_tail(engine, attempt, Path(path)), keepalive=KEEPALIVE)
+        return EventStream(_tail(engine, attempt, Path(path), held), keepalive=KEEPALIVE)
 
     del log_tail

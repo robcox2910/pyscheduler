@@ -17,12 +17,12 @@ password. A reload re-reads the file (``UserHolder.table``), so a
 removed user's browser session stops working at its next request.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from pyweb.auth import User, UserStore
 
-from pyscheduler.api.auth import ROLE_RANK
+from pyscheduler.api.auth import ROLE_RANK, SwapNotices
 from pyscheduler.values import check_name
 from pyscheduler.yamlish import Map, Node, Scalar, Seq, YamlError, parse
 
@@ -153,10 +153,16 @@ class UserHolder(UserStore):
 
     The session middleware asks the holder for each request's user, so
     replacing ``table`` (a reload re-reading the users file) takes effect
-    at once.
+    at once. ``swap`` replaces it and tells ``swapped``.
     """
 
     table: UserTable | None
+    swapped: SwapNotices = field(default_factory=SwapNotices, repr=False, compare=False)
+
+    def swap(self, table: UserTable | None) -> None:
+        """Put ``table`` in force, then tell the watchers."""
+        self.table = table
+        self.swapped.tell()
 
     def get(self, name: str) -> User | None:
         """Return the user called ``name`` in the current table, or ``None``."""

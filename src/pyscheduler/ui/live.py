@@ -24,6 +24,10 @@ carries the newest id at the moment it was drawn (``data-live-after`` on
 ``<body>``) and connects to ``/events?after=<id>``: the news that came out
 while the page was on its way is replayed too. On a reconnect the browser
 sends ``Last-Event-ID``, which wins over ``after``.
+
+``close_all`` ends every open stream (a reload that swaps the users or
+the tokens does this). Browsers reconnect at once with ``Last-Event-ID``,
+are checked again at the door, and miss nothing.
 """
 
 import json
@@ -65,15 +69,24 @@ EMPTY = "{}"
 
 
 class _Listener:
-    """One browser's queue of ``(number, event)`` pairs not yet sent."""
+    """One browser's queue of ``(number, event)`` pairs not yet sent (``None``: hang up)."""
 
     def __init__(self, limit: int) -> None:
         """Hold up to ``limit`` unsent events before giving up on this listener."""
         self.limit = limit
-        self.queue: Queue[tuple[int, ServerEvent]] = Queue()
+        self.queue: Queue[tuple[int, ServerEvent] | None] = Queue()
+        self.hung_up = False
+
+    def hang_up(self) -> None:
+        """End this stream once what is queued has been sent (later events are dropped)."""
+        if not self.hung_up:
+            self.hung_up = True
+            self.queue.put_nowait(None)
 
     def offer(self, number: int, event: ServerEvent, reset: ServerEvent) -> None:
         """Queue ``event``; if the listener is a buffer behind, swap its queue for ``reset``."""
+        if self.hung_up:
+            return
         if self.queue.qsize() < self.limit:
             self.queue.put_nowait((number, event))
             return
@@ -136,6 +149,11 @@ class LiveFeed:
             listener.offer(number, event, reset)
         return event.id or ""
 
+    def close_all(self) -> None:
+        """End every open stream (the browsers reconnect and are checked again)."""
+        for listener in self._listeners:
+            listener.hang_up()
+
     def _replay(self, last_event_id: str | None) -> list[tuple[int, ServerEvent]]:
         """Return what a browser that last heard ``last_event_id`` missed, or one ``reset``."""
         if last_event_id is None:
@@ -155,7 +173,7 @@ class LiveFeed:
         return EventStream(self._events(last_event_id), keepalive=KEEPALIVE)
 
     async def _events(self, last_event_id: str | None) -> AsyncIterator[ServerEvent]:
-        """Yield the missed events, then live ones, until the stream is closed.
+        """Yield the missed events, then live ones, until the stream is closed or hung up.
 
         Joining and taking the replay happen in one step on the loop, so no
         event can fall between them; the number check drops any repeat.
@@ -167,8 +185,8 @@ class LiveFeed:
             for number, event in self._replay(last_event_id):
                 sent = number
                 yield event
-            while True:
-                number, event = await listener.queue.get()
+            while (item := await listener.queue.get()) is not None:
+                number, event = item
                 if number > sent:
                     sent = number
                     yield event

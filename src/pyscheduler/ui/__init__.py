@@ -15,7 +15,7 @@ from pyscheduler.ui.forecast_page import add_forecast
 from pyscheduler.ui.graph import add_graph
 from pyscheduler.ui.live import LiveFeed, add_live
 from pyscheduler.ui.login import add_login
-from pyscheduler.ui.logtail import add_log_tail
+from pyscheduler.ui.logtail import LogTails, add_log_tail
 from pyscheduler.ui.timeline import add_timeline
 
 __all__ = ["STATIC_DIR", "add_ui"]
@@ -34,6 +34,7 @@ def add_ui(
     users: UserStore,
     dispatcher: Dispatcher | None,
     live: LiveFeed | None = None,
+    tails: LogTails | None = None,
 ) -> None:
     """Add the web UI to ``app``: static files, login (with a users file), the pages and live feeds.
 
@@ -48,6 +49,8 @@ def add_ui(
         live: The live feed attached to ``engine``, served at ``/events``;
             with ``None`` there is no ``/events``. The log tail
             (``/events/log/<run_id>``) is always there.
+        tails: Where the open log tails are kept (so they can be ended
+            together); a new ``LogTails`` by default.
 
     """
     del dispatcher  # replays go through the API, which holds the dispatcher
@@ -56,7 +59,7 @@ def add_ui(
         add_login(app, session_auth, users)
     if live is not None:
         add_live(app, live)
-    add_log_tail(app, engine)
+    add_log_tail(app, engine, tails)
     add_board(app, engine)
     add_detail(app, engine)
     add_graph(app, engine)

@@ -33,6 +33,7 @@ from pyscheduler.api.session_key import load_or_make_key
 from pyscheduler.api.users import UserHolder
 from pyscheduler.engine.core import Engine
 from pyscheduler.ui.live import LiveFeed
+from pyscheduler.ui.logtail import LogTails
 
 __all__ = ["build_app"]
 
@@ -71,7 +72,10 @@ def build_app(
         live: The live feed (attached to ``engine`` before it starts) that
             ``/events`` streams; ``None`` leaves ``/events`` out.
 
-    Besides the API this adds the web UI (``pyscheduler.ui``).
+    Besides the API this adds the web UI (``pyscheduler.ui``). When a
+    reload swaps the tokens or the users, every open ``/events`` stream
+    and log tail is ended, so a revoked token or a removed user is
+    checked again at once (browsers reconnect and miss nothing).
 
     """
     from pyscheduler.ui import add_ui  # noqa: PLC0415 - ui imports api, so load it late
@@ -82,10 +86,28 @@ def build_app(
     key = session_key
     if key is None and needs_session_key(token_holder, people):
         key = load_or_make_key(engine.config.settings.state_dir)
+    tails = LogTails()
+
+    def end_streams() -> None:
+        """End every open live stream and log tail (the callers are checked again)."""
+        if live is not None:
+            live.close_all()
+        tails.close_all()
+
+    token_holder.swapped.watch(end_streams)
+    people.swapped.watch(end_streams)
     session = build_access(app, tokens=token_holder, users=people, key=key, secure=secure)
     add_admin_routes(app, engine, reload=reload, validate=validate)
     add_job_routes(app, engine)
     add_run_routes(app, engine)
     add_alert_routes(app, engine, dispatcher)
-    add_ui(app, engine, session_auth=session, users=people, dispatcher=dispatcher, live=live)
+    add_ui(
+        app,
+        engine,
+        session_auth=session,
+        users=people,
+        dispatcher=dispatcher,
+        live=live,
+        tails=tails,
+    )
     return app

@@ -38,7 +38,8 @@ alike.
 import hashlib
 import hmac
 import ipaddress
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -52,6 +53,7 @@ __all__ = [
     "ROLE_RANK",
     "Principal",
     "Role",
+    "SwapNotices",
     "TokenFileError",
     "TokenHolder",
     "TokenTable",
@@ -199,15 +201,44 @@ class TokenTable:
         return found
 
 
+class SwapNotices:
+    """The callbacks to tell when a holder's table is swapped by a reload.
+
+    The web UI listens here to end its open streams, so a revoked token
+    or a removed user cannot keep one open (it is checked again when the
+    browser reconnects).
+    """
+
+    def __init__(self) -> None:
+        """Start with nobody to tell."""
+        self._callbacks: list[Callable[[], None]] = []
+
+    def watch(self, callback: Callable[[], None]) -> None:
+        """Call ``callback`` after every swap."""
+        self._callbacks.append(callback)
+
+    def tell(self) -> None:
+        """Call every watcher, in the order they were added."""
+        for callback in list(self._callbacks):
+            callback()
+
+
 @dataclass
 class TokenHolder:
     """Hold the current token table (``None`` means development mode).
 
     The middleware reads ``table`` on every request, so replacing it
-    (a reload re-reading the tokens file) takes effect at once.
+    (a reload re-reading the tokens file) takes effect at once. ``swap``
+    replaces it and tells ``swapped``.
     """
 
     table: TokenTable | None
+    swapped: SwapNotices = field(default_factory=SwapNotices, repr=False, compare=False)
+
+    def swap(self, table: TokenTable | None) -> None:
+        """Put ``table`` in force, then tell the watchers."""
+        self.table = table
+        self.swapped.tell()
 
 
 def is_loopback_host(header: str | None) -> bool:
