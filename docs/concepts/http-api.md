@@ -11,7 +11,7 @@ keep a copy of your band, only its **fingerprint**, so a stolen guest
 list opens no gates.
 
 PyScheduler's HTTP API is that front desk. The `pysched` command, your
-scripts and (later) a web page all talk to it in JSON, and it talks to
+scripts and the [web UI](web-ui.md) all talk to it in JSON, and it talks to
 the engine for them.
 
 ## Wristbands (Bearer Tokens)
@@ -69,6 +69,58 @@ development mode a request whose `Host` header is not `localhost`,
 `403 {"error": "forbidden host"}`. That stops a page that points its
 own domain name at `127.0.0.1` (a trick called *DNS rebinding*) from
 reading or steering the scheduler. Use tokens on any machine you share.
+
+## Three Ways In (Auth Modes)
+
+Which wristbands the desk accepts depends on two settings in the
+`scheduler:` block. There is **one access layer** behind both the JSON
+API and the web pages, so a rule is written once.
+
+| `api_tokens_file` | `users_file` | Mode |
+| --- | --- | --- |
+| no | no | **Development mode.** Loopback `Host` only. Every request, page or API, is `dev` with the admin role: no login, no CSRF token. The JSON-only POST rule above is the CSRF defence, and the pages post through `fetch` as JSON. |
+| yes | no | **Tokens only.** The API works as before; the web pages answer `403` "the web UI needs a users_file". |
+| either | yes | **Normal mode.** People log in at `/login` and get a session; scripts still send bearer tokens (if there is a tokens file). |
+
+The `users_file` is a list of `{name, password_hash, role}`. The role
+is `viewer`, `operator` or `admin`, and `admin` can also open
+`/admin`, reload and replay dead alerts. Make the `password_hash` line
+with `pysched hash-password`, which asks twice, does not show the
+password, and prints `password_hash: pbkdf2_sha256$...`:
+
+```python
+from pyweb.security import hash_password, verify_password
+
+stored = hash_password("correct horse battery staple")
+print(f"- {{name: ada, password_hash: {stored}, role: operator}}")
+assert verify_password("correct horse battery staple", stored)
+assert not verify_password("wrong", stored)
+```
+
+A reload (`POST /api/reload` or `SIGHUP`) reads the users file again,
+as it does the tokens file; a bad users file fails the whole reload and
+the old users stay.
+
+**Sessions.** A successful login sets the `pysched_session` cookie,
+signed with a secret of 48 random bytes. The secret is made on first
+start and kept in `<state_dir>/session.key` (mode `0600`), so sessions
+survive a restart. A session lasts 8 hours. The cookie is marked
+`Secure` unless the scheduler listens on a loopback address.
+
+**CSRF.** A cookie is sent by the browser on *every* request to the
+site, including ones another site's page tricked it into making. So a
+request that uses a cookie and changes something must also carry the
+session's **CSRF token**, in the `X-CSRF-Token` header (what the web UI
+sends on its JSON posts) or in a `csrf_token` form field (what HTML
+forms send). Every page embeds the token in a
+`<meta name="csrf-token">` tag for exactly this. A missing or wrong
+token is refused with 403.
+
+**Bearer wins.** If a request has an `Authorization: Bearer` header the
+cookie is never looked at, and the CSRF check is skipped (a header an
+attacker's page cannot make the browser add). Roles for the API are the
+same either way: a viewer is limited to `GET`/`HEAD` (`403` otherwise),
+`/api/*` without a user is `401`, and a `POST` must be JSON (`415`).
 
 ## What You Can Ask
 

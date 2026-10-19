@@ -105,6 +105,47 @@ and `pysched replay <alert-id>` sends an alert's dead deliveries again. Concept 
 [Alerts](docs/concepts/alerts.md), [Routing Alerts](docs/concepts/routing-alerts.md),
 [Notifiers](docs/concepts/notifiers.md) and [File Watchers](docs/concepts/file-watchers.md).
 
+## Phase 3: The Web UI
+
+A noticeboard in the school hall beats asking the secretary. Phase 3 adds
+one, served by the scheduler itself with no extra install and no build
+step:
+
+- **Login and roles**: a `users_file` (make a line with `pysched hash-password`)
+  gives each person a role: viewer, operator or admin. Bearer tokens and
+  browser sessions go through one access layer, with a CSRF token on
+  anything a cookie changes.
+- **The board** (`/`): a row per run for any date, with state badges,
+  duration against the job's typical duration, filters, and critical
+  failures pinned to the top. Operators get rerun, hold, release, kill and
+  the other actions as buttons.
+- **Run and job pages**: attempts, events, alerts and their deliveries, the
+  definition the run used, and a **live log tail**.
+- **The dependency graph** (`/graph`): layered left to right, coloured by
+  state, with failure and cross-date edges drawn differently and a focus
+  mode that lights up everything upstream and downstream.
+- **The timeline** (`/timeline`): hour, day and week views of when every job
+  really ran, with forecast "ghost" bars for what is still to come; and the
+  forecast table (`/forecast`).
+- **Admin** (`/admin`): config versions with a diff against the one
+  before, and the dead-letter tray with a replay button.
+- **Live updates**: pages follow the scheduler over server-sent events with
+  numbered ids, so a dropped connection catches up (or reloads) by itself.
+
+Try it with the seeded demo: twelve jobs, three days of real runs, a flaky
+job, a file watcher and a critical failure. It listens on loopback only.
+
+```bash
+uv run python examples/ui_demo.py          # prints the address; log in as admin / demo
+uv run python examples/ui_demo.py --seed-only
+```
+
+Concept pages: [The Web UI](docs/concepts/web-ui.md),
+[Live Updates](docs/concepts/live-updates.md),
+[Graph Layout](docs/concepts/graph-layout.md) and
+[Timelines](docs/concepts/timelines.md); the auth modes are in
+[The HTTP API](docs/concepts/http-api.md).
+
 ## Config Reference
 
 The config format (scheduler settings, calendars, pools, defaults and
@@ -128,7 +169,7 @@ time zones and DST, dependencies, runs and states, retries and backoff,
 pools and limits, the minder, clocks and launchers, group commit,
 concurrency, recovery and catch-up, validation, operator actions,
 forecast, notifiers, routing alerts, alerts, file watchers, the HTTP API,
-and the service and CLI.
+the service and CLI, the web UI, live updates, graph layout and timelines.
 
 Build the docs site with:
 
@@ -142,7 +183,7 @@ uv run --with mkdocs-material mkdocs build --strict
 |---------|----------|
 | v0.1 | **Core engine**: YAML reader, config and validation, schedules, calendars, time zones, run dates, forecast, journalled store, the minder, local runs, dependencies, retries, pools, holds, catch-up, backfill, rerun, JSON HTTP API, `pysched` CLI |
 | v0.2 (done) | **Alerts and file watchers**: alert rules (failed, never started, too long, too short, lost), routing through a pymq broker, notifiers (log, command, webhook, Slack, Telegram, email), file-watcher jobs |
-| v0.3 | **Web UI**: login and roles, job board, run detail with live log tail, dependency graph, timeline with forecast, operator actions, live updates over SSE |
+| v0.3 (done) | **Web UI**: login and roles, job board, run detail with live log tail, dependency graph, timeline with forecast, operator actions, live updates over SSE |
 | v0.4 | **Remote agents**: `pysched-agent` workers over a pymq broker, heartbeats, lost-agent handling, remote log fetch, signed messages |
 
 ## Development

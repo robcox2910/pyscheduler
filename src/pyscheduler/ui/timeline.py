@@ -30,7 +30,7 @@ from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Attempt, Run, RunState
 from pyscheduler.schedule.forecast import ForecastEntry
 from pyscheduler.ui.board import BOARD_LIMIT
-from pyscheduler.ui.dates import page_day
+from pyscheduler.ui.dates import in_range, page_day
 from pyscheduler.ui.html import Safe, h, join
 from pyscheduler.ui.layout import page
 from pyscheduler.ui.timeline_window import DAY, WEEK_DAYS, Window, Zoom, ticks, window_for
@@ -251,10 +251,12 @@ def _picker(choice: TimelineQuery) -> Safe:
     ]
     moves: list[Safe] = []
     if choice.zoom is not Zoom.HOUR:
-        moves = [
-            h("a", {"href": choice.step(-1).link(), "rel": "prev"}, "← Previous"),
-            h("a", {"href": choice.step(1).link(), "rel": "next"}, "Next →"),
-        ]
+        before = choice.step(-1)
+        after = choice.step(1)
+        if in_range(before.day):
+            moves.append(h("a", {"href": before.link(), "rel": "prev"}, "← Previous"))
+        if in_range(after.day):
+            moves.append(h("a", {"href": after.link(), "rel": "next"}, "Next →"))
     return h(
         "form",
         {"method": "get", "action": "/timeline", "class": "board-filters"},

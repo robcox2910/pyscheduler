@@ -12,13 +12,18 @@ from pyweb.messages import HttpRequest
 
 from pyscheduler.api.support import BAD_REQUEST, ApiError, query_date
 
-__all__ = ["FIRST_DAY", "LAST_DAY", "page_day"]
+__all__ = ["FIRST_DAY", "LAST_DAY", "in_range", "page_day"]
 
 FIRST_DAY = date(1900, 1, 1)
 """The earliest day a page will show."""
 
 LAST_DAY = date(2999, 12, 31)
 """The latest day a page will show."""
+
+
+def in_range(day: date) -> bool:
+    """Return whether ``day`` is one a page can show (so a link to it would not be a 400)."""
+    return FIRST_DAY <= day <= LAST_DAY
 
 
 def page_day(request: HttpRequest, name: str, today: date) -> date:
@@ -31,7 +36,7 @@ def page_day(request: HttpRequest, name: str, today: date) -> date:
     given = query_date(request, name) if request.query.get(name) else None
     if given is None:
         return today
-    if not FIRST_DAY <= given <= LAST_DAY:
+    if not in_range(given):
         msg = f"{name} must be between {FIRST_DAY.isoformat()} and {LAST_DAY.isoformat()}"
         raise ApiError(BAD_REQUEST, msg)
     return given

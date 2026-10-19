@@ -140,6 +140,42 @@ class TestVersions:
 
         h_.run(body)
 
+    def test_diff_lines_are_single_spaced(self, api: MakeApi) -> None:
+        """Each diff line is an inline span followed by one newline, so the block is not double-spaced."""
+        h_ = _site(api)
+        _save(h_, 1, {"/x/a.yaml": "one\ntwo\n"})
+        _save(h_, 2, {"/x/a.yaml": "one\nTWO\n"})
+
+        async def body() -> None:
+            """Open version 2 and look at the markup and the stylesheet."""
+            text = (await _get(h_, "/admin/configs/2")).text
+            start = text.index('<pre class="diff"')
+            block = text[start : text.index("</pre>", start)]
+            spans = block.count("<span")
+            assert spans == block.count("</span>\n")
+            assert "\n\n" not in block
+            assert "</span><span" not in block
+            sheet = (await _get(h_, "/static/app.css")).text
+            rule = next(r for r in sheet.splitlines() if r.startswith(".diff span"))
+            assert "display: block" not in rule
+
+        h_.run(body)
+
+    def test_new_and_removed_empty_files(self, api: MakeApi) -> None:
+        """An empty file that appeared or vanished says so, and is not "unchanged"."""
+        h_ = _site(api)
+        _save(h_, 1, {"/x/gone.yaml": "", "/x/same.yaml": ""})
+        _save(h_, 2, {"/x/fresh.yaml": "", "/x/same.yaml": ""})
+
+        async def body() -> None:
+            """Open version 2."""
+            text = (await _get(h_, "/admin/configs/2")).text
+            assert "fresh.yaml: (new file)" in text
+            assert "gone.yaml: (removed)" in text
+            assert "same.yaml: unchanged" in text
+
+        h_.run(body)
+
     def test_secret_in_source_stays_placeholder(self, api: MakeApi) -> None:
         """A reload stores the raw text: ``${SLACK_URL}`` stays, the value is never stored or shown."""
         h_ = _site(api)

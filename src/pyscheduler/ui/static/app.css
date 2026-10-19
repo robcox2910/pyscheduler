@@ -256,7 +256,7 @@ input[type="text"], input[type="password"] {
   font-family: var(--font-mono);
   font-size: var(--size-small);
 }
-.diff span { display: block; white-space: pre; }
+.diff span { white-space: pre; }
 .diff .diff-add { color: var(--state-succeeded); }
 .diff .diff-del { color: var(--state-failed); }
 .diff .diff-hunk { color: var(--state-running); }

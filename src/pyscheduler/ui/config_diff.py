@@ -70,18 +70,31 @@ def diff_view(
 ) -> Safe:
     """Return the diff of every file in either config, each in its own ``<pre>``.
 
-    A file in only one of the two is shown as all added or all removed.
-    Files are named by their base name only; one that did not change says so.
+    A file in only one of the two is shown as all added or all removed
+    (an empty one is labelled "(new file)" or "(removed)"). Files are
+    named by their base name only; one that did not change says so.
     """
     parts: list[Safe] = []
     for path in sorted(set(old) | set(new), key=lambda p: (Path(p).name, p)):
         name = Path(path).name
-        lines = diff_lines(old.get(path, ""), new.get(path, ""), name, old_label, new_label)
+        before, after = old.get(path), new.get(path)
+        lines = diff_lines(before or "", after or "", name, old_label, new_label)
         if lines:
             rows: list[Safe | str] = []
             for position, text in enumerate(lines):
                 rows += [_line(position, text), "\n"]
             parts.append(h("pre", {"class": "diff", "data-file": name}, *rows))
         else:
-            parts.append(h("p", {"class": "empty", "data-file": name}, f"{name}: unchanged"))
+            parts.append(
+                h("p", {"class": "empty", "data-file": name}, f"{name}: {_note(before, after)}")
+            )
     return join(*parts) if parts else h("p", {"class": "empty"}, "No files in either version.")
+
+
+def _note(before: str | None, after: str | None) -> str:
+    """Return why a file has no diff lines: it is new, gone, the same, or only its line ends differ."""
+    if before is None:
+        return "(new file)"
+    if after is None:
+        return "(removed)"
+    return "unchanged" if before == after else "only line endings changed"

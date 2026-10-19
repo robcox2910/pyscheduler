@@ -22,6 +22,7 @@ from pyscheduler.api.serialize import duration_text, instant, redact
 from pyscheduler.config.model import Criticality, JobDef
 from pyscheduler.engine.model import Attempt, Run, RunState
 from pyscheduler.schedule.forecast import median
+from pyscheduler.ui.dates import in_range
 from pyscheduler.ui.html import Safe, h, join
 
 __all__ = [
@@ -284,6 +285,8 @@ def counts_nav(filters: Filters, counts: Mapping[RunState, int]) -> Safe:
 def _picker(filters: Filters) -> Safe:
     """Return the GET form: previous/next day, the date, a search and a criticality."""
     day = filters.day
+    before = day - timedelta(days=1)
+    after = day + timedelta(days=1)
     hidden = [
         ("state", None if filters.state is None else filters.state.value),
         ("tag", filters.tag),
@@ -292,20 +295,16 @@ def _picker(filters: Filters) -> Safe:
     return h(
         "form",
         {"method": "get", "action": "/", "class": "board-filters"},
-        h(
-            "a",
-            {"href": replace(filters, day=day - timedelta(days=1)).link(), "rel": "prev"},
-            "← Previous day",
-        ),
+        h("a", {"href": replace(filters, day=before).link(), "rel": "prev"}, "← Previous day")
+        if in_range(before)
+        else None,
         h(
             "input",
             {"type": "date", "name": "date", "value": day.isoformat(), "aria-label": "run date"},
         ),
-        h(
-            "a",
-            {"href": replace(filters, day=day + timedelta(days=1)).link(), "rel": "next"},
-            "Next day →",
-        ),
+        h("a", {"href": replace(filters, day=after).link(), "rel": "next"}, "Next day →")
+        if in_range(after)
+        else None,
         h(
             "input",
             {

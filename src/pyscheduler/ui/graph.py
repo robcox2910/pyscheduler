@@ -33,7 +33,7 @@ from pyscheduler.config.redaction import redactor
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Run
 from pyscheduler.ui.board import BOARD_LIMIT
-from pyscheduler.ui.dates import page_day
+from pyscheduler.ui.dates import in_range, page_day
 from pyscheduler.ui.graph_layout import NODE_H, NODE_W, Edge, Layout, layout, node_corner
 from pyscheduler.ui.html import Safe, h, join
 from pyscheduler.ui.layout import page
@@ -239,10 +239,14 @@ def _drawing(
 def _picker(choice: GraphQuery, names: Sequence[str]) -> Safe:
     """Return the GET form: previous/next day, the date, a tag and the job to focus on."""
     day = choice.day
+    before = day - DAY
+    after = day + DAY
     return h(
         "form",
         {"method": "get", "action": "/graph", "class": "board-filters"},
-        h("a", {"href": replace(choice, day=day - DAY).link(), "rel": "prev"}, "← Previous day"),
+        h("a", {"href": replace(choice, day=before).link(), "rel": "prev"}, "← Previous day")
+        if in_range(before)
+        else None,
         h(
             "input",
             {
@@ -252,7 +256,9 @@ def _picker(choice: GraphQuery, names: Sequence[str]) -> Safe:
                 "aria-label": "run date",
             },
         ),
-        h("a", {"href": replace(choice, day=day + DAY).link(), "rel": "next"}, "Next day →"),
+        h("a", {"href": replace(choice, day=after).link(), "rel": "next"}, "Next day →")
+        if in_range(after)
+        else None,
         h(
             "input",
             {
