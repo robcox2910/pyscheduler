@@ -27,8 +27,12 @@ red card. Everything else follows in the order it was scheduled.
 The page builds its HTML on the **server**, in Python, and escapes every
 piece of text it did not write itself. A job named `<script>` shows up
 as the text `<script>`, never as a script. The small bit of JavaScript
-(`app.js`) only adds behaviour: it posts button clicks, tails logs and
-swaps in rows the server has drawn. It never builds HTML from text.
+only adds behaviour. It is a handful of modules: `app.js` is the one
+entry point the page loads, and it imports `common.js` (the CSRF token,
+posts, the shared live feed, and what to do when the session is gone or
+the scheduler is restarting), `board.js`, `actions.js`, `admin.js` and
+`log.js`. Together they post button clicks, tail logs and swap in rows
+the server has drawn. They never build HTML from text.
 
 ## Who May Do What
 
