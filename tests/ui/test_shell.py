@@ -277,6 +277,9 @@ class TestShell:
             (f"/ui/fragments/board-counts?tag={quote(HOSTILE)}", None),
             ("/jobs/hosty", HOSTILE),
             (f"/runs/{quote(NO_SLASH_RUN, safe='')}", NO_SLASH),
+            ("/graph", HOSTILE),
+            (f"/graph?tag={quote(HOSTILE)}&focus={quote(HOSTILE)}", HOSTILE),
+            (f"/graph?focus={quote(HOSTILE)}&run_date={quote(HOSTILE)}", HOSTILE),
         ],
     )
     def test_every_page_escapes(self, api: MakeApi, path: str, shows: str | None) -> None:

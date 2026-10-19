@@ -12,6 +12,9 @@
   --space-4: 24px;
   --radius: 6px;
   --max-width: 1400px;
+  --graph-edge: 1.5px;
+  --graph-edge-bold: 3px;
+  --graph-dim: 0.25;
 
   --bg: #f6f7f9;
   --surface: #ffffff;
@@ -184,3 +187,36 @@ input[type="text"], input[type="password"] {
   word-break: break-all;
 }
 #run-actions button { margin-right: var(--space-1); }
+
+/* The dependency graph (an inline SVG). */
+.graph-wrap {
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.graph { display: block; font-family: var(--font); font-size: var(--size-small); }
+.graph .edge { fill: none; stroke: var(--muted); stroke-width: var(--graph-edge); }
+.graph .edge.on-failure { stroke: var(--state-failed); stroke-dasharray: 6 4; }
+.graph .edge.on-done { stroke: var(--state-muted); }
+.graph .edge.cross-date { stroke-dasharray: 2 4; }
+.graph .edge.on-failure.cross-date { stroke-dasharray: 8 3 2 3; }
+.graph .edge.related { stroke-width: var(--graph-edge-bold); }
+.graph .box { fill: var(--state-grey); stroke: var(--border); }
+.graph .box.succeeded { fill: var(--state-succeeded); }
+.graph .box.failed { fill: var(--state-failed); }
+.graph .box.running { fill: var(--state-running); }
+.graph .box.retry_wait, .graph .box.held { fill: var(--state-amber); }
+.graph .box.skipped, .graph .box.cancelled { fill: var(--state-muted); }
+.graph .box.no-run { fill: var(--surface); }
+.graph .node text { fill: var(--accent-text); dominant-baseline: middle; }
+.graph .node .box.no-run + text { fill: var(--text); }
+.graph .node:hover .box, .graph .node:focus-visible .box { stroke: var(--accent); stroke-width: var(--graph-edge-bold); }
+.graph .node.focus .box { stroke: var(--accent); stroke-width: var(--graph-edge-bold); }
+.graph .dimmed { opacity: var(--graph-dim); }
+.graph-legend { display: flex; flex-wrap: wrap; gap: var(--space-3); padding: 0; margin: 0 0 var(--space-3); list-style: none; font-size: var(--size-small); color: var(--muted); }
+.graph-legend li::before { content: ""; display: inline-block; width: 2rem; margin-right: var(--space-1); vertical-align: middle; border-top: 2px solid var(--muted); }
+.graph-legend .on-failure::before { border-top: 2px dashed var(--state-failed); }
+.graph-legend .on-done::before { border-top-color: var(--state-muted); }
+.graph-legend .cross-date::before { border-top-style: dotted; }
+.note { color: var(--muted); margin: 0 0 var(--space-3); }
