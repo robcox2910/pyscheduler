@@ -168,6 +168,31 @@ class TestSecretsFile:
         assert "chmod 600" in warning.message
         assert SECRET not in str(warning)
 
+    def test_group_writable_only_is_quiet(self, tmp_path: Path) -> None:
+        """Warn only about read bits, not a write-only group bit."""
+        assert _load(tmp_path, AGENTS + JOB, mode=0o620).warnings == ()
+
+    def test_yaml_syntax_error_at_secrets_line(self, tmp_path: Path) -> None:
+        """Report a YAML error at the secrets file's own line, once."""
+        problems = _problems(tmp_path, AGENTS + JOB, "- {name: a, secret: [\n")
+        assert problems
+        assert problems[0].file.endswith("agents.yaml")
+        assert problems[0].line >= 1
+        assert str(tmp_path) not in problems[0].message
+
+    def test_broken_section_not_reported_per_job(self, tmp_path: Path) -> None:
+        """Do not add 'no agents: section' for jobs when the section itself is broken."""
+        text = "agents: {listen: 'a:1'}\n" + JOB + "    agent: build-01\n"
+        problems = _problems(tmp_path, text)
+        assert [p.message for p in problems] == ["agents needs secrets_file"]
+
+    def test_secrets_carried_on_section(self, tmp_path: Path) -> None:
+        """Carry the loaded secrets on the section without showing them in its repr."""
+        agents = _load(tmp_path, AGENTS + JOB).agents
+        assert agents is not None
+        assert agents.secrets.get("build-01") == SECRET
+        assert SECRET not in repr(agents)
+
     def test_private_file_has_no_warning(self, tmp_path: Path) -> None:
         """Say nothing about a mode 600 file."""
         assert _load(tmp_path, AGENTS + JOB).warnings == ()

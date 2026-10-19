@@ -27,6 +27,7 @@ __all__ = [
     "NONCE_TTL",
     "REPORTS_QUEUE",
     "REPORT_TYPES",
+    "SCHEDULER_TYPES",
     "STARTED_TYPE",
     "WORK_TYPE",
     "kill_payload",
@@ -42,12 +43,14 @@ STARTED_TYPE = "started"
 HEARTBEAT_TYPE = "heartbeat"
 FINISHED_TYPE = "finished"
 LOG_REPLY_TYPE = "log_reply"
-REPORT_TYPES = (HELLO_TYPE, STARTED_TYPE, HEARTBEAT_TYPE, FINISHED_TYPE, LOG_REPLY_TYPE)
+REPORT_TYPES = frozenset({HELLO_TYPE, STARTED_TYPE, HEARTBEAT_TYPE, FINISHED_TYPE, LOG_REPLY_TYPE})
 """The types an agent sends to the scheduler."""
 WORK_TYPE = "work"
 KILL_TYPE = "kill"
 ACK_TYPE = "finished_ack"
 LOG_REQUEST_TYPE = "log_request"
+SCHEDULER_TYPES = frozenset({WORK_TYPE, KILL_TYPE, ACK_TYPE, LOG_REQUEST_TYPE})
+"""The types the scheduler sends to an agent."""
 HEARTBEAT_EVERY = timedelta(seconds=10)
 """How often an online agent says it is still there."""
 KILL_SIGNALS = ("TERM", "KILL")

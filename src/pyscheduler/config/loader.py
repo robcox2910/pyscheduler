@@ -298,6 +298,7 @@ def build_config(
         notifiers=notifiers,
         routes=routes,
         agents=agents,
+        agents_broken=agents is None and "agents" in main,
     )
     return config, problems
 

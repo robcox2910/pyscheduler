@@ -16,6 +16,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pyscheduler.calendars import ALL_DAYS, BusinessCalendar
+from pyscheduler.config.agent_secrets import AgentSecrets
 from pyscheduler.schedule.firings import RunDateRule
 from pyscheduler.schedule.specs import Schedule
 
@@ -158,6 +159,9 @@ class AgentsDef:
     agent_grace: timedelta
     lost_after: timedelta
     source: SourceRef
+    secrets: AgentSecrets = field(
+        default_factory=lambda: AgentSecrets({}), repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -372,6 +376,7 @@ class Config:
     notifiers: Mapping[str, NotifierDef] = field(default_factory=dict[str, NotifierDef])
     routes: tuple[Route, ...] = ()
     agents: AgentsDef | None = None
+    agents_broken: bool = False
     _dependents: Mapping[str, frozenset[str]] = field(
         init=False, repr=False, compare=False, default_factory=dict[str, frozenset[str]]
     )

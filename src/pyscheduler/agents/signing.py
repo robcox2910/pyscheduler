@@ -16,7 +16,7 @@ import json
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from pynet.messaging import JsonValue
 
@@ -36,7 +36,7 @@ __all__ = [
 MAX_SKEW = timedelta(minutes=5)
 """How far a message's ``sent_at`` may be from our clock, in either direction."""
 NONCE_TTL = timedelta(minutes=10)
-"""How long a seen nonce is remembered (twice the skew, so a replay is always caught)."""
+"""The longest a nonce is remembered: twice the skew, the oldest any passing message can get."""
 SIG_HEADER = "sig"
 """The header that carries the hex digest."""
 NONCE_BYTES = 16
@@ -47,6 +47,7 @@ MISSING_SIG = "missing sig"
 UNKNOWN_AGENT = "unknown agent"
 BAD_SIGNATURE = "bad signature"
 STALE = "stale"
+UNEXPECTED_TYPE = "unexpected type"
 REPLAYED = "replayed nonce"
 _FIELDS = ("type", "agent", "sent_at", "nonce", "payload")
 
@@ -94,13 +95,19 @@ def seal(
         agent: The agent the message is to or from.
         payload: The message's own content.
         secret: The agent's shared secret.
-        now: The send time; must be aware.
+        now: The send time; must be aware (converted to UTC).
+
+    Raises:
+        ValueError: If ``now`` is naive.
 
     """
+    if now.tzinfo is None:
+        msg = "seal needs an aware datetime"
+        raise ValueError(msg)
     body: dict[str, JsonValue] = {
         "type": kind,
         "agent": agent,
-        "sent_at": now.isoformat(),
+        "sent_at": now.astimezone(UTC).isoformat(),
         "nonce": secrets.token_hex(NONCE_BYTES),
         "payload": dict(payload),
     }
@@ -138,13 +145,19 @@ class Verifier:
     Args:
         secrets: Look up an agent's secret; ``None`` means unknown.
         clock: The clock that judges freshness and ages out nonces.
+        accept: The message types this side may receive. A validly signed
+            message of any other type is refused, so a report cannot be
+            replayed as an order (or the reverse).
 
     """
 
-    def __init__(self, secrets: Callable[[str], str | None], *, clock: Clock) -> None:
+    def __init__(
+        self, secrets: Callable[[str], str | None], *, clock: Clock, accept: frozenset[str]
+    ) -> None:
         """Start with no nonces seen."""
         self._secrets = secrets
         self._clock = clock
+        self._accept = accept
         self._seen: dict[str, datetime] = {}
 
     @property
@@ -160,7 +173,7 @@ class Verifier:
             raise Rejected(NOT_OBJECT)
         kind, agent, sent_at, nonce, payload = _fields(body)
         sig = headers.get(SIG_HEADER)
-        if sig is None:
+        if not isinstance(sig, str):
             raise Rejected(MISSING_SIG)
         secret = self._secrets(agent)
         if secret is None:
@@ -171,12 +184,17 @@ class Verifier:
         when = _parse_time(sent_at)
         if abs(now - when) > MAX_SKEW:
             raise Rejected(STALE)
+        if kind not in self._accept:
+            # Refused before the nonce is remembered: it is never acted on, so
+            # there is nothing to replay and no reason to fill the memory.
+            raise Rejected(UNEXPECTED_TYPE)
         if nonce in self._seen:
             raise Rejected(REPLAYED)
-        self._seen[nonce] = now + NONCE_TTL
+        # Keep it until the last instant a copy could still pass the skew check.
+        self._seen[nonce] = when + MAX_SKEW
         return Message(kind, agent, when, payload)
 
     def _forget(self, now: datetime) -> None:
         """Drop nonces whose time is up."""
-        for nonce in [n for n, until in self._seen.items() if until <= now]:
+        for nonce in [n for n, until in self._seen.items() if until < now]:
             del self._seen[nonce]

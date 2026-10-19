@@ -7,7 +7,6 @@ cannot ask for one named courier and for any courier with a skill.
 
 from typing import Protocol
 
-from pyscheduler.config.agent_fields import AgentSecrets, AgentSecretsError
 from pyscheduler.config.model import AgentsDef, Config, JobDef, SourceRef
 from pyscheduler.values import check_name
 
@@ -25,26 +24,24 @@ class Checker(Protocol):
 def check_agents(checker: Checker, config: Config) -> None:
     """Note agent jobs that name unknown agents, bad tags, both settings, or no ``agents:``."""
     agents = config.agents
-    known: frozenset[str] | None = None
-    if agents is not None:
-        try:
-            known = AgentSecrets.load(agents.secrets_file).names
-        except AgentSecretsError:
-            known = None  # the loader already reported the unreadable file
+    known = None if agents is None else agents.secrets.names
     for job in config.jobs.values():
         if job.name in checker.broken or (job.agent is None and not job.agent_tags):
             continue
-        for message in _problems(job, agents, known):
+        for message in _problems(job, agents, known, section_broken=config.agents_broken):
             checker.add(job.source, message, job.name)
 
 
-def _problems(job: JobDef, agents: AgentsDef | None, known: frozenset[str] | None) -> list[str]:
+def _problems(
+    job: JobDef, agents: AgentsDef | None, known: frozenset[str] | None, *, section_broken: bool
+) -> list[str]:
     """Return what is wrong with one agent job's settings."""
     found: list[str] = []
     if job.agent is not None and job.agent_tags:
         found.append("use either agent or agent_tags, not both")
     if agents is None:
-        found.append("this job needs an agent, but there is no agents: section")
+        if not section_broken:  # a broken section was already reported by the loader
+            found.append("this job needs an agent, but there is no agents: section")
     elif agents.listen is None and agents.broker is None:
         found.append("this job needs an agent, but agents: sets neither listen nor broker")
     if job.agent is not None:
