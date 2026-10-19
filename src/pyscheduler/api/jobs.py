@@ -34,9 +34,9 @@ from pyscheduler.api.support import (
 from pyscheduler.config import Config, JobDef
 from pyscheduler.engine.core import Engine
 from pyscheduler.schedule.firings import next_firing
-from pyscheduler.schedule.forecast import forecast
+from pyscheduler.schedule.forecast import ForecastEntry, forecast
 
-__all__ = ["add_job_routes", "next_firings"]
+__all__ = ["add_job_routes", "forecast_entries", "forecast_window", "next_firings"]
 
 type JsonObject = dict[str, JsonValue]
 
@@ -84,6 +84,46 @@ def _instant(request: HttpRequest, name: str, default: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ApiError(BAD_REQUEST, f"{name} needs a time zone, such as Z or +01:00")
     return value
+
+
+def forecast_window(request: HttpRequest, now: datetime) -> tuple[datetime, datetime]:
+    """Return the ``from`` and ``to`` instants of a forecast request (default ``now`` + 24 hours).
+
+    Raises:
+        ApiError: 400 if either is not an aware ISO 8601 instant, ``to`` is before
+            ``from``, the window is over 31 days, or it is out of the supported dates.
+
+    """
+    start = _instant(request, "from", now)
+    try:
+        end = _instant(request, "to", start + DEFAULT_WINDOW)
+    except OverflowError:
+        raise ApiError(BAD_REQUEST, OUT_OF_RANGE) from None
+    if end < start:
+        raise ApiError(BAD_REQUEST, "to is before from")
+    if end - start > MAX_WINDOW:
+        raise ApiError(BAD_REQUEST, f"the window may be at most {MAX_WINDOW.days} days")
+    return start, end
+
+
+async def forecast_entries(engine: Engine, start: datetime, end: datetime) -> list[ForecastEntry]:
+    """Return the forecast for the window, reading past durations in one thread trip.
+
+    Raises:
+        ApiError: 400 if the window is out of the dates the scheduler can handle.
+
+    """
+    config, store = engine.config, engine.store
+
+    def build() -> list[ForecastEntry]:
+        """Read every job's past durations (one locked call) and forecast the window."""
+        durations = store.recent_durations_for(list(config.jobs))
+        return forecast(config, start, end, durations=durations)
+
+    try:
+        return await run_in_thread(build)
+    except OverflowError:
+        raise ApiError(BAD_REQUEST, OUT_OF_RANGE) from None
 
 
 def add_job_routes(app: App, engine: Engine) -> None:
@@ -163,24 +203,6 @@ def _add_forecast_route(app: App, engine: Engine) -> None:
     @guarded
     async def show_forecast(request: HttpRequest) -> JsonObject:
         """Predict the runs between ``from`` and ``to`` (default: the next 24 hours)."""
-        start = _instant(request, "from", engine.clock.now())
-        try:
-            end = _instant(request, "to", start + DEFAULT_WINDOW)
-        except OverflowError:
-            raise ApiError(BAD_REQUEST, OUT_OF_RANGE) from None
-        if end < start:
-            raise ApiError(BAD_REQUEST, "to is before from")
-        if end - start > MAX_WINDOW:
-            raise ApiError(BAD_REQUEST, f"the window may be at most {MAX_WINDOW.days} days")
-        config, store = engine.config, engine.store
-
-        def build() -> list[JsonValue]:
-            """Read past durations and forecast the window."""
-            durations = {name: store.recent_durations(name) for name in config.jobs}
-            entries = forecast(config, start, end, durations=durations)
-            return [forecast_json(entry) for entry in entries]
-
-        try:
-            return {"entries": await run_in_thread(build)}
-        except OverflowError:
-            raise ApiError(BAD_REQUEST, OUT_OF_RANGE) from None
+        start, end = forecast_window(request, engine.clock.now())
+        entries = await forecast_entries(engine, start, end)
+        return {"entries": [forecast_json(entry) for entry in entries]}

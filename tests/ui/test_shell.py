@@ -280,6 +280,11 @@ class TestShell:
             ("/graph", HOSTILE),
             (f"/graph?tag={quote(HOSTILE)}&focus={quote(HOSTILE)}", HOSTILE),
             (f"/graph?focus={quote(HOSTILE)}&run_date={quote(HOSTILE)}", HOSTILE),
+            ("/timeline", HOSTILE),
+            ("/timeline?zoom=week", HOSTILE),
+            (f"/timeline?zoom={quote(HOSTILE)}&date={quote(HOSTILE)}", None),
+            ("/forecast", None),
+            (f"/forecast?from={quote(HOSTILE)}&to={quote(HOSTILE)}", None),
         ],
     )
     def test_every_page_escapes(self, api: MakeApi, path: str, shows: str | None) -> None:
@@ -373,6 +378,8 @@ class TestLogout:
             "import pyscheduler.ui.live",
             "import pyscheduler.ui.logtail",
             "import pyscheduler.ui.board",
+            "import pyscheduler.ui.timeline",
+            "import pyscheduler.ui.forecast_page",
             "import pyscheduler.api; import pyscheduler.ui",
         ):
             run = subprocess.run(  # noqa: S603 - fixed arguments

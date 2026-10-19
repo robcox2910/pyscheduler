@@ -21,6 +21,15 @@ __all__ = ["DurationReads"]
 DEFAULT_SAMPLE = 10
 """How many recent durations a job's read returns unless told otherwise."""
 
+SCAN_RUNS = 100
+"""The most runs of one job a read looks through, newest run date first.
+
+This keeps the cost per job fixed however long its history grows. A job
+needs its ten newest succeeded runs among its newest ``SCAN_RUNS`` runs
+(normally days or weeks of them); one that has failed for longer than
+that simply has no recent durations.
+"""
+
 
 class DurationReads:
     """Give the ``Store`` its duration reads, each taking PyDB's lock (see ``Store``)."""
@@ -36,15 +45,20 @@ class DurationReads:
     def recent_durations_for(
         self, jobs: Collection[str], limit: int = DEFAULT_SAMPLE
     ) -> dict[str, list[timedelta]]:
-        """Return ``recent_durations`` for every job in ``jobs`` (``[]`` if none), in one pass."""
+        """Return ``recent_durations`` for every job in ``jobs`` (``[]`` if none), in one pass.
+
+        Only each job's newest ``SCAN_RUNS`` runs (by run date, then due time) are read.
+        """
         found: dict[str, list[Attempt]] = {}
         with self._db.lock:
             runs_index = self._runs.indexes["runs_job"]
             attempts_index = self._attempts.indexes["attempts_run_id"]
             for job in jobs:
+                rows = [record.data for record in self._runs.select_by_index(runs_index, job)]
+                rows.sort(key=lambda r: (r["run_date"], r["scheduled_at"]), reverse=True)  # type: ignore[reportArgumentType]
                 found[job] = [
                     attempt_from_row(record.data)
-                    for run in self._runs.select_by_index(runs_index, job)
+                    for run in rows[:SCAN_RUNS]
                     for record in self._attempts.select_by_index(attempts_index, run["run_id"])
                 ]
         return {job: _newest(attempts, limit) for job, attempts in found.items()}

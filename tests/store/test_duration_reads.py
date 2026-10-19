@@ -1,6 +1,6 @@
 """Tests for the batched duration read: many jobs' recent run times in one pass."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +8,7 @@ import pytest
 from store_helpers import T0, make_attempt, make_run
 
 from pyscheduler.engine.model import Outcome
-from pyscheduler.store import Batch, Store
+from pyscheduler.store import Batch, Store, duration_reads
 
 MINUTE = timedelta(minutes=1)
 LIMIT_TWO = 2
@@ -80,4 +80,24 @@ class TestRecentDurationsFor:
         store.recent_durations_for([f"job{n}" for n in range(JOBS)])
         assert len(entered) == 1
         monkeypatch.undo()
+        store.close()
+
+
+class TestScanBound:
+    """Only a job's newest runs are read, so a long history costs a bounded amount."""
+
+    def test_only_the_newest_runs_are_scanned(
+        self, store: Store, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Succeeded attempts of runs older than the newest ``SCAN_RUNS`` are not seen."""
+        monkeypatch.setattr(duration_reads, "SCAN_RUNS", 3)
+        runs = [make_run(run_date=date(2026, 9, 1 + n)) for n in range(5)]
+        attempts = [
+            make_attempt(run.run_id, took=(n + 1) * MINUTE, outcome=Outcome.SUCCEEDED)
+            for n, run in enumerate(runs)
+        ]
+        store.apply(Batch(runs=runs, attempts=attempts))
+        assert store.recent_durations("extract") == [5 * MINUTE, 4 * MINUTE, 3 * MINUTE]
+        monkeypatch.setattr(duration_reads, "SCAN_RUNS", 100)
+        assert len(store.recent_durations("extract")) == len(runs)
         store.close()
