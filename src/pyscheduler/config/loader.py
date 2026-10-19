@@ -15,6 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pyscheduler.calendars import BusinessCalendar, merge_calendars
+from pyscheduler.config.agent_fields import read_agents_section
 from pyscheduler.config.alert_fields import read_alert_sections
 from pyscheduler.config.calendar_fields import RawCalendar, reachable, read_calendar
 from pyscheduler.config.calendar_inheritance import resolve_calendars
@@ -38,6 +39,7 @@ from pyscheduler.yamlish import Map, Node, YamlError, parse
 
 MAIN_KEYS = (
     "scheduler", "include", "calendars", "pools", "defaults", "jobs", "notifiers", "routes",
+    "agents",
 )  # fmt: skip
 INCLUDED_KEYS = ("include", "calendars", "pools", "jobs")
 RESERVED_JOB = "_scheduler"
@@ -274,6 +276,7 @@ def build_config(
     jobs = loader.jobs(settings.timezone)
     main = loader.docs[0].root.items if loader.docs and loader.docs[0].path == loader.main else {}
     notifiers, routes = read_alert_sections(loader.r, main)
+    agents = read_agents_section(loader.r, main)
     order = {name: i for i, name in enumerate(loader.sources)}
     expansions = {value: name for name, value in loader.env.used.items()}
     problems = sorted(
@@ -294,6 +297,7 @@ def build_config(
         expansions=expansions,
         notifiers=notifiers,
         routes=routes,
+        agents=agents,
     )
     return config, problems
 

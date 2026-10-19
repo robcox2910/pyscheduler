@@ -129,6 +129,8 @@ max-args = 9
 # The minder starts once per attempt and must import as little as it can:
 # plain os paths instead of pathlib, try/except instead of contextlib.
 "src/pyscheduler/minder.py" = ["PTH", "SIM105"]
+# The brief names the exception Rejected (it reads as a verdict, not an error).
+"src/pyscheduler/agents/signing.py" = ["N818"]
 
 [tool.ruff.format]
 quote-style = "double"

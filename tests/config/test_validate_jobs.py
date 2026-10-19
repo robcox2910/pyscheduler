@@ -171,7 +171,7 @@ class TestJobErrors:
             ("max_runtime: 2h\ntimeout: 1h", "max_runtime exceeds timeout"),
             ("retries: {count: -1}", "negative retry count"),
             ("retries: {backoff: 0.5}", "backoff must be at least 1"),
-            ("agent: box1", "agents arrive in phase 4"),
+            ("agent: box1", "no agents: section"),
         ],
     )
     def test_job_setting(self, tmp_path: Path, keys: str, phrase: str) -> None:

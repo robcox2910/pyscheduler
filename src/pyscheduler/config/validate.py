@@ -24,6 +24,7 @@ from pyscheduler.config.run_dates import (
     WAIT_HORIZON_DAYS,
     RunDateIndex,
 )
+from pyscheduler.config.validate_agents import check_agents
 from pyscheduler.config.validate_alerts import check_alerts
 from pyscheduler.config.validate_templates import check_placeholders
 from pyscheduler.schedule.firings import next_firing
@@ -117,6 +118,7 @@ class _Checker:
         self.check_calendars()
         self.check_cycles()
         check_alerts(self, self.config)
+        check_agents(self, self.config)
         for job in self.config.jobs.values():
             if job.name in self.broken:
                 continue
@@ -173,8 +175,6 @@ class _Checker:
             error(f"negative retry count {job.retries.count}")
         if job.retries.backoff < 1:
             error(f"retries.backoff must be at least 1, got {job.retries.backoff}")
-        if job.agent is not None:
-            error(f"agent {job.agent!r} cannot be used yet: agents arrive in phase 4")
         if not job.schedules and not job.depends_on and not job.manual:
             error("no schedule, no dependencies and not manual: this job can never run")
         if job.overlap is Overlap.ALLOW and job.pools:

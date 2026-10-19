@@ -21,6 +21,7 @@ from pyscheduler.schedule.specs import Schedule
 
 __all__ = [
     "DEFAULT_OFF",
+    "AgentsDef",
     "AlertKind",
     "CatchUp",
     "Config",
@@ -140,6 +141,23 @@ class SourceRef:
 
     file: str
     line: int
+
+
+@dataclass(frozen=True)
+class AgentsDef:
+    """The ``agents:`` section: where agents meet the scheduler and how long to wait for them.
+
+    ``listen`` embeds a broker in the scheduler; ``broker`` uses an external
+    one. At most one is set; with neither, agents are off. The secrets file
+    holds each agent's shared secret and is read separately.
+    """
+
+    listen: tuple[str, int] | None
+    broker: tuple[str, int] | None
+    secrets_file: Path
+    agent_grace: timedelta
+    lost_after: timedelta
+    source: SourceRef
 
 
 @dataclass(frozen=True)
@@ -353,6 +371,7 @@ class Config:
     expansions: Mapping[str, str] = field(default_factory=dict[str, str])
     notifiers: Mapping[str, NotifierDef] = field(default_factory=dict[str, NotifierDef])
     routes: tuple[Route, ...] = ()
+    agents: AgentsDef | None = None
     _dependents: Mapping[str, frozenset[str]] = field(
         init=False, repr=False, compare=False, default_factory=dict[str, frozenset[str]]
     )
