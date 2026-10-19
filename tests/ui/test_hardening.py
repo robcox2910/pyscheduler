@@ -9,7 +9,8 @@ stream or an action from a stale cookie gets ``401``, and a page load
 from urllib.parse import quote
 
 from api_helpers import DEV, EXTRACT_RUN, ApiHarness, MakeApi, log_in, users_yaml
-from pyweb.messages import HttpRequest
+from pyweb.app import CallNext
+from pyweb.messages import HttpRequest, Outcome
 from pyweb.testing import TestResponse
 from ui_helpers import find, sign_in
 
@@ -101,6 +102,25 @@ class TestErrorPageHeaders:
             assert plain.headers.get("Content-Security-Policy") is None
 
         del broken
+        h_.run(body)
+
+    def test_middleware_error_page(self, api: MakeApi) -> None:
+        """A middleware that raises still gives the 500 page the headers (it is inside ``secure_html``)."""
+        h_ = api(tokens=False)
+
+        @h_.client.app.middleware
+        async def exploding(request: HttpRequest, call_next: CallNext) -> Outcome:
+            """Fail before the handler is reached."""
+            del request, call_next
+            raise RuntimeError
+
+        async def body() -> None:
+            """Open a page as a browser."""
+            page = await h_.client.get("/", headers={**DEV, **HTML})
+            assert page.status == SERVER_ERROR
+            assert _secured(page)
+
+        del exploding
         h_.run(body)
 
 

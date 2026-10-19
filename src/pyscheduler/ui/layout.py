@@ -8,6 +8,7 @@ page with the security headers that tell the browser to run nothing but
 our own files.
 """
 
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -20,6 +21,11 @@ from pyscheduler.api.auth import Role, allows
 from pyscheduler.api.support import actor_of, role_of
 from pyscheduler.ui.html import Safe, h
 from pyscheduler.ui.live import LIVE_STATE
+
+INTERNAL_ERROR = 500
+"""The status of the page for an error nobody handled."""
+
+logger = logging.getLogger("pyscheduler.ui")
 
 __all__ = [
     "NAV",
@@ -70,12 +76,19 @@ async def secure_html(request: HttpRequest, call_next: CallNext) -> Outcome:
 
     Install it outermost, so the 404 for an unknown path, a refused CSRF
     token (raised as ``HTTPError`` by the session layer), the "needs a
-    users_file" page and the generic 500 are covered as well.
+    users_file" page and the generic 500 are covered as well. An ordinary
+    exception from an inner middleware is logged and answered with the
+    same generic 500 here (``BaseException``, such as ``Cancelled``, passes through).
     """
     try:
         outcome = await call_next(request)
     except HTTPError as exc:
         outcome = exc.to_response(request)
+    except Exception:
+        # An error raised inside an inner middleware would reach App.handle's
+        # 500 outside this wrapper, without the headers: answer it here.
+        logger.exception("Unhandled error in %s %s", request.method, request.path)
+        outcome = HTTPError(INTERNAL_ERROR).to_response(request)
     if isinstance(outcome, HttpResponse):
         kind = (outcome.headers.get("Content-Type") or "").partition(";")[0].strip().lower()
         if kind == "text/html" and outcome.headers.get("Content-Security-Policy") is None:
