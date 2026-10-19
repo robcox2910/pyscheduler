@@ -17,6 +17,10 @@
 //   "board-early"  run events for a later date arrive while health still says
 //              today (no reload; one check per minute), then health moves on
 //              (reload). Prints {"reloads", "checks"} after each step.
+//   "board-trailing"  events held back by the minute's throttle leave exactly one
+//              trailing check, which finds the new day.
+//   "board-hang"  a health check that never answers is cut off by its timeout, so the
+//              next one can run. "restart-hang": the same for the restart poller.
 //   "board-inflight"  two events arrive while one check is still pending: one check.
 
 const target = process.argv[2];
@@ -105,13 +109,18 @@ const answer = 401;
 const healthScript = []; // what /api/health answers next: a status, {today}, or "net"
 let healthCalls = 0;
 let healthGate = null; // a promise the next health answer waits for
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, options = {}) => {
   if (url === "/api/health") {
     healthCalls += 1;
     if (healthGate) {
       await healthGate;
     }
     const next = healthScript.length > 1 ? healthScript.shift() : healthScript[0];
+    if (next === "hang") {
+      return new Promise((_, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new TypeError("timed out")));
+      });
+    }
     if (next === "net") {
       throw new TypeError("network error");
     }
@@ -137,9 +146,27 @@ const delays = [];
 const realSetTimeout = globalThis.setTimeout;
 let clock = 1_000_000;
 if (which !== "closed" && which !== "fragment" && which !== "post") {
+  const later = []; // timers of a minute or more wait for the fake clock
   globalThis.setTimeout = (fn, ms) => {
     delays.push(ms);
+    if (ms >= 30_000) {
+      later.push({ fn, due: clock + ms });
+      return later.length;
+    }
     return realSetTimeout(fn, 0);
+  };
+  globalThis.advance = (ms) => {
+    clock += ms;
+    for (const timer of later.filter((t) => t.due <= clock)) {
+      later.splice(later.indexOf(timer), 1);
+      timer.fn();
+    }
+    return later.length;
+  };
+  AbortSignal.timeout = () => {
+    const controller = new AbortController();
+    realSetTimeout(() => controller.abort(), 5);
+    return controller.signal;
   };
   Date.now = () => clock;
 }
@@ -157,8 +184,9 @@ if (which === "closed") {
 } else if (which === "post") {
   await shared.post("/api/runs/x/kill", {});
 }
-else if (which === "restart" || which === "restart-net") {
-  healthScript.push(which === "restart" ? 503 : "net", ...(which === "restart" ? [503] : []), { today: "x" });
+else if (which === "restart" || which === "restart-net" || which === "restart-hang") {
+  const first = { restart: [503, 503], "restart-net": ["net"], "restart-hang": ["hang"] }[which];
+  healthScript.push(...first, { today: "x" });
   shared.reloadBecause("waiting");
   await wait(50);
   console.log(JSON.stringify({ ...seen(), delays }));
@@ -183,6 +211,26 @@ else if (which === "restart" || which === "restart-net") {
     clock += 61_000;
     healthScript.length = 0;
     healthScript.push({ today: "2026-01-02" });
+    sources[0].fire("run", later);
+    await step();
+  } else if (which === "board-trailing") {
+    healthScript.push({ today: "2026-01-01" });
+    sources[0].fire("run", later);
+    await step();
+    clock += 20_000;
+    sources[0].fire("run", later); // held back: leaves a trailing check
+    sources[0].fire("run", later); // still only one
+    await step();
+    steps.push({ timers: globalThis.advance(0) });
+    healthScript.length = 0;
+    healthScript.push({ today: "2026-01-02" });
+    globalThis.advance(40_000);
+    await step();
+  } else if (which === "board-hang") {
+    healthScript.push("hang");
+    sources[0].fire("run", later);
+    await wait(50); // the timeout cut the check off
+    clock += 61_000;
     sources[0].fire("run", later);
     await step();
   } else {

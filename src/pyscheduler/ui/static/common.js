@@ -11,6 +11,7 @@ const GONE_RELOAD_MS = 1500;
 const BACKOFF_FIRST_MS = 1000;
 const BACKOFF_MAX_MS = 15000;
 const UNAVAILABLE = 503;
+const HEALTH_TIMEOUT_MS = 10000;
 
 /** The line shown when the session has expired (or the user was removed). */
 export const SESSION_EXPIRED = "Your session has expired — please sign in again";
@@ -68,12 +69,15 @@ async function untilServing() {
   let pause = BACKOFF_FIRST_MS;
   for (;;) {
     try {
-      const response = await fetch("/api/health", { credentials: "same-origin" });
+      const response = await fetch("/api/health", {
+        credentials: "same-origin",
+        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      });
       if (response.status !== UNAVAILABLE) {
         return;
       }
     } catch {
-      // the port is not answering yet: wait and try again
+      // the port is not answering yet (or not in time): wait and try again
     }
     await new Promise((resolve) => setTimeout(resolve, pause));
     pause = Math.min(pause * 2, BACKOFF_MAX_MS);

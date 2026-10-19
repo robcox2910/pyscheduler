@@ -146,3 +146,28 @@ class TestWithNode:
             {"reloads": 0, "checks": 1},
             {"reloads": 1, "checks": 1},
         ]
+
+    def test_restart_poller_cuts_off_a_hung_check(self) -> None:
+        """A health check that never answers is timed out, backed off from, and the page then reloads."""
+        done = _node(str(HARNESS), str(STATIC_DIR / "common.js"), "restart-hang")
+        assert done.returncode == 0, done.stderr
+        seen = json.loads(done.stdout)
+        assert seen["reloads"] == 1
+        assert seen["delays"][-1] == BACKOFF_FIRST_MS
+
+    def test_board_trailing_check_finds_midnight(self) -> None:
+        """Events held back by the throttle leave one trailing check, which reloads once the day moved."""
+        done = _node(str(HARNESS), str(STATIC_DIR / "common.js"), "board-trailing")
+        assert done.returncode == 0, done.stderr
+        assert json.loads(done.stdout) == [
+            {"reloads": 0, "checks": 1},
+            {"reloads": 0, "checks": 1},
+            {"timers": 1},
+            {"reloads": 1, "checks": 2},
+        ]
+
+    def test_board_hung_check_does_not_block_the_next(self) -> None:
+        """A health check that hangs is cut off, so a later event can check again."""
+        done = _node(str(HARNESS), str(STATIC_DIR / "common.js"), "board-hang")
+        assert done.returncode == 0, done.stderr
+        assert json.loads(done.stdout) == [{"reloads": 0, "checks": 2}]
