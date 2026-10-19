@@ -11,12 +11,27 @@ from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
-__all__ = ["HOUR", "WEEK_DAYS", "Window", "Zoom", "ticks", "window_for"]
+__all__ = [
+    "HOUR",
+    "RUN_DATES_AFTER",
+    "RUN_DATES_BEFORE",
+    "WEEK_DAYS",
+    "Window",
+    "Zoom",
+    "ticks",
+    "window_for",
+]
 
 HOUR = timedelta(hours=1)
 DAY = timedelta(days=1)
 WEEK_DAYS = 7
 """The longest window: seven local days."""
+
+RUN_DATES_BEFORE = 7
+"""Run dates read before the window's first day (a Monday run for Friday, a backfill...)."""
+
+RUN_DATES_AFTER = 1
+"""Run dates read after the window's last day (a job in a zone ahead of the scheduler's)."""
 
 TEN_MINUTES = timedelta(minutes=10)
 _TEN = 10
@@ -54,10 +69,17 @@ class Window:
         return self.start <= moment <= self.end
 
     def run_dates(self, zone: ZoneInfo) -> list[date]:
-        """Return the run dates to read: each local day touched, and the day before the first."""
+        """Return the run dates to read: each local day touched, a week before, a day after.
+
+        A run's date can be well before the day it runs (``previous_business_day``
+        on a Monday, after a holiday, a backfill) or a day after (a job in a
+        zone ahead of the scheduler's); the bars keep only attempts that
+        overlap the window.
+        """
         first = self.start.astimezone(zone).date()
         last = (self.end - timedelta(microseconds=1)).astimezone(zone).date()
-        return [first + timedelta(days=n) for n in range(-1, (last - first).days + 1)]
+        days = range(-RUN_DATES_BEFORE, (last - first).days + 1 + RUN_DATES_AFTER)
+        return [first + timedelta(days=n) for n in days]
 
 
 def _midnight(day: date, zone: ZoneInfo) -> datetime:

@@ -35,7 +35,7 @@ from pyscheduler.ui.html import Safe, h, join
 from pyscheduler.ui.layout import page
 from pyscheduler.ui.timeline_window import DAY, WEEK_DAYS, Window, Zoom, ticks, window_for
 
-__all__ = ["Bar", "TimelineQuery", "add_timeline", "bars"]
+__all__ = ["GHOST_CAP", "Bar", "TimelineQuery", "add_timeline", "bars"]
 
 LABEL_W = 160
 PLOT_W = 1000
@@ -47,6 +47,11 @@ MIN_BAR = 3
 
 GHOST = "ghost"
 RUNNING = "running"
+UNKNOWN = "unknown"
+"""The kind of an attempt with no end and no outcome whose run is not running."""
+
+GHOST_CAP = 200
+"""The most ghost bars drawn in one lane; the rest become one merged band."""
 _DASH = "\N{EN DASH}"
 
 
@@ -58,7 +63,7 @@ class Bar:
     start: datetime
     end: datetime
     kind: str
-    """The outcome (``succeeded``, ``failed``...), ``running`` or ``ghost``."""
+    """The outcome (``succeeded``, ``failed``...), ``running``, ``unknown`` or ``ghost``."""
     tip: str
     href: str | None
 
@@ -115,7 +120,9 @@ def bars(
     """Return the bars for the window: each attempt that overlaps it, then the ghosts.
 
     A running attempt ends at ``now``. An attempt with no end that is not
-    running is drawn as a sliver at its start.
+    running is drawn as a sliver at its start, of kind ``unknown`` when it
+    has no outcome either. A lane gets at most ``GHOST_CAP`` ghosts (see
+    ``_ghosts``).
     """
     found: list[Bar] = []
     for run in runs:
@@ -124,19 +131,46 @@ def bars(
             end = attempt.ended_at or (now if running else attempt.started_at)
             if end < window.start or attempt.started_at > window.end:
                 continue
-            kind = attempt.outcome.value if attempt.outcome else RUNNING
+            kind = attempt.outcome.value if attempt.outcome else (RUNNING if running else UNKNOWN)
             span = f"{_clock(attempt.started_at, zone)}{_DASH}" + (
                 _clock(end, zone) if attempt.ended_at or running else ""
             )
             tip = f"attempt {attempt.attempt}: {kind.replace('_', ' ')}, {span}"
             href = f"/runs/{quote(run.run_id, safe='')}"
             found.append(Bar(run.job, attempt.started_at, end, kind, tip, href))
-    for entry in entries:
-        end = entry.expected_start + (entry.expected_duration or timedelta(0))
-        tip = f"expected: {entry.job}, run date {entry.run_date}, {_clock(entry.expected_start, zone)}"
-        found.append(Bar(entry.job, entry.expected_start, end, GHOST, tip, None))
+    found += _ghosts(entries, zone)
     found.sort(key=lambda bar: (bar.job, bar.start, bar.kind))
     return found
+
+
+def _ghosts(entries: Sequence[ForecastEntry], zone: ZoneInfo) -> list[Bar]:
+    """Return a ghost bar per forecast entry, at most ``GHOST_CAP`` per job.
+
+    Past the cap (a job due every minute has 10,000 in a week) one merged
+    band covers the rest, from the first left out to the end of the last.
+    """
+    by_job: dict[str, list[ForecastEntry]] = {}
+    for entry in sorted(entries, key=lambda e: (e.job, e.expected_start)):
+        by_job.setdefault(entry.job, []).append(entry)
+    found: list[Bar] = []
+    for job, listed in by_job.items():
+        for entry in listed[:GHOST_CAP]:
+            tip = (
+                f"expected: {job}, run date {entry.run_date}, {_clock(entry.expected_start, zone)}"
+            )
+            found.append(Bar(job, entry.expected_start, _expected_end(entry), GHOST, tip, None))
+        rest = listed[GHOST_CAP:]
+        if rest:
+            start, end = rest[0].expected_start, max(_expected_end(e) for e in rest)
+            span = f"{_clock(start, zone)}{_DASH}{_clock(end, zone)}"
+            tip = f"{len(rest)} more expected runs of {job}, {span}"
+            found.append(Bar(job, start, end, GHOST, tip, None))
+    return found
+
+
+def _expected_end(entry: ForecastEntry) -> datetime:
+    """Return when a forecast entry is expected to end (its start when there is no estimate)."""
+    return entry.expected_start + (entry.expected_duration or timedelta(0))
 
 
 def _x(window: Window, moment: datetime) -> float:

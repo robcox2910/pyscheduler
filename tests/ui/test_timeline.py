@@ -118,10 +118,14 @@ class TestWindows:
         assert all(m.minute % 10 == 0 for m in marks)
         assert len(ticks(window_for(Zoom.DAY, TODAY, _at(12), LONDON), LONDON)) == DAY_TICKS
 
-    def test_run_dates_include_the_day_before(self) -> None:
-        """The run dates read start one day before the first local day shown."""
+    def test_run_dates_reach_a_week_back_and_a_day_on(self) -> None:
+        """The run dates read go from a week before the first local day to a day after the last."""
         day = window_for(Zoom.DAY, TODAY, _at(12), LONDON)
-        assert day.run_dates(LONDON) == [TODAY - timedelta(days=1), TODAY]
+        found = day.run_dates(LONDON)
+        assert (found[0], found[-1]) == (
+            TODAY - timedelta(days=WEEK_DAYS),
+            TODAY + timedelta(days=1),
+        )
 
 
 class TestPage:
