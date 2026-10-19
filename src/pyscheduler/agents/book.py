@@ -10,11 +10,14 @@ busy.
 All timing goes through the injected engine ``Clock``.
 """
 
+import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from pyscheduler.engine.clock import Cancel, Clock
+
+logger = logging.getLogger("pyscheduler.agents")
 
 RunKey = tuple[str, int]
 """A run id and an attempt number: the key of one slot held on an agent."""
@@ -29,7 +32,11 @@ class Refusal:
 
 @dataclass
 class AgentState:
-    """What the book knows about one agent."""
+    """What the book knows about one agent.
+
+    ``running`` is the effective load: the keys the agent reported plus the
+    keys the hub reserved that the agent has not reported yet.
+    """
 
     name: str
     tags: frozenset[str] = frozenset()
@@ -60,6 +67,9 @@ class AgentBook:
         self._grace = grace
         self._agents: dict[str, AgentState] = {}
         self._timers: dict[str, Cancel] = {}
+        self._reported: dict[str, set[RunKey]] = {}
+        self._reserved: dict[str, set[RunKey]] = {}
+        self._closed = False
         self._watchers: list[Callable[[AgentState], None]] = []
 
     def heard(
@@ -73,8 +83,11 @@ class AgentBook:
         """Record that ``name`` spoke: mark it online and re-arm its offline timer.
 
         Arguments left as ``None`` keep the stored values. ``running``
-        replaces the set, because the agent is the authority on what it runs.
+        replaces the reported set, because the agent is the authority on what
+        it runs; any reserved key it now reports becomes the agent's own.
         """
+        if self._closed:
+            return
         state = self._agents.setdefault(name, AgentState(name))
         before = (state.online, state.tags, state.max_running, set(state.running))
         now = self._clock.now()
@@ -85,7 +98,10 @@ class AgentBook:
         if max_running is not None:
             state.max_running = max_running
         if running is not None:
-            state.running = set(running)
+            reported = set(running)
+            self._reported[name] = reported
+            self._reserved.get(name, set()).difference_update(reported)
+            state.running = reported | self._reserved.get(name, set())
         timer = self._timers.pop(name, None)
         if timer is not None:
             timer.cancel()
@@ -96,6 +112,8 @@ class AgentBook:
     def _expire(self, name: str) -> None:
         """Mark ``name`` offline: its grace ran out."""
         self._timers.pop(name, None)
+        if self._closed:
+            return
         state = self._agents[name]
         if not state.online:
             return
@@ -134,10 +152,15 @@ class AgentBook:
         return len(state.running) < state.max_running
 
     def reserve(self, name: str, key: RunKey) -> None:
-        """Hold a slot on ``name`` for ``key`` (idempotent)."""
-        state = self._agents.get(name)
-        if state is None or key in state.running:
+        """Hold a slot on ``name`` for ``key`` (idempotent).
+
+        An agent never heard from is entered as offline with no slots, so
+        recovery can re-adopt slots before its hello arrives.
+        """
+        state = self._agents.setdefault(name, AgentState(name))
+        if key in state.running:
             return
+        self._reserved.setdefault(name, set()).add(key)
         state.running.add(key)
         self._notify(state)
 
@@ -146,6 +169,8 @@ class AgentBook:
         state = self._agents.get(name)
         if state is None or key not in state.running:
             return
+        self._reserved.get(name, set()).discard(key)
+        self._reported.get(name, set()).discard(key)
         state.running.discard(key)
         self._notify(state)
 
@@ -172,10 +197,14 @@ class AgentBook:
     def _notify(self, state: AgentState) -> None:
         """Tell every watcher about ``state``."""
         for callback in list(self._watchers):
-            callback(_copy(state))
+            try:
+                callback(_copy(state))
+            except Exception:
+                logger.exception("agent watcher failed")
 
     def close(self) -> None:
-        """Cancel every offline timer."""
+        """Cancel every offline timer and ignore later reports."""
+        self._closed = True
         for timer in self._timers.values():
             timer.cancel()
         self._timers.clear()
