@@ -28,6 +28,7 @@ from pydb.transaction import Transaction
 
 from pyscheduler.engine.model import FINAL_STATES, Attempt, Event, Run, RunState
 from pyscheduler.store.alert_store import AlertReads, AlertStage, AlertTables
+from pyscheduler.store.config_reads import ConfigReads
 from pyscheduler.store.duration_reads import DurationReads
 from pyscheduler.store.schema import (
     ATTEMPTS,
@@ -68,7 +69,7 @@ OPEN_STATES = tuple(state for state in RunState if state not in FINAL_STATES)
 """The states a run can be in before it is final, in lifecycle order."""
 
 
-class Store(AlertReads, DurationReads):
+class Store(AlertReads, ConfigReads, DurationReads):
     """Hide PyDB behind a small typed API for the engine.
 
     Every read takes PyDB's lock, so it can wait for a group commit that

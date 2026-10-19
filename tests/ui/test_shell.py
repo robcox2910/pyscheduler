@@ -1,6 +1,7 @@
 """Test the web UI shell: HTML helpers, login and logout, static files, headers."""
 
 import html
+import json
 import subprocess
 import sys
 from datetime import timedelta
@@ -35,6 +36,13 @@ MINUTE = timedelta(minutes=1)
 NO_SLASH = HOSTILE.replace("/", "")
 """Hostile text a run id in a URL path can carry (a ``/`` would end the path segment)."""
 NO_SLASH_RUN = make_run_id(NO_SLASH, TODAY, 1)
+HOSTY_JOBS = f"""
+jobs:
+  hosty:
+    command: run-hosty
+    schedule: manual
+    description: {json.dumps(HOSTILE)}
+"""
 HTML = {"Accept": "text/html"}
 DEV_HTML = {"Accept": "text/html", "Host": "127.0.0.1:8470"}
 PEOPLE = {"ada": "admin", "vic": "viewer", "ola": "operator"}
@@ -267,6 +275,8 @@ class TestShell:
             (f"/ui/fragments/board-row/{quote(NO_SLASH_RUN, safe='')}", NO_SLASH),
             (f"/ui/fragments/board-row/{quote(NO_SLASH_RUN, safe='')}x", NO_SLASH),
             (f"/ui/fragments/board-counts?tag={quote(HOSTILE)}", None),
+            ("/jobs/hosty", HOSTILE),
+            (f"/runs/{quote(NO_SLASH_RUN, safe='')}", NO_SLASH),
         ],
     )
     def test_every_page_escapes(self, api: MakeApi, path: str, shows: str | None) -> None:
@@ -277,7 +287,7 @@ class TestShell:
         the reason too) are in the store for today; the page must contain
         ``shows`` escaped.
         """
-        h_ = api(tokens=False, users=users_yaml(ada="admin"))
+        h_ = api(HOSTY_JOBS, tokens=False, users=users_yaml(ada="admin"))
         add_shell(h_, name=HOSTILE, body=HOSTILE)
         seed(
             h_,

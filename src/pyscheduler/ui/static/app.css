@@ -161,3 +161,26 @@ input[type="text"], input[type="password"] {
 .board .actions { white-space: nowrap; }
 .board .actions button { font-size: var(--size-small); margin-right: var(--space-1); }
 .empty { color: var(--muted); }
+
+/* The job and run pages. */
+.definition th { width: 14rem; font-weight: 600; }
+.definition code, .summary code { word-break: break-all; }
+.summary { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); }
+.summary dt { color: var(--muted); }
+.summary dd { margin: 0; }
+.spark { display: flex; align-items: center; gap: var(--space-2); }
+.job-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-3); }
+.job-actions input { font: inherit; }
+.log-controls { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }
+.log-controls button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.log-text, .source {
+  max-height: 24rem;
+  overflow: auto;
+  padding: var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+#run-actions button { margin-right: var(--space-1); }

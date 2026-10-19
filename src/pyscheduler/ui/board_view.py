@@ -32,10 +32,13 @@ __all__ = [
     "FLAG_LOW",
     "BoardView",
     "Filters",
+    "action_buttons",
     "board_body",
+    "clock_cell",
     "counts_nav",
     "pinned",
     "row",
+    "runs_table",
 ]
 
 DASH = "\N{EN DASH}"
@@ -132,7 +135,7 @@ class BoardView:
     operator: bool
 
 
-def _clock(view: BoardView, column: str, value: datetime | None) -> Safe:
+def clock_cell(view: BoardView, column: str, value: datetime | None) -> Safe:
     """Return a time cell: ``HH:MM:SS`` in the scheduler's zone (the UTC instant as its title)."""
     if value is None:
         return h("td", {"data-col": column}, DASH)
@@ -167,20 +170,21 @@ def _typical(view: BoardView, run: Run, took: timedelta | None) -> Safe:
     )
 
 
+def action_buttons(run: Run) -> list[Safe]:
+    """Return one button per action the run's state allows (app.js posts them to the API)."""
+    return [
+        h(
+            "button",
+            {"type": "button", "data-action": action, "data-run": run.run_id},
+            _LABELS[action],
+        )
+        for action in ACTIONS[run.state]
+    ]
+
+
 def _actions(run: Run) -> Safe:
     """Return the actions cell: one button per action the run's state allows."""
-    return h(
-        "td",
-        {"data-col": "actions", "class": "actions"},
-        *(
-            h(
-                "button",
-                {"type": "button", "data-action": action, "data-run": run.run_id},
-                _LABELS[action],
-            )
-            for action in ACTIONS[run.state]
-        ),
-    )
+    return h("td", {"data-col": "actions", "class": "actions"}, *action_buttons(run))
 
 
 def row(view: BoardView, run: Run) -> Safe:
@@ -215,9 +219,9 @@ def row(view: BoardView, run: Run) -> Safe:
             {"data-col": "criticality", "class": "critical" if critical else None},
             criticality,
         ),
-        _clock(view, "scheduled", run.scheduled_at),
-        _clock(view, "start", None if attempt is None else attempt.started_at),
-        _clock(view, "end", None if attempt is None else attempt.ended_at),
+        clock_cell(view, "scheduled", run.scheduled_at),
+        clock_cell(view, "start", None if attempt is None else attempt.started_at),
+        clock_cell(view, "end", None if attempt is None else attempt.ended_at),
         h("td", {"data-col": "duration"}, DASH if took is None else duration_text(took)),
         _typical(view, run, took),
         h(
@@ -326,19 +330,26 @@ def _picker(filters: Filters) -> Safe:
     )
 
 
+def runs_table(
+    view: BoardView, runs: Sequence[Run], attrs: Mapping[str, str | bool | None] | None = None
+) -> Safe:
+    """Return the table of ``runs``, one board row each (``attrs`` go on the ``<table>``)."""
+    heads = [*_COLUMNS, "Actions"] if view.operator else list(_COLUMNS)
+    return h(
+        "table",
+        {"class": "board", **(attrs or {})},
+        h("thead", None, h("tr", None, *(h("th", {"scope": "col"}, name) for name in heads))),
+        h("tbody", None, *(row(view, run) for run in runs)),
+    )
+
+
 def board_body(view: BoardView, runs: Sequence[Run], counts: Mapping[RunState, int]) -> Safe:
     """Return the board page's body: the filters, the counts and the table of ``runs``."""
-    heads = [*_COLUMNS, "Actions"] if view.operator else list(_COLUMNS)
     return join(
         h("h1", None, f"Board · {view.filters.day.isoformat()}"),
         _picker(view.filters),
         counts_nav(view.filters, counts),
         h("p", {"id": "board-message", "class": "error", "role": "status", "hidden": True}),
-        h(
-            "table",
-            {"id": "board", "class": "board", "data-date": view.filters.day.isoformat()},
-            h("thead", None, h("tr", None, *(h("th", {"scope": "col"}, name) for name in heads))),
-            h("tbody", None, *(row(view, run) for run in runs)),
-        ),
+        runs_table(view, runs, {"id": "board", "data-date": view.filters.day.isoformat()}),
         h("p", {"id": "board-empty", "class": "empty", "hidden": bool(runs)}, "No runs match."),
     )

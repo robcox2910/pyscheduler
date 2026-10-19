@@ -170,6 +170,13 @@ class TestBoard:
             assert fragment.status == OK
             assert find(fragment.text, "nav", id="board-counts")
             assert "<html" not in fragment.text
+            empty = await _get(h_, "/?date=")  # a cleared date picker means today
+            assert empty.status == OK
+            (picker,) = find(empty.text, "input", name="date")
+            assert (
+                picker[1]["value"]
+                == START.astimezone(h_.config.settings.timezone).date().isoformat()
+            )
             for query in ("date=nope", "state=bogus", "criticality=bogus"):
                 assert (await _get(h_, f"/?{query}")).status == BAD_REQUEST, query
 

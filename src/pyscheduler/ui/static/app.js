@@ -1,4 +1,5 @@
-// Shared helpers for the pyscheduler web UI, and the live job board. Server
+// Shared helpers for the pyscheduler web UI, the live job board, the job and
+// run pages and the live log viewer. Server
 // text goes into the page with textContent only. The one exception is HTML
 // fragments from our own /ui/fragments/... routes (drawn and escaped by the
 // server), parsed in a <template> and swapped in whole. Event data is never
@@ -111,7 +112,11 @@ async function runAction(button) {
   button.disabled = false;
   if (result.ok) {
     say("");
-    refreshRow(button.dataset.run);
+    if (board) {
+      refreshRow(button.dataset.run);
+    } else {
+      window.location.reload();
+    }
   } else {
     const error = result.data && result.data.error;
     say(error ? String(error) : `${action} failed (${result.status || "network error"})`);
@@ -263,4 +268,183 @@ if (board) {
       refreshRow(runId);
     }
   });
+}
+
+// -- job page: trigger and backfill ---------------------------------------
+
+/** Return the value of the date input `id` ("" when empty or missing). */
+function dateValue(id) {
+  const input = document.getElementById(id);
+  return input ? input.value : "";
+}
+
+/**
+ * Run a `data-job-action` button: confirm, then POST the trigger (an
+ * optional run date) or the backfill (`from` and `to`, both needed) to the
+ * API. The API's error text is shown in `#board-message`.
+ */
+async function jobAction(button) {
+  const box = button.closest("[data-job]");
+  const kind = button.dataset.jobAction;
+  const body = {};
+  if (kind === "trigger") {
+    const day = dateValue("trigger-date");
+    if (day) {
+      body.run_date = day;
+    }
+  } else {
+    body.from = dateValue("backfill-from");
+    body.to = dateValue("backfill-to");
+    if (!body.from || !body.to) {
+      say("Pick both a from and a to date to backfill.");
+      return;
+    }
+  }
+  if (!(await confirmThen(button))) {
+    return;
+  }
+  button.disabled = true;
+  let result;
+  try {
+    result = await post(`/api/jobs/${encodeURIComponent(box.dataset.job)}/${kind}`, body);
+  } catch {
+    result = { ok: false, status: 0, data: null };
+  }
+  button.disabled = false;
+  if (result.ok) {
+    window.location.reload();
+  } else {
+    const error = result.data && result.data.error;
+    say(error ? String(error) : `${kind} failed (${result.status || "network error"})`);
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-job-action]");
+  if (button) {
+    event.preventDefault();
+    jobAction(button);
+  }
+});
+
+// -- run page: live log and live refresh ----------------------------------
+
+const logBox = document.getElementById("log");
+const runPage = document.getElementById("run-page");
+const RELOAD_MS = 500;
+let reloadTimer = null;
+
+/** Reload the run page soon (a burst of changes costs one reload). */
+function reloadSoon() {
+  if (reloadTimer === null) {
+    reloadTimer = setTimeout(() => window.location.reload(), RELOAD_MS);
+  }
+}
+
+if (runPage) {
+  // Registered at load, so no event after the page was drawn is missed.
+  onLive("run", (data) => {
+    if (String(data.run_id) === runPage.dataset.runId) {
+      reloadSoon();
+    }
+  });
+  onLive("attempt", (data) => {
+    if (
+      String(data.run_id) === runPage.dataset.runId &&
+      Number(data.attempt) > Number(runPage.dataset.attempts)
+    ) {
+      reloadSoon();
+    }
+  });
+}
+
+if (logBox) {
+  const text = document.getElementById("log-text");
+  const status = document.getElementById("log-status");
+  const picker = document.getElementById("log-attempt");
+  const tabs = Array.from(logBox.querySelectorAll("button[data-stream]"));
+  let stream = "stdout";
+  let source = null;
+  let fresh = true; // the next `lines` replace the text (a (re)connect sends the tail again)
+
+  /** Close the open log stream, if any. */
+  const closeLog = () => {
+    if (source !== null) {
+      source.close();
+      source = null;
+    }
+  };
+
+  /** Show a status line under the tabs. */
+  const tell = (message) => {
+    status.textContent = message;
+  };
+
+  /** Add `lines` to the text (or replace it when `fresh`), keeping the view at the end if it was. */
+  const show = (lines) => {
+    const atEnd = text.scrollTop + text.clientHeight >= text.scrollHeight - 4;
+    const chunk = lines.length ? lines.join("\n") + "\n" : "";
+    if (fresh) {
+      text.textContent = chunk;
+      fresh = false;
+    } else {
+      text.append(document.createTextNode(chunk));
+    }
+    if (atEnd) {
+      text.scrollTop = text.scrollHeight;
+    }
+  };
+
+  /** (Re)open the log of the picked attempt and stream. */
+  const openLog = () => {
+    closeLog();
+    text.textContent = "";
+    fresh = true;
+    const chosen = picker.selectedOptions[0];
+    if (stream === "stderr" && chosen && chosen.dataset.merged === "1") {
+      tell("stderr is merged into stdout for this attempt.");
+      return;
+    }
+    tell("Connecting...");
+    const query = new URLSearchParams({ stream, attempt: picker.value });
+    const opened = new EventSource(
+      `/events/log/${encodeURIComponent(logBox.dataset.run)}?${query.toString()}`,
+    );
+    source = opened;
+    opened.addEventListener("open", () => {
+      fresh = true;
+      tell("Live.");
+    });
+    opened.addEventListener("lines", (event) => show(JSON.parse(event.data)));
+    opened.addEventListener("reset", () => {
+      text.textContent = "";
+      fresh = false;
+    });
+    opened.addEventListener("end", () => {
+      opened.close();
+      if (source === opened) {
+        source = null;
+      }
+      tell("The attempt has ended.");
+    });
+    opened.addEventListener("error", () => {
+      if (opened.readyState === EventSource.CLOSED) {
+        tell("There is no log for this attempt and stream.");
+      } else {
+        tell("Reconnecting...");
+      }
+    });
+  };
+
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => {
+      stream = tab.dataset.stream;
+      for (const other of tabs) {
+        other.setAttribute("aria-pressed", String(other === tab));
+      }
+      openLog();
+    });
+  }
+  picker.addEventListener("change", openLog);
+  openLog();
 }

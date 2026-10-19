@@ -35,7 +35,7 @@ from pyscheduler.ui.board_view import BoardView, Filters, board_body, counts_nav
 from pyscheduler.ui.html import Safe, h
 from pyscheduler.ui.layout import page, secure
 
-__all__ = ["BOARD_LIMIT", "add_board"]
+__all__ = ["BOARD_LIMIT", "add_board", "build_view"]
 
 BOARD_LIMIT = 100_000
 """The most runs one board shows (far more than any real day)."""
@@ -53,8 +53,9 @@ def _filters(engine: Engine, request: HttpRequest) -> Filters:
 
     """
     zone = engine.config.settings.timezone
-    day = query_date(request, "date") or engine.clock.now().astimezone(zone).date()
     query = request.query
+    given = query_date(request, "date") if query.get("date") else None  # empty means today
+    day = given or engine.clock.now().astimezone(zone).date()
     state_text = query.get("state") or None
     try:
         state = None if state_text is None else RunState(state_text)
@@ -78,7 +79,7 @@ def _ordered(engine: Engine, runs: Sequence[Run]) -> list[Run]:
     )
 
 
-async def _view(
+async def build_view(
     engine: Engine, request: HttpRequest, filters: Filters, runs: list[Run]
 ) -> BoardView:
     """Read the latest attempts and the typical durations of ``runs`` (one helper-thread trip)."""
@@ -137,7 +138,7 @@ def add_board(app: App, engine: Engine) -> None:
         except ApiError as exc:
             return _refused(request, exc)
         shown, counts = await _day(engine, filters)
-        view = await _view(engine, request, filters, shown)
+        view = await build_view(engine, request, filters, shown)
         return page(request, title="Board", body=board_body(view, shown, counts), active="board")
 
     @app.get(ROW_FRAGMENT)
@@ -150,7 +151,7 @@ def add_board(app: App, engine: Engine) -> None:
             return _fragment(h("p", None, exc.message), exc.status)
         if run.run_date != filters.day or not filters.matches(run, engine.config.jobs.get(run.job)):
             return _fragment(h("p", None, "not on this board"), _NOT_FOUND)
-        view = await _view(engine, request, filters, [run])
+        view = await build_view(engine, request, filters, [run])
         return _fragment(row(view, run))
 
     @app.get(COUNTS_FRAGMENT)

@@ -9,6 +9,7 @@ from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.api.access import STATIC_PREFIX
 from pyscheduler.engine.core import Engine
 from pyscheduler.ui.board import add_board
+from pyscheduler.ui.detail import add_detail
 from pyscheduler.ui.live import LiveFeed, add_live
 from pyscheduler.ui.login import add_login
 from pyscheduler.ui.logtail import add_log_tail
@@ -52,3 +53,4 @@ def add_ui(
         add_live(app, live)
     add_log_tail(app, engine)
     add_board(app, engine)
+    add_detail(app, engine)
