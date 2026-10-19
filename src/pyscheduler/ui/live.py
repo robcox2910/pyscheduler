@@ -119,6 +119,7 @@ class LiveFeed:
         self._count = 0
         self._buffer: deque[tuple[int, ServerEvent]] = deque(maxlen=buffer)
         self._listeners: set[_Listener] = set()
+        self._generation = 0
 
     @property
     def last_id(self) -> str:
@@ -150,7 +151,8 @@ class LiveFeed:
         return event.id or ""
 
     def close_all(self) -> None:
-        """End every open stream (the browsers reconnect and are checked again)."""
+        """End every open stream, and any made but not yet started (browsers reconnect, checked again)."""
+        self._generation += 1
         for listener in self._listeners:
             listener.hang_up()
 
@@ -169,15 +171,25 @@ class LiveFeed:
         return [(number, event) for number, event in self._buffer if number > heard]
 
     def stream(self, last_event_id: str | None) -> EventStream:
-        """Return the stream for a browser that last heard ``last_event_id`` (``None``: new)."""
-        return EventStream(self._events(last_event_id), keepalive=KEEPALIVE)
+        """Return the stream for a browser that last heard ``last_event_id`` (``None``: new).
 
-    async def _events(self, last_event_id: str | None) -> AsyncIterator[ServerEvent]:
+        The generation (how many ``close_all`` calls so far) is taken now,
+        when the caller has passed the door; a stream that only starts
+        after a ``close_all`` is older than the current generation and ends.
+        """
+        return EventStream(self._events(last_event_id, self._generation), keepalive=KEEPALIVE)
+
+    async def _events(
+        self, last_event_id: str | None, generation: int
+    ) -> AsyncIterator[ServerEvent]:
         """Yield the missed events, then live ones, until the stream is closed or hung up.
 
         Joining and taking the replay happen in one step on the loop, so no
         event can fall between them; the number check drops any repeat.
+        A stream from before the latest ``close_all`` yields nothing.
         """
+        if generation != self._generation:
+            return
         listener = _Listener(self._limit)
         self._listeners.add(listener)
         try:

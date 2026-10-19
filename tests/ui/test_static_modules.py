@@ -111,7 +111,6 @@ class TestWithNode:
         assert done.returncode == 0, done.stderr
         assert json.loads(done.stdout) == {"reloads": 1, "notice": notice}
 
-
     def test_restart_waits_for_the_scheduler(self) -> None:
         """A 503 from ``/api/health`` is waited out (1 s, then 2 s) before the one reload."""
         done = _node(str(HARNESS), str(STATIC_DIR / "common.js"), "restart")
