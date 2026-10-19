@@ -8,6 +8,10 @@
 
 const CONFIRM_MS = 4000;
 const GONE_RELOAD_MS = 1500;
+const BACKOFF_FIRST_MS = 1000;
+const BACKOFF_MAX_MS = 15000;
+const UNAVAILABLE = 503;
+const HEALTH_TIMEOUT_MS = 10000;
 
 /** The line shown when the session has expired (or the user was removed). */
 export const SESSION_EXPIRED = "Your session has expired — please sign in again";
@@ -32,7 +36,9 @@ let leaving = false;
  * Show `message` at the top of the page and reload it soon. A reload is a
  * page load (Accept: text/html), so an expired session lands on
  * /login?next=..., and a live session simply redraws. Only the first call
- * counts.
+ * counts. The reload waits until the scheduler answers (during a restart
+ * the port says 503 "scheduler is starting", and a reload then would land
+ * on a bare JSON page with no script).
  */
 export function reloadBecause(message) {
   if (leaving) {
@@ -49,7 +55,33 @@ export function reloadBecause(message) {
     main.prepend(line);
   }
   line.textContent = message;
-  setTimeout(() => window.location.reload(), GONE_RELOAD_MS);
+  setTimeout(async () => {
+    await untilServing();
+    window.location.reload();
+  }, GONE_RELOAD_MS);
+}
+
+/**
+ * Resolve once `/api/health` answers with anything but 503 or a network
+ * error, waiting 1 s, 2 s, 4 s ... (at most 15 s) between tries.
+ */
+async function untilServing() {
+  let pause = BACKOFF_FIRST_MS;
+  for (;;) {
+    try {
+      const response = await fetch("/api/health", {
+        credentials: "same-origin",
+        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      });
+      if (response.status !== UNAVAILABLE) {
+        return;
+      }
+    } catch {
+      // the port is not answering yet (or not in time): wait and try again
+    }
+    await new Promise((resolve) => setTimeout(resolve, pause));
+    pause = Math.min(pause * 2, BACKOFF_MAX_MS);
+  }
 }
 
 /**

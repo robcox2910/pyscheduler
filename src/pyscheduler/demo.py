@@ -151,6 +151,7 @@ async def _run_seed(path: Path, token: str) -> None:
 
     Raises:
         SeedInterruptedError: If the scheduler went away (Ctrl-C) mid-seed.
+        ApiError: If the scheduler refused a seeding call while still serving.
         TimeoutError: If it does not start or the runs do not finish in time.
 
     """
@@ -169,8 +170,10 @@ async def _run_seed(path: Path, token: str) -> None:
         url = f"http://127.0.0.1:{ports[0]}"
         try:
             await pynet.loop.run_in_thread(lambda: _seed_runs(url, token))
-        except ApiError as exc:  # the scheduler stopped under us (a signal)
-            lost = exc
+        except ApiError as exc:
+            if not (stop.is_set() or task.done()):
+                raise  # a real failure (say a refused trigger): show its message
+            lost = exc  # the scheduler stopped under us (a signal)
     finally:
         stop.set()
         await task  # raises what serve raised, if it failed

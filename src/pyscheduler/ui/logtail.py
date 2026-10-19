@@ -66,6 +66,12 @@ class LogTails:
     def __init__(self) -> None:
         """Start with no tails open."""
         self._open: set[TailTicket] = set()
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        """Return how many times ``close_all`` has run (a tail started earlier is stale)."""
+        return self._generation
 
     def open(self) -> TailTicket:
         """Return a new open ticket for a tail that is starting."""
@@ -79,6 +85,7 @@ class LogTails:
 
     def close_all(self) -> None:
         """Close every open ticket; each tail stops at its next look."""
+        self._generation += 1
         for ticket in self._open:
             ticket.closed = True
         self._open.clear()
@@ -166,13 +173,16 @@ def _unreadable(path: Path, error: OSError) -> ServerEvent:
 
 
 async def _tail(
-    engine: Engine, attempt: Attempt, path: Path, tails: LogTails
+    engine: Engine, attempt: Attempt, path: Path, tails: LogTails, generation: int
 ) -> AsyncIterator[ServerEvent]:
     """Yield the tail of ``path``, then its new lines, then ``end`` once ``attempt`` is over.
 
     It holds a ticket from ``tails`` and stops early, without ``end``,
-    once that ticket is closed.
+    once that ticket is closed. ``generation`` is ``tails.generation`` from
+    when the caller passed the door: if ``close_all`` ran since, it ends at once.
     """
+    if generation != tails.generation:
+        return
     run_id, number = attempt.run_id, attempt.attempt
     ended = [attempt.ended_at is not None]
 
@@ -236,6 +246,7 @@ def add_log_tail(app: App, engine: Engine, tails: LogTails | None = None) -> Non
     @app.get(f"{LIVE_PATH}/log/<run_id>")
     async def log_tail(request: HttpRequest, run_id: str) -> HttpResponse | EventStream:
         """Stream an attempt's log; answer JSON 400 or 404 as the log API does."""
+        generation = held.generation  # before any wait: a swap after the door must end this tail
         try:
             stream, number = log_query(request)
             attempt, path = await log_path(engine, run_id, stream, number)
@@ -244,6 +255,8 @@ def add_log_tail(app: App, engine: Engine, tails: LogTails | None = None) -> Non
                 raise not_found(msg)
         except ApiError as exc:
             return exc.response()
-        return EventStream(_tail(engine, attempt, Path(path), held), keepalive=KEEPALIVE)
+        return EventStream(
+            _tail(engine, attempt, Path(path), held, generation), keepalive=KEEPALIVE
+        )
 
     del log_tail

@@ -1,12 +1,15 @@
 """Test the demo's seeding guards: main thread only, the ``seeded`` marker, odd folder names."""
 
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
+import pynet.loop
 import pytest
 
 from pyscheduler import demo
+from pyscheduler.client import ApiError
 from pyscheduler.config import load_config
 from pyscheduler.demo import SEEDED_MARK, SeedInterruptedError, seed_demo, serve_demo
 from pyscheduler.demo_config import config_text
@@ -14,6 +17,10 @@ from pyscheduler.demo_config import config_text
 INTERRUPTED = 130
 """The exit code for a seed stopped by Ctrl-C (128 + SIGINT)."""
 DEMO_JOBS = 12
+BAD_REQUEST = 400
+"""The status of a trigger the scheduler refused."""
+SETTLE_SECONDS = 0.3
+"""How long a stand-in waits for the stand-in scheduler to notice it should stop."""
 
 
 class _StopError(Exception):
@@ -142,3 +149,54 @@ class TestInterrupted:
         monkeypatch.setattr(demo, "seed_demo", interrupted)
         assert demo.main(["--seed-only", "--folder", "unused"]) == INTERRUPTED
         assert capsys.readouterr().err == "seed interrupted\n"
+
+
+class TestSeedFailures:
+    """Only a client error after the scheduler stopped is "seed interrupted"; others surface."""
+
+    @staticmethod
+    def _fake_serve(gone: threading.Event) -> Callable[..., object]:
+        """Return a stand-in ``serve`` that listens on port 1 and ends when ``gone`` is set."""
+
+        async def fake_serve(
+            path: Path, *, ready: Callable[[int], None], stop: pynet.loop.Event
+        ) -> None:
+            """Report a port, then run until stopped or ``gone``."""
+            del path
+            ready(1)
+            while not stop.is_set() and not gone.is_set():
+                await pynet.loop.sleep(0.01)
+
+        return fake_serve
+
+    def test_real_failure_surfaces(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A 400 while the scheduler is still serving is raised as itself, not "interrupted"."""
+        gone = threading.Event()
+
+        def refused(url: str, token: str) -> None:
+            """Fail like a trigger the scheduler refused."""
+            del url, token
+            raise ApiError(BAD_REQUEST, "unknown job")
+
+        monkeypatch.setattr(demo, "serve", self._fake_serve(gone))
+        monkeypatch.setattr(demo, "_seed_runs", refused)
+        with pytest.raises(ApiError, match="unknown job"):
+            pynet.loop.run(demo._run_seed(tmp_path / "x.yaml", "t"))
+
+    def test_stopped_scheduler_is_interrupted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An error after the scheduler went away is "seed interrupted"."""
+        gone = threading.Event()
+
+        def lost(url: str, token: str) -> None:
+            """Stop the stand-in scheduler, then fail like a client that lost it."""
+            del url, token
+            gone.set()
+            time.sleep(SETTLE_SECONDS)
+            raise ApiError(0, "unreachable")
+
+        monkeypatch.setattr(demo, "serve", self._fake_serve(gone))
+        monkeypatch.setattr(demo, "_seed_runs", lost)
+        with pytest.raises(SeedInterruptedError):
+            pynet.loop.run(demo._run_seed(tmp_path / "x.yaml", "t"))

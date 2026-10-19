@@ -107,6 +107,44 @@ class TestRemovedUser:
         h.run(body)
 
 
+class TestSwapBeforeFirstLook:
+    """A stream that passed the door before a swap, but has not started yet, still ends."""
+
+    def test_live_stream_opened_before_the_swap_ends(self, api: MakeApi) -> None:
+        """Open ``/events`` as vic, never read it, remove vic and reload: its first look ends it."""
+        h = api(users=users_yaml(vic="viewer", olga="operator"), live=True)
+
+        async def body() -> None:
+            """Open the feed, swap the users, and only then start reading."""
+            assert h.live is not None
+            log_in(h, "vic")
+            stream = await open_stream(h, "/events", {"Last-Event-ID": h.live.last_id})
+            await _reload_with_only(h, "olga")
+            assert await _ended(stream)
+            assert h.live.listeners == 0
+            await stream.aclose()
+
+        h.run(body)
+
+    def test_log_tail_opened_before_the_swap_ends(
+        self, api: MakeApi, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Open a log tail as vic, never read it, remove vic and reload: it ends at once."""
+        monkeypatch.setattr(logtail, "LOG_POLL", QUICK_POLL)
+        h = api(users=users_yaml(vic="viewer", olga="operator"))
+
+        async def body() -> None:
+            """Open the tail, swap the users, and only then start reading."""
+            await _trigger(h)
+            log_in(h, "vic")
+            stream = await open_stream(h, f"/events/log/{ADHOC}")
+            await _reload_with_only(h, "olga")
+            assert await _ended(stream)
+            await stream.aclose()
+
+        h.run(body)
+
+
 class TestRevokedToken:
     """A revoked token's open ``curl /events`` ends at the tokens reload."""
 

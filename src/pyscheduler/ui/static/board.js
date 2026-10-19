@@ -8,12 +8,17 @@ export const board = document.getElementById("board");
 
 const COUNTS_DELAY_MS = 250;
 const RELOAD_MS = 500;
-const MOVED_KEY = "pyscheduler.board-moved-from";
+const CHECK_EVERY_MS = 60000;
+const CHECK_TIMEOUT_MS = 10000;
+const TRAILING_MIN_MS = 1000;
 const rowFetches = new Map(); // run id -> number of the newest fetch for it
 let fetchNumber = 0;
 let countsTimer = null;
 let countsNumber = 0; // the number of the newest counts fetch
 let reloadTimer = null;
+let trailing = null; // the one pending trailing check
+let checking = false; // a health check is in flight
+let lastCheck = -Infinity; // when the last one started
 
 /** Return the board's query (its filters, with the shown date) for a fragment. */
 function boardQuery() {
@@ -124,27 +129,44 @@ function reloadSoon() {
 }
 
 /**
- * A board opened without `?date=` shows "today"; once a run for a later
- * date arrives (local midnight has passed), reload once so it moves on.
- * If the reload did not move the board (that run is for a day still to
- * come), the board remembers its date and does not reload for it again.
+ * A board opened without `?date=` shows "today". A run for a later date
+ * may only be a job in another zone or a future-dated trigger, so ask the
+ * scheduler (`/api/health` says its today) and reload only when the day
+ * has really moved on. One check at a time, and at most one a minute. A
+ * call that is held back leaves one trailing check for when the minute is
+ * up (one timer at most), so the first event after midnight is not lost.
+ * A check that hangs is cut off after `CHECK_TIMEOUT_MS` and counts as failed.
  */
-function moveOn() {
-  let tried = null;
-  try {
-    tried = window.sessionStorage.getItem(MOVED_KEY);
-  } catch {
-    tried = null;
-  }
-  if (tried === board.dataset.date) {
+async function moveOn() {
+  const wait = lastCheck + CHECK_EVERY_MS - Date.now();
+  if (checking || wait > 0) {
+    if (trailing === null) {
+      trailing = setTimeout(
+        () => {
+          trailing = null;
+          moveOn();
+        },
+        Math.max(wait, TRAILING_MIN_MS),
+      );
+    }
     return;
   }
+  checking = true;
+  lastCheck = Date.now();
   try {
-    window.sessionStorage.setItem(MOVED_KEY, board.dataset.date);
+    const response = await fetch("/api/health", {
+      credentials: "same-origin",
+      signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+    });
+    const health = response.ok ? await response.json() : null;
+    if (health && health.today > board.dataset.date) {
+      reloadSoon();
+    }
   } catch {
-    // no storage: the reload still happens, once per page
+    // no answer in time: the next later-dated run asks again
+  } finally {
+    checking = false;
   }
-  reloadSoon();
 }
 
 if (board) {
