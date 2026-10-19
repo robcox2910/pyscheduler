@@ -26,8 +26,11 @@ from pydb.record import Record, Value
 from pydb.table import Table
 from pydb.transaction import Transaction
 
-from pyscheduler.engine.model import FINAL_STATES, Attempt, Event, Outcome, Run, RunState
+from pyscheduler.engine.model import FINAL_STATES, Attempt, Event, Run, RunState
 from pyscheduler.store.alert_store import AlertReads, AlertStage, AlertTables
+from pyscheduler.store.attempt_reads import AttemptReads
+from pyscheduler.store.config_reads import ConfigReads
+from pyscheduler.store.duration_reads import DurationReads
 from pyscheduler.store.schema import (
     ATTEMPTS,
     CONFIGS,
@@ -67,7 +70,7 @@ OPEN_STATES = tuple(state for state in RunState if state not in FINAL_STATES)
 """The states a run can be in before it is final, in lifecycle order."""
 
 
-class Store(AlertReads):
+class Store(AlertReads, AttemptReads, ConfigReads, DurationReads):
     """Hide PyDB behind a small typed API for the engine.
 
     Every read takes PyDB's lock, so it can wait for a group commit that
@@ -307,23 +310,6 @@ class Store(AlertReads):
         with self._db.lock:
             records = self._by_index(self._events, "events_run_id", run_id)
             return [event_from_row(r.data) for r in sorted(records, key=lambda r: r.record_id)]
-
-    def recent_durations(self, job: str, limit: int = 10) -> list[timedelta]:
-        """Return how long the job's latest succeeded attempts took, newest end first."""
-        with self._db.lock:
-            runs = self._by_index(self._runs, "runs_job", job)
-            attempts = [
-                attempt_from_row(record.data)
-                for run in runs
-                for record in self._by_index(self._attempts, "attempts_run_id", run["run_id"])
-            ]
-        done = [
-            (a.ended_at, a.ended_at - a.started_at)
-            for a in attempts
-            if a.outcome is Outcome.SUCCEEDED and a.ended_at is not None
-        ]
-        done.sort(key=lambda pair: pair[0], reverse=True)
-        return [took for _, took in done[:limit]]
 
     def get_engine(self, key: str) -> str | None:
         """Return the engine note stored under ``key``, or ``None``."""

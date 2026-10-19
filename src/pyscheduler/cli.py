@@ -1,8 +1,8 @@
 """The ``pysched`` command line: run the scheduler, or talk to a running one.
 
 ``pysched`` is the remote control for the scheduler. A few buttons work
-without the scheduler switched on (``validate``, ``forecast`` and
-``hash-token`` only read files here); ``serve`` switches it on; every
+without the scheduler switched on (``validate``, ``forecast``,
+``hash-token`` and ``hash-password`` only work here); ``serve`` switches it on; every
 other button sends a request to the scheduler's HTTP API.
 
 Where the API is: ``--url`` (or ``PYSCHED_URL``, default
@@ -85,7 +85,7 @@ def _connection(*, suppress: bool) -> argparse.ArgumentParser:
 
 
 def _add_offline(add: AddParser) -> None:
-    """Add ``validate``, ``serve``, ``forecast`` and ``hash-token``."""
+    """Add ``validate``, ``serve``, ``forecast``, ``hash-token`` and ``hash-password``."""
     validate = add("validate", help="check a config file")
     validate.add_argument("file", type=Path)
     serve_cmd = add("serve", help="run the scheduler")
@@ -97,6 +97,7 @@ def _add_offline(add: AddParser) -> None:
     forecast.add_argument("--from", dest="start", help="date or ISO instant (default now)")
     forecast.add_argument("--to", dest="end", help="date (inclusive) or ISO instant")
     add("hash-token", help="make a new API token and its sha256")
+    add("hash-password", help="hash a password for the users file")
 
 
 def _add_client(add: AddParser) -> None:

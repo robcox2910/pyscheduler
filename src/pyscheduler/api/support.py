@@ -18,7 +18,7 @@ from datetime import date
 from pynet.messaging import JsonValue
 from pyweb.messages import HTTPError, HttpRequest, HttpResponse, json
 
-from pyscheduler.api.auth import DEV_PRINCIPAL, Principal
+from pyscheduler.api.auth import Principal, Role
 from pyscheduler.engine.action_support import ActionError
 from pyscheduler.values import check_name, parse_date
 
@@ -42,6 +42,7 @@ type JsonObject = dict[str, JsonValue]
 type Handler = Callable[..., Awaitable[JsonObject]]
 
 BAD_REQUEST = 400
+UNAUTHORISED = 401
 NOT_FOUND = 404
 INTERNAL_ERROR = 500
 UNAVAILABLE = 503
@@ -90,16 +91,38 @@ def guarded(handler: Handler) -> Callable[..., Awaitable[HttpResponse]]:
     return call
 
 
-def role_of(request: HttpRequest) -> str:
-    """Return the caller's role (set by the token middleware)."""
+def _principal(request: HttpRequest) -> Principal:
+    """Return the caller the access layer vouched for.
+
+    Raises:
+        ApiError: 401 ``unauthorised`` if ``request.user`` is not a
+            ``Principal`` (fail closed: never guess a caller).
+
+    """
     user = request.user
-    return user.role if isinstance(user, Principal) else DEV_PRINCIPAL.role
+    if not isinstance(user, Principal):
+        raise ApiError(UNAUTHORISED, "unauthorised")
+    return user
+
+
+def role_of(request: HttpRequest) -> Role:
+    """Return the caller's role (set by the access layer).
+
+    Raises:
+        ApiError: 401 if the access layer set no ``Principal``.
+
+    """
+    return _principal(request).role
 
 
 def actor_of(request: HttpRequest) -> str:
-    """Return the caller's token name (set by the token middleware)."""
-    user = request.user
-    return user.name if isinstance(user, Principal) else DEV_PRINCIPAL.name
+    """Return the caller's name (a token's or a user's; set by the access layer).
+
+    Raises:
+        ApiError: 401 if the access layer set no ``Principal``.
+
+    """
+    return _principal(request).name
 
 
 def query_date(request: HttpRequest, name: str) -> date | None:

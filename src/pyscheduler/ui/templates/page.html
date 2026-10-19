@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="csrf-token" content="{{ csrf }}">
+<title>{{ title }} - pyscheduler</title>
+<link rel="stylesheet" href="/static/app.css">
+<script type="module" src="/static/app.js"></script>
+</head>
+<body data-live-after="{{ live_after }}">
+<header class="topbar">
+<a class="brand" href="/">pyscheduler</a>
+{{ nav|safe }}
+{{ who|safe }}
+</header>
+<main class="content">
+{{ body|safe }}
+</main>
+</body>
+</html>

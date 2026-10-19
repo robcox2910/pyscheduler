@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import time
+import urllib.request
 from pathlib import Path
 
 import pynet.loop
@@ -28,6 +29,8 @@ from service_helpers import (
 )
 
 FIRST_VERSION = 1
+BOOT_HEX = 8
+MIN_EVENTS = 4
 SECOND_VERSION = 2
 NOT_FOUND = 404
 
@@ -86,6 +89,32 @@ class TestServeEndToEnd:
         assert second is not None
         assert second.version == SECOND_VERSION
         assert second.digest != first.digest
+
+    def test_live_feed_is_attached(self, tmp_path: Path) -> None:
+        """``/events`` streams the engine's changes: a run of ``a`` and its attempt are numbered."""
+        path = write_config(tmp_path)
+        day = today()
+
+        def body(url: str) -> list[str]:
+            """Run ``a``, then reconnect with a foreign id and read the one ``reset``."""
+            client = ApiClient(url, None)
+            client.trigger("a", run_date=day)
+            wait_for_states(client, {"a": "succeeded", "b": "succeeded"}, run_date=day)
+            request = urllib.request.Request(  # noqa: S310 - our own loopback server
+                f"{url}/events", headers={"Last-Event-ID": "elsewhere-1"}
+            )
+            fields: list[str] = []
+            with urllib.request.urlopen(request, timeout=DONE_SECONDS) as response:  # noqa: S310
+                assert response.headers["Content-Type"] == "text/event-stream"
+                while line := response.readline().decode().strip():
+                    fields.append(line)
+            return fields
+
+        fields = with_service(path, body)
+        assert fields[0] == "event: reset"
+        boot, _, count = fields[1].removeprefix("id: ").rpartition("-")
+        assert len(boot) == BOOT_HEX
+        assert int(count) >= MIN_EVENTS  # a and b: their runs and attempts
 
 
 class TestSignals:
@@ -148,6 +177,14 @@ class TestRefusals:
         missing = tmp_path / "missing.yaml"
         path = write_config(tmp_path, extra=f"  api_tokens_file: {missing}\n")
         with pytest.raises(ServiceError, match="tokens file"):
+            pynet.loop.run(serve(path))
+        assert not (tmp_path / "state").exists()
+
+    def test_bad_users_file(self, tmp_path: Path) -> None:
+        """A users file that cannot be read is refused before the store opens."""
+        missing = tmp_path / "missing-users.yaml"
+        path = write_config(tmp_path, extra=f"  users_file: {missing}\n")
+        with pytest.raises(ServiceError, match="users file"):
             pynet.loop.run(serve(path))
         assert not (tmp_path / "state").exists()
 

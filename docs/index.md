@@ -77,3 +77,7 @@ with something you can run.
 23. [Routing Alerts (The Post Office With a Pigeonhole per Notifier)](concepts/routing-alerts.md): Topics, `*` and `#`, retries, dead letters and replay.
 24. [Alerts (The Smoke Alarm and the Teacher Who Notices You Never Arrived)](concepts/alerts.md): Every alert kind, `must_start_by`, `max_runtime`, `min_runtime`, dedupe and a job's `alerts:`.
 25. [File Watchers (Waiting at the Letterbox Until the Parcel Stops Rustling)](concepts/file-watchers.md): Waiting for a file to arrive and sit still, `{files}`, give-up, and why no slot is used.
+26. [The Web UI (The School Noticeboard)](concepts/web-ui.md): The board, run pages, roles and the seeded demo.
+27. [Live Updates (The Radio With Numbered Messages)](concepts/live-updates.md): Server-sent events with ids, replay and reset, and the live log tail.
+28. [Graph Layout (The Seating Plan)](concepts/graph-layout.md): Layers, barycentres and dashed cross-date edges.
+29. [Timelines (The Train Timetable With Ghost Trains)](concepts/timelines.md): Lanes, bars, ghost bars and the day the clocks change.

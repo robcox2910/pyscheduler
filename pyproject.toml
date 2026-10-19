@@ -28,7 +28,7 @@ dependencies = [
 
 [tool.uv.sources]
 pynet = { git = "https://github.com/robcox2910/pynet", tag = "v0.1.0" }
-pyweb = { git = "https://github.com/robcox2910/pyweb", tag = "v0.2.0" }
+pyweb = { git = "https://github.com/robcox2910/pyweb", tag = "v0.3.0" }
 pydb = { git = "https://github.com/robcox2910/pydb", tag = "v0.4.0" }
 pymq = { git = "https://github.com/robcox2910/pymq", tag = "v0.3.1" }
 
@@ -137,7 +137,7 @@ docstring-code-format = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests/alerts", "tests/engine"]
+pythonpath = ["tests/alerts", "tests/engine", "tests/api"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -167,7 +167,7 @@ venv = ".venv"
 
 [[tool.pyright.executionEnvironments]]
 root = "tests"
-extraPaths = [".", "tests/alerts", "tests/engine"]
+extraPaths = [".", "tests/alerts", "tests/engine", "tests/api"]
 reportPrivateUsage = false
 
 [tool.commitizen]

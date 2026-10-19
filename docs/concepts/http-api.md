@@ -11,7 +11,7 @@ keep a copy of your band, only its **fingerprint**, so a stolen guest
 list opens no gates.
 
 PyScheduler's HTTP API is that front desk. The `pysched` command, your
-scripts and (later) a web page all talk to it in JSON, and it talks to
+scripts and the [web UI](web-ui.md) all talk to it in JSON, and it talks to
 the engine for them.
 
 ## Wristbands (Bearer Tokens)
@@ -59,8 +59,8 @@ post, but not a JSON one without asking the server first, so this
 stops a page you happen to visit from pressing buttons. The `pysched`
 command always sends the header.
 
-**Development mode.** With no tokens file, everyone is `dev` with the
-operator role. The server then refuses to listen anywhere but a
+**Development mode.** With no tokens file and no users file, everyone
+is `dev` with the admin role. The server then refuses to listen anywhere but a
 loopback address such as `127.0.0.1`, so other machines cannot reach
 it. That is *not* the same as private: every program on *this* machine
 can, including your web browser while it shows some other site. So in
@@ -69,6 +69,75 @@ development mode a request whose `Host` header is not `localhost`,
 `403 {"error": "forbidden host"}`. That stops a page that points its
 own domain name at `127.0.0.1` (a trick called *DNS rebinding*) from
 reading or steering the scheduler. Use tokens on any machine you share.
+
+## Three Ways In (Auth Modes)
+
+Which wristbands the desk accepts depends on two settings in the
+`scheduler:` block. There is **one access layer** behind both the JSON
+API and the web pages, so a rule is written once.
+
+| `api_tokens_file` | `users_file` | Mode |
+| --- | --- | --- |
+| no | no | **Development mode.** Loopback `Host` only. Every request, page or API, is `dev` with the admin role: no login, no CSRF token. The JSON-only POST rule above is the CSRF defence, and the pages post through `fetch` as JSON. |
+| yes | no | **Tokens only.** The API works as before; the web pages answer `403` "the web UI needs a users_file". |
+| either | yes | **Normal mode.** People log in at `/login` and get a session; scripts still send bearer tokens (if there is a tokens file). |
+
+The `users_file` is a list of `{name, password_hash, role}`. The role
+is `viewer`, `operator` or `admin`. In the API an `admin` can do what an
+`operator` can: `POST /api/reload` and `POST /api/alerts/<id>/replay`
+are operator actions, so operator tokens and `pysched reload` keep
+working. What `admin` adds is the web UI's admin pages (config
+versions, sources, diffs and the dead-letter tray with its reload and
+replay buttons). Make the `password_hash` line
+with `pysched hash-password`, which asks twice, does not show the
+password, and prints `password_hash: pbkdf2_sha256$...`:
+
+```python
+from pyweb.security import hash_password, verify_password
+
+stored = hash_password("correct horse battery staple")
+print(f"- {{name: ada, password_hash: {stored}, role: operator}}")
+assert verify_password("correct horse battery staple", stored)
+assert not verify_password("wrong", stored)
+```
+
+A reload (`POST /api/reload` or `SIGHUP`) reads the users file again,
+as it does the tokens file; a bad users file fails the whole reload and
+the old users stay.
+
+**Sessions.** A successful login sets the `pysched_session` cookie,
+signed with a secret of 48 random bytes. The secret is made on first
+start and kept in `<state_dir>/session.key` (mode `0600`), so sessions
+survive a restart. A session lasts 8 hours. The cookie is signed, not
+stored, so signing out clears it from your browser but does not revoke a
+copy someone else took; removing the user from the `users_file` and
+reloading does. That reload (like one that removes a token) also ends
+every open `/events` stream and log tail, so a removed user or a revoked
+token loses even a stream it already had open; everyone else reconnects
+and misses nothing.
+
+The cookie is marked `Secure` unless the scheduler listens on a loopback
+address; `scheduler: secure_cookies: true|false` overrides that. The
+scheduler speaks only plain HTTP and a browser never returns a `Secure`
+cookie over plain HTTP, so off loopback either serve the UI through an
+HTTPS reverse proxy or, on a trusted network, set `secure_cookies:
+false`. When the cookie is `Secure` off loopback, start-up logs one
+warning saying so.
+
+**CSRF.** A cookie is sent by the browser on *every* request to the
+site, including ones another site's page tricked it into making. So a
+request that uses a cookie and changes something must also carry the
+session's **CSRF token**, in the `X-CSRF-Token` header (what the web UI
+sends on its JSON posts) or in a `csrf_token` form field (what HTML
+forms send). Every page embeds the token in a
+`<meta name="csrf-token">` tag for exactly this. A missing or wrong
+token is refused with 403.
+
+**Bearer wins.** If a request has an `Authorization: Bearer` header the
+cookie is never looked at, and the CSRF check is skipped (a header an
+attacker's page cannot make the browser add). Roles for the API are the
+same either way: a viewer is limited to `GET`/`HEAD` (`403` otherwise),
+`/api/*` without a user is `401`, and a `POST` must be JSON (`415`).
 
 ## What You Can Ask
 

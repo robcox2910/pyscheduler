@@ -8,18 +8,26 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 import pynet.loop
+from pyweb.auth import InMemoryUsers, SessionAuth, User
+from pyweb.messages import HttpResponse
+from pyweb.security import SessionSigner, hash_password
 from pyweb.testing import TestClient, TestResponse
 
+from pyscheduler.api.access import SESSION_COOKIE
+from pyscheduler.api.session_key import load_or_make_key
 from pyscheduler.config import Config
 from pyscheduler.engine.clock import FakeClock
 from pyscheduler.engine.core import Engine
 from pyscheduler.store import Store
 from pyscheduler.testing import FakeLauncher
+from pyscheduler.ui.live import LiveFeed
 
 START = datetime(2026, 10, 19, tzinfo=UTC)
 """Where every harness clock starts: midnight UTC on Monday 19 October 2026."""
 
 TODAY = date(2026, 10, 19)
+BOOT = "boot"
+"""The boot id of a harness's live feed, so event ids read ``boot-1``, ``boot-2``..."""
 AT_1830 = START.replace(hour=18, minute=30)
 AFTER_CHAIN = AT_1830 + timedelta(minutes=5)
 """When ``extract`` (18:30, one minute) and then ``load`` have both succeeded."""
@@ -77,6 +85,38 @@ def tokens_yaml() -> str:
     )
 
 
+TEST_ROUNDS = 1
+"""PBKDF2 rounds for test passwords: one round keeps the tests fast."""
+
+PHRASE = "correct horse battery staple"
+"""Every test user's password."""
+
+
+def users_yaml(**roles: str) -> str:
+    """Return a users file with one entry per ``name=role``, all with ``PHRASE``."""
+    digest = hash_password(PHRASE, rounds=TEST_ROUNDS)
+    return "".join(
+        f"- {{name: {name}, password_hash: {digest}, role: {role}}}\n"
+        for name, role in roles.items()
+    )
+
+
+def log_in(h: ApiHarness, name: str) -> str:
+    """Give the harness's client a session cookie for ``name``; return its CSRF token.
+
+    The cookie is signed with the key the app uses (``state_dir/session.key``),
+    just as the login page will sign it.
+    """
+    key = load_or_make_key(h.config.settings.state_dir)
+    auth = SessionAuth(SessionSigner(key), InMemoryUsers(), cookie_name=SESSION_COOKIE)
+    response = HttpResponse()
+    csrf = auth.login(response, User(name, ""))
+    pair = (response.headers.get("Set-Cookie") or "").partition(";")[0]
+    cookie, _, value = pair.partition("=")
+    h.client.cookies[cookie] = value
+    return csrf
+
+
 def body_of(response: TestResponse) -> dict[str, Any]:
     """Return the response's JSON object."""
     return cast("dict[str, Any]", response.json())
@@ -94,6 +134,7 @@ class ApiHarness:
     launcher: FakeLauncher
     engine: Engine
     client: TestClient
+    live: LiveFeed | None = None
 
     async def advance_to(self, when: datetime) -> None:
         """Move the clock to ``when`` one timer at a time, settling the engine after each."""
@@ -126,7 +167,17 @@ class MakeApi(Protocol):
     """Build an API harness from the YAML that follows ``scheduler:``."""
 
     def __call__(
-        self, text: str = JOBS, *, tokens: bool = True, env: dict[str, str] | None = None
+        self,
+        text: str = JOBS,
+        *,
+        tokens: bool = True,
+        env: dict[str, str] | None = None,
+        users: str | None = None,
+        live: bool = False,
     ) -> ApiHarness:
-        """Return a harness; ``tokens=False`` is development mode; ``env`` feeds ``${NAME}``."""
+        """Return a harness; ``tokens=False`` is development mode; ``env`` feeds ``${NAME}``.
+
+        ``users`` is the text of a users file (normal mode, with web sessions).
+        ``live`` attaches a ``LiveFeed`` (boot id ``BOOT``) and serves ``/events``.
+        """
         ...

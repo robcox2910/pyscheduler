@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta
 from pyscheduler.config import Config, JobDef
 from pyscheduler.schedule.firings import firings_between
 
-__all__ = ["ForecastEntry", "forecast"]
+__all__ = ["ForecastEntry", "forecast", "median"]
 
 MEDIAN_SAMPLE = 10
 TWO = 2
@@ -41,7 +41,7 @@ class ForecastEntry:
     via: str | None
 
 
-def _median(durations: Sequence[timedelta] | None) -> timedelta | None:
+def median(durations: Sequence[timedelta] | None) -> timedelta | None:
     """Return the median of the newest ``MEDIAN_SAMPLE`` durations, or ``None`` if none."""
     if not durations:
         return None
@@ -111,7 +111,7 @@ def _follower_entries(
             run_date = calendar.shift(day, -dep.run_date_offset)
             if calendar.shift(run_date, dep.run_date_offset) == day:
                 run_dates.add(run_date)
-    duration = _median(durations.get(job.name))
+    duration = median(durations.get(job.name))
     entries: list[ForecastEntry] = []
     for run_date in sorted(run_dates):
         best: ForecastEntry | None = None
@@ -160,7 +160,7 @@ def forecast(
     enabled = [job for job in config.jobs.values() if job.enabled and not job.manual]
     for job in enabled:
         if job.schedules:
-            duration = _median(known.get(job.name))
+            duration = median(known.get(job.name))
             firings = firings_between(job, config.calendar_for(job), start, end)
             add(
                 job,

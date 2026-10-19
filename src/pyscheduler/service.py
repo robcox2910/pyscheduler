@@ -13,8 +13,8 @@ engine adopts them again on the next start.
 ``serve`` does exactly that. Signals from the operating system steer it:
 
 - ``SIGTERM`` or ``SIGINT`` (Ctrl-C): close gracefully;
-- ``SIGHUP``: reload the config files and the tokens file (problems go
-  to the log).
+- ``SIGHUP``: reload the config files, the tokens file and the users
+  file (problems go to the log).
 
 Example::
 
@@ -38,8 +38,20 @@ from pyweb.aserver import AsyncServer
 
 from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.alerts.monitor import AlertMonitor
-from pyscheduler.api import TokenFileError, TokenHolder, TokenTable, build_app, config_actions
+from pyscheduler.api import (
+    TokenFileError,
+    TokenHolder,
+    TokenTable,
+    UserHolder,
+    UsersFileError,
+    UserTable,
+    build_app,
+    config_actions,
+)
+from pyscheduler.api.access import needs_session_key
+from pyscheduler.api.session_key import SessionKeyError, load_or_make_key
 from pyscheduler.config import Config, load_config
+from pyscheduler.config.model import Settings
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.clock import SystemClock
 from pyscheduler.engine.core import Engine
@@ -52,15 +64,24 @@ from pyscheduler.service_parts import (
     reload_for_signal,
 )
 from pyscheduler.store import Batch, ConfigRecord, Store
+from pyscheduler.ui.live import LiveFeed
 
-__all__ = ["CLOSE_GRACE", "SchedulerFailedError", "ServiceError", "is_loopback", "serve"]
+__all__ = [
+    "CLOSE_GRACE",
+    "SECURE_COOKIE_WARNING",
+    "SchedulerFailedError",
+    "ServiceError",
+    "is_loopback",
+    "serve",
+    "session_cookies_secure",
+]
 
 CLOSE_GRACE = 5.0
 """How many seconds in-flight API requests get to finish when the service closes."""
 
 
 class ServiceError(Exception):
-    """Raised when ``serve`` refuses to start (unsafe address, bad tokens file, busy port)."""
+    """Raised when ``serve`` refuses to start (unsafe address, bad tokens or users, busy port)."""
 
 
 class SchedulerFailedError(Exception):
@@ -82,28 +103,60 @@ def is_loopback(host: str) -> bool:
         return False
 
 
-def _tokens(config: Config) -> TokenTable | None:
-    """Return the token table, or ``None`` for development mode on a loopback address.
+SECURE_COOKIE_WARNING = (
+    "web sessions use Secure cookies: serve the UI through an HTTPS reverse proxy, "
+    "or set secure_cookies: false on a trusted network"
+)
+"""Logged at start-up when a browser on plain HTTP could never send the cookie back."""
+
+
+def session_cookies_secure(settings: Settings) -> bool:
+    """Return whether session cookies are marked ``Secure``, warning when that may bite.
+
+    ``secure_cookies`` decides; left out, cookies are ``Secure`` unless the
+    listen host is loopback. The scheduler itself speaks only plain HTTP,
+    and a browser never sends a ``Secure`` cookie over plain HTTP, so off
+    loopback (with a web UI) the warning says to put an HTTPS proxy in
+    front, or to turn ``Secure`` off on a trusted network.
+    """
+    host, _ = settings.listen
+    loopback = is_loopback(host)
+    secure = not loopback if settings.secure_cookies is None else settings.secure_cookies
+    if secure and not loopback and settings.users_file is not None:
+        logger.warning(SECURE_COOKIE_WARNING)
+    return secure
+
+
+def _access(config: Config) -> tuple[TokenTable | None, UserTable | None]:
+    """Return the token table and the users table (``None`` for a file not set).
+
+    With neither file the scheduler is in development mode, which is only
+    allowed on a loopback address.
 
     Raises:
-        ServiceError: If there is no tokens file and the address is not
-            loopback, or the tokens file cannot be read.
+        ServiceError: If there is neither file and the address is not
+            loopback, or a file cannot be read.
 
     """
     settings = config.settings
     host, _ = settings.listen
-    if settings.api_tokens_file is None:
+    if settings.api_tokens_file is None and settings.users_file is None:
         if not is_loopback(host):
             msg = (
-                f"refusing to listen on {host} without api_tokens_file: development mode "
-                "(no tokens) is only allowed on a loopback address such as 127.0.0.1"
+                f"refusing to listen on {host} without api_tokens_file or users_file: "
+                "development mode (no tokens, no users) is only allowed on a loopback "
+                "address such as 127.0.0.1"
             )
             raise ServiceError(msg)
-        return None
+        return None, None
     try:
-        return TokenTable.load(settings.api_tokens_file)
-    except TokenFileError as exc:
+        tokens = (
+            None if settings.api_tokens_file is None else TokenTable.load(settings.api_tokens_file)
+        )
+        users = None if settings.users_file is None else UserTable.load(settings.users_file)
+    except (TokenFileError, UsersFileError) as exc:
         raise ServiceError(str(exc)) from None
+    return tokens, users
 
 
 async def _open_engine(config: Config) -> tuple[Engine, ConfigRecord | None]:
@@ -174,6 +227,7 @@ class _Service:
         self.watchers: list[Task[None]] = []
         self.reloads: set[Task[None]] = set()
         self.reload_task: Callable[[], Coroutine[Any, Any, None]] | None = None
+        self.detach_live: Callable[[], None] | None = None
 
     def on_reload(self) -> None:
         """Start a reload for SIGHUP (ignored until the engine is up)."""
@@ -190,6 +244,8 @@ class _Service:
 
     async def shut_down(self) -> None:
         """Close the server, let reloads end, stop the alerts and the engine, then restore signals.
+
+        Once the server is closed the live feed is detached from the engine.
 
         The dispatcher stops first: alerts raised after that stay
         ``pending`` in the store and are sent at the next start. The
@@ -208,6 +264,8 @@ class _Service:
             if self.reloads:
                 await pynet.loop.gather(*self.reloads, return_exceptions=True)
         finally:
+            if self.detach_live is not None:  # the streams are closed: stop the news
+                self.detach_live()
             try:
                 await self._stop_alerts()
             finally:
@@ -233,11 +291,11 @@ async def serve(
 ) -> None:
     """Run the scheduler for the config at ``config_path`` until told to stop.
 
-    In order: load the config; check the tokens; hook the signals; open
-    the store; take the port (requests get 503 ``scheduler is starting``
-    for now); start the engine; record the config version (when its
-    digest is new); start the alert dispatcher and monitor; open the gate
-    and call ``ready(port)``. It ends when ``stop`` is set, on SIGTERM or
+    In order: load the config; read the tokens and users; hook the signals;
+    open the store (and attach the live feed); take the port (requests get
+    503 ``scheduler is starting`` for now); start the engine; record the
+    config version (when its digest is new); start the alert dispatcher and
+    monitor; open the gate and call ``ready(port)``. It ends when ``stop`` is set, on SIGTERM or
     SIGINT (also during start-up: it stops once the engine is up), or
     when the engine fails. SIGHUP reloads the config (a reload that finds
     errors raises a ``reload_failed`` alert). Signals are only hooked on
@@ -259,7 +317,8 @@ async def serve(
 
     """
     config = await pynet.loop.run_in_thread(load_config, config_path)
-    tokens = TokenHolder(_tokens(config))
+    token_table, user_table = await pynet.loop.run_in_thread(_access, config)
+    tokens, users = TokenHolder(token_table), UserHolder(user_table)
     host, port = config.settings.listen
     service = _Service()
     service.signals = SignalHooks(service.wake.set, service.on_reload)
@@ -267,15 +326,31 @@ async def serve(
     try:
         engine, record = await _open_engine(config)
         service.engine = engine
+        live = LiveFeed()
+        service.detach_live = live.attach(engine)  # before start: recovery's changes too
         dispatcher = service.dispatcher = Dispatcher(engine)
         monitor = service.monitor = AlertMonitor(engine, dispatcher)  # hears recovery too
         reload, validate = config_actions(
-            engine, config_path, tokens=tokens, on_failed=monitor.reload_failed
+            engine, config_path, tokens=tokens, users=users, on_failed=monitor.reload_failed
         )
         service.reload_task = lambda: reload_for_signal(reload)
-        app = build_app(
-            engine, tokens=tokens, reload=reload, validate=validate, dispatcher=dispatcher
-        )
+        try:  # the key file is read (or made) off the loop; the app is built on it
+            key = None
+            if needs_session_key(tokens, users):
+                key = await pynet.loop.run_in_thread(load_or_make_key, config.settings.state_dir)
+            app = build_app(
+                engine,
+                tokens=tokens,
+                reload=reload,
+                validate=validate,
+                dispatcher=dispatcher,
+                users=users,
+                secure=session_cookies_secure(config.settings),
+                session_key=key,
+                live=live,
+            )
+        except (SessionKeyError, OSError) as exc:
+            raise ServiceError(str(exc)) from None
         app.middleware(service.gate.middleware())
         service.server = AsyncServer(app)
         try:
