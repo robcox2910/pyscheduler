@@ -287,6 +287,7 @@ class Settings:
     retention: timedelta
     memory_days: int
     watch_limit: int
+    secure_cookies: bool | None = None  # None: Secure unless the listen host is loopback
 
 
 @dataclass(frozen=True)

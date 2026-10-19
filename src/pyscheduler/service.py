@@ -51,6 +51,7 @@ from pyscheduler.api import (
 from pyscheduler.api.access import needs_session_key
 from pyscheduler.api.session_key import SessionKeyError, load_or_make_key
 from pyscheduler.config import Config, load_config
+from pyscheduler.config.model import Settings
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.clock import SystemClock
 from pyscheduler.engine.core import Engine
@@ -65,7 +66,15 @@ from pyscheduler.service_parts import (
 from pyscheduler.store import Batch, ConfigRecord, Store
 from pyscheduler.ui.live import LiveFeed
 
-__all__ = ["CLOSE_GRACE", "SchedulerFailedError", "ServiceError", "is_loopback", "serve"]
+__all__ = [
+    "CLOSE_GRACE",
+    "SECURE_COOKIE_WARNING",
+    "SchedulerFailedError",
+    "ServiceError",
+    "is_loopback",
+    "serve",
+    "session_cookies_secure",
+]
 
 CLOSE_GRACE = 5.0
 """How many seconds in-flight API requests get to finish when the service closes."""
@@ -92,6 +101,30 @@ def is_loopback(host: str) -> bool:
         return ipaddress.ip_address(bare).is_loopback
     except ValueError:
         return False
+
+
+SECURE_COOKIE_WARNING = (
+    "web sessions use Secure cookies: serve the UI through an HTTPS reverse proxy, "
+    "or set secure_cookies: false on a trusted network"
+)
+"""Logged at start-up when a browser on plain HTTP could never send the cookie back."""
+
+
+def session_cookies_secure(settings: Settings) -> bool:
+    """Return whether session cookies are marked ``Secure``, warning when that may bite.
+
+    ``secure_cookies`` decides; left out, cookies are ``Secure`` unless the
+    listen host is loopback. The scheduler itself speaks only plain HTTP,
+    and a browser never sends a ``Secure`` cookie over plain HTTP, so off
+    loopback (with a web UI) the warning says to put an HTTPS proxy in
+    front, or to turn ``Secure`` off on a trusted network.
+    """
+    host, _ = settings.listen
+    loopback = is_loopback(host)
+    secure = not loopback if settings.secure_cookies is None else settings.secure_cookies
+    if secure and not loopback and settings.users_file is not None:
+        logger.warning(SECURE_COOKIE_WARNING)
+    return secure
 
 
 def _access(config: Config) -> tuple[TokenTable | None, UserTable | None]:
@@ -312,7 +345,7 @@ async def serve(
                 validate=validate,
                 dispatcher=dispatcher,
                 users=users,
-                secure=not is_loopback(host),
+                secure=session_cookies_secure(config.settings),
                 session_key=key,
                 live=live,
             )

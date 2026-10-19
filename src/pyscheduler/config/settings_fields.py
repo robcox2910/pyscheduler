@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from pyscheduler.config.fields import (
     Reader,
     check_keys,
+    read_bool,
     read_duration,
     read_int,
     read_str,
@@ -24,7 +25,7 @@ from pyscheduler.yamlish import Map, Node
 SCHEDULER_KEYS = (
     "name", "timezone", "state_dir", "log_dir", "max_running", "listen",
     "api_tokens_file", "users_file", "kill_grace", "retention", "memory_days",
-    "watch_limit",
+    "watch_limit", "secure_cookies",
 )  # fmt: skip
 _PORT = re.compile(r"\d{1,5}", re.ASCII)
 MAX_PORT = 65535
@@ -82,6 +83,11 @@ def read_settings(r: Reader, node: Map, main: Path) -> Settings:
         retention=_duration(r, items, "retention") or DEFAULT_RETENTION,
         memory_days=count("memory_days", DEFAULT_MEMORY_DAYS),
         watch_limit=count("watch_limit", DEFAULT_WATCH_LIMIT),
+        secure_cookies=(
+            read_bool(r, items["secure_cookies"], "secure_cookies")
+            if "secure_cookies" in items
+            else None
+        ),
     )
 
 
