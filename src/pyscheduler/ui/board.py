@@ -27,11 +27,12 @@ from pyweb.messages import HttpRequest, HttpResponse, html
 
 from pyscheduler.api.auth import allows
 from pyscheduler.api.runs import find_run, merged_runs
-from pyscheduler.api.support import BAD_REQUEST, ApiError, query_date, role_of
+from pyscheduler.api.support import BAD_REQUEST, ApiError, role_of
 from pyscheduler.config.model import Criticality
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Attempt, Run, RunState
 from pyscheduler.ui.board_view import BoardView, Filters, board_body, counts_nav, pinned, row
+from pyscheduler.ui.dates import page_day
 from pyscheduler.ui.html import Safe, h
 from pyscheduler.ui.layout import page, secure
 
@@ -54,8 +55,7 @@ def _filters(engine: Engine, request: HttpRequest) -> Filters:
     """
     zone = engine.config.settings.timezone
     query = request.query
-    given = query_date(request, "date") if query.get("date") else None  # empty means today
-    day = given or engine.clock.now().astimezone(zone).date()
+    day = page_day(request, "date", engine.clock.now().astimezone(zone).date())
     state_text = query.get("state") or None
     try:
         state = None if state_text is None else RunState(state_text)

@@ -34,7 +34,7 @@ from pyscheduler.api.support import (
 from pyscheduler.config.model import AlertKind
 from pyscheduler.engine.core import Engine
 
-__all__ = ["add_alert_routes", "alert_rows", "delivery_json"]
+__all__ = ["add_alert_routes", "alert_rows", "dead_rows", "delivery_json"]
 
 type JsonObject = dict[str, JsonValue]
 
@@ -73,7 +73,7 @@ def alert_rows(engine: Engine, alerts: list[AlertRecord]) -> list[JsonValue]:
     return cast("list[JsonValue]", redact(rows, engine.config.expansions))
 
 
-def _dead_rows(engine: Engine, limit: int) -> list[JsonValue]:
+def dead_rows(engine: Engine, limit: int) -> list[JsonValue]:
     """Return the ``dead`` deliveries, each with its alert (read the store: use a thread)."""
     store = engine.store
     rows: list[JsonValue] = []
@@ -138,7 +138,7 @@ def add_alert_routes(app: App, engine: Engine, dispatcher: Dispatcher | None) ->
         """List the dead deliveries (oldest first), each with its alert."""
         running()
         limit = query_int(request, "limit", default=DEFAULT_LIMIT, low=1, high=MAX_LIMIT)
-        return {"deliveries": await run_in_thread(_dead_rows, engine, limit)}
+        return {"deliveries": await run_in_thread(dead_rows, engine, limit)}
 
     @app.post("/api/alerts/<alert_id>/replay")
     @guarded

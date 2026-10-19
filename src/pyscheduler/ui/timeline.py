@@ -25,11 +25,12 @@ from pyweb.messages import HttpRequest, HttpResponse
 
 from pyscheduler.api.jobs import forecast_entries
 from pyscheduler.api.runs import merged_runs
-from pyscheduler.api.support import BAD_REQUEST, ApiError, query_date
+from pyscheduler.api.support import BAD_REQUEST, ApiError
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Attempt, Run, RunState
 from pyscheduler.schedule.forecast import ForecastEntry
 from pyscheduler.ui.board import BOARD_LIMIT
+from pyscheduler.ui.dates import page_day
 from pyscheduler.ui.html import Safe, h, join
 from pyscheduler.ui.layout import page
 from pyscheduler.ui.timeline_window import DAY, WEEK_DAYS, Window, Zoom, ticks, window_for
@@ -93,8 +94,8 @@ def _query(engine: Engine, request: HttpRequest) -> TimelineQuery:
     except ValueError:
         names = ", ".join(z.value for z in Zoom)
         raise ApiError(BAD_REQUEST, f"zoom must be one of {names}") from None
-    given = query_date(request, "date") if query.get("date") else None  # empty: today
-    day = given or engine.clock.now().astimezone(engine.config.settings.timezone).date()
+    today = engine.clock.now().astimezone(engine.config.settings.timezone).date()
+    day = page_day(request, "date", today)
     return TimelineQuery(zoom, day)
 
 
@@ -302,11 +303,12 @@ def add_timeline(app: App, engine: Engine) -> None:
         """Draw the timeline for the asked zoom and date."""
         try:
             choice = _query(engine, request)
+            body = await _body(engine, choice)
         except ApiError as exc:
             body = h("p", {"class": "error", "role": "alert"}, exc.message)
             response = page(request, title="Timeline", body=body, active="timeline")
             response.status = exc.status
             return response
-        return page(request, title="Timeline", body=await _body(engine, choice), active="timeline")
+        return page(request, title="Timeline", body=body, active="timeline")
 
     del timeline

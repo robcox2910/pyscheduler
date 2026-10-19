@@ -8,6 +8,7 @@ from pyweb.auth import SessionAuth, UserStore
 from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.api.access import STATIC_PREFIX
 from pyscheduler.engine.core import Engine
+from pyscheduler.ui.admin import add_admin
 from pyscheduler.ui.board import add_board
 from pyscheduler.ui.detail import add_detail
 from pyscheduler.ui.forecast_page import add_forecast
@@ -42,13 +43,14 @@ def add_ui(
         session_auth: The ``SessionAuth`` from ``build_access``; ``None``
             when there is no login (development mode, or no users file).
         users: The user table the login page checks.
-        dispatcher: The alert dispatcher (for the admin pages).
+        dispatcher: The alert dispatcher (unused here: the admin page's replay button
+            posts to the API).
         live: The live feed attached to ``engine``, served at ``/events``;
             with ``None`` there is no ``/events``. The log tail
             (``/events/log/<run_id>``) is always there.
 
     """
-    del dispatcher  # the pages that use it are added by later tasks
+    del dispatcher  # replays go through the API, which holds the dispatcher
     app.mount_static(STATIC_PREFIX.rstrip("/"), STATIC_DIR, max_age=STATIC_MAX_AGE)
     if session_auth is not None:
         add_login(app, session_auth, users)
@@ -60,3 +62,4 @@ def add_ui(
     add_graph(app, engine)
     add_timeline(app, engine)
     add_forecast(app, engine)
+    add_admin(app, engine)

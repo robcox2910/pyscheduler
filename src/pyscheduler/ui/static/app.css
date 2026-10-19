@@ -243,3 +243,23 @@ input[type="text"], input[type="password"] {
 .timeline .bar-link:hover .bar, .timeline .bar-link:focus-visible .bar { stroke: var(--accent); stroke-width: var(--graph-edge-bold); }
 .timeline .now-line { stroke: var(--accent); stroke-width: var(--graph-edge-bold); }
 .board-filters a[aria-current="true"] { font-weight: bold; text-decoration: none; color: var(--text); }
+
+/* The admin pages. */
+.admin-actions { margin-bottom: var(--space-2); }
+.diff, .versions, .dead { margin-bottom: var(--space-3); }
+.diff {
+  overflow: auto;
+  padding: var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+}
+.diff span { display: block; white-space: pre; }
+.diff .diff-add { color: var(--state-succeeded); }
+.diff .diff-del { color: var(--state-failed); }
+.diff .diff-hunk { color: var(--state-running); }
+.diff .diff-head { color: var(--muted); font-weight: 600; }
+.dead .last-error { word-break: break-word; }
+#admin-message { white-space: pre-wrap; }

@@ -27,12 +27,13 @@ from pyweb.app import App
 from pyweb.messages import HttpRequest, HttpResponse
 
 from pyscheduler.api.runs import merged_runs
-from pyscheduler.api.support import ApiError, query_date
+from pyscheduler.api.support import ApiError
 from pyscheduler.config.model import JobDef
 from pyscheduler.config.redaction import redactor
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Run
 from pyscheduler.ui.board import BOARD_LIMIT
+from pyscheduler.ui.dates import page_day
 from pyscheduler.ui.graph_layout import NODE_H, NODE_W, Edge, Layout, layout, node_corner
 from pyscheduler.ui.html import Safe, h, join
 from pyscheduler.ui.layout import page
@@ -73,8 +74,8 @@ def _query(engine: Engine, request: HttpRequest) -> GraphQuery:
 
     """
     query = request.query
-    given = query_date(request, "run_date") if query.get("run_date") else None  # empty: today
-    day = given or engine.clock.now().astimezone(engine.config.settings.timezone).date()
+    today = engine.clock.now().astimezone(engine.config.settings.timezone).date()
+    day = page_day(request, "run_date", today)
     return GraphQuery(day, query.get("tag") or None, query.get("focus") or None)
 
 

@@ -7,10 +7,12 @@ pages in one sitting (one hold of the database lock) instead of
 queueing up a hundred times.
 """
 
-from collections.abc import Collection
-from datetime import timedelta
+from collections.abc import Collection, Mapping
+from datetime import date, datetime, timedelta
+from typing import cast
 
 from pydb.database import Database
+from pydb.record import Value
 from pydb.table import Table
 
 from pyscheduler.engine.model import Attempt, Outcome
@@ -55,13 +57,18 @@ class DurationReads:
             attempts_index = self._attempts.indexes["attempts_run_id"]
             for job in jobs:
                 rows = [record.data for record in self._runs.select_by_index(runs_index, job)]
-                rows.sort(key=lambda r: (r["run_date"], r["scheduled_at"]), reverse=True)  # type: ignore[reportArgumentType]
+                rows.sort(key=_newest_run_first, reverse=True)
                 found[job] = [
                     attempt_from_row(record.data)
                     for run in rows[:SCAN_RUNS]
                     for record in self._attempts.select_by_index(attempts_index, run["run_id"])
                 ]
         return {job: _newest(attempts, limit) for job, attempts in found.items()}
+
+
+def _newest_run_first(row: Mapping[str, Value]) -> tuple[date, datetime]:
+    """Return the sort key of a run row: its run date, then its due time."""
+    return (cast(date, row["run_date"]), cast(datetime, row["scheduled_at"]))
 
 
 def _newest(attempts: list[Attempt], limit: int) -> list[timedelta]:

@@ -8,6 +8,7 @@ from datetime import timedelta
 from urllib.parse import quote
 
 import pytest
+from alert_helpers import make_alert
 from api_helpers import PHRASE, START, TODAY, ApiHarness, MakeApi, log_in, users_yaml
 from ui_helpers import (
     HOSTILE,
@@ -21,8 +22,11 @@ from ui_helpers import (
     stored_run,
 )
 
+from pyscheduler.alerts.model import DeliveryRecord, DeliveryStatus
 from pyscheduler.api.access import SESSION_COOKIE
 from pyscheduler.engine.model import RunState, make_run_id
+from pyscheduler.store import Batch
+from pyscheduler.store.schema import ConfigRecord
 from pyscheduler.ui.html import Safe, h, join
 
 OK = 200
@@ -285,6 +289,9 @@ class TestShell:
             (f"/timeline?zoom={quote(HOSTILE)}&date={quote(HOSTILE)}", None),
             ("/forecast", None),
             (f"/forecast?from={quote(HOSTILE)}&to={quote(HOSTILE)}", None),
+            ("/admin", HOSTILE),
+            ("/admin/configs/1", HOSTILE),
+            ("/ui/fragments/dead-letters", HOSTILE),
         ],
     )
     def test_every_page_escapes(self, api: MakeApi, path: str, shows: str | None) -> None:
@@ -297,6 +304,12 @@ class TestShell:
         """
         h_ = api(HOSTY_JOBS, tokens=False, users=users_yaml(ada="admin"))
         add_shell(h_, name=HOSTILE, body=HOSTILE)
+        alert = make_alert()
+        dead = DeliveryRecord(alert.alert_id, "hook", DeliveryStatus.DEAD, 1, HOSTILE, START)
+        sources = json.dumps({"/x/jobs.yaml": f"{HOSTILE}\n"})
+        h_.store.apply(
+            Batch(alerts=[alert], deliveries=[dead], configs=[ConfigRecord(1, START, "d", sources)])
+        )
         seed(
             h_,
             *(
