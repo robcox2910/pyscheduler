@@ -33,8 +33,20 @@ calendar the pages can draw (1900-01-01 to 2999-12-31).
 A "day" is midnight to midnight on the *wall clock*, so on the day
 clocks go back the window is 25 hours long, and on the day they go
 forward it is 23. Positions are worked out from the real elapsed time,
-so bars do not drift. Because a run for a date can start the evening
-before, the page also reads the runs of the day before the window.
+so bars do not drift. A run's date is not always the day it runs: a
+`previous_business_day` job on a Monday works for Friday, a backfill
+runs today for old dates, and a job in a zone ahead of the scheduler's
+can run "tomorrow" this evening. So the page reads the runs whose run
+date is up to a week before or a day after the shown days, and then
+keeps only the attempts that really overlap the window.
+
+## Busy Lanes and Odd Attempts
+
+A job due every minute would have about 10,000 ghost bars in a week. A
+lane draws at most 200 (`GHOST_CAP`); after that one merged ghost band
+covers the rest of the expected runs, with a tip saying how many. An
+attempt with no end and no outcome whose run is not running (it was
+lost before it could say how it ended) is drawn grey, as `unknown`.
 
 ## Try It
 

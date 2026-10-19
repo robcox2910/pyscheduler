@@ -83,8 +83,12 @@ API and the web pages, so a rule is written once.
 | either | yes | **Normal mode.** People log in at `/login` and get a session; scripts still send bearer tokens (if there is a tokens file). |
 
 The `users_file` is a list of `{name, password_hash, role}`. The role
-is `viewer`, `operator` or `admin`, and `admin` can also open
-`/admin`, reload and replay dead alerts. Make the `password_hash` line
+is `viewer`, `operator` or `admin`. In the API an `admin` can do what an
+`operator` can: `POST /api/reload` and `POST /api/alerts/<id>/replay`
+are operator actions, so operator tokens and `pysched reload` keep
+working. What `admin` adds is the web UI's admin pages (config
+versions, sources, diffs and the dead-letter tray with its reload and
+replay buttons). Make the `password_hash` line
 with `pysched hash-password`, which asks twice, does not show the
 password, and prints `password_hash: pbkdf2_sha256$...`:
 
@@ -104,8 +108,21 @@ the old users stay.
 **Sessions.** A successful login sets the `pysched_session` cookie,
 signed with a secret of 48 random bytes. The secret is made on first
 start and kept in `<state_dir>/session.key` (mode `0600`), so sessions
-survive a restart. A session lasts 8 hours. The cookie is marked
-`Secure` unless the scheduler listens on a loopback address.
+survive a restart. A session lasts 8 hours. The cookie is signed, not
+stored, so signing out clears it from your browser but does not revoke a
+copy someone else took; removing the user from the `users_file` and
+reloading does. That reload (like one that removes a token) also ends
+every open `/events` stream and log tail, so a removed user or a revoked
+token loses even a stream it already had open; everyone else reconnects
+and misses nothing.
+
+The cookie is marked `Secure` unless the scheduler listens on a loopback
+address; `scheduler: secure_cookies: true|false` overrides that. The
+scheduler speaks only plain HTTP and a browser never returns a `Secure`
+cookie over plain HTTP, so off loopback either serve the UI through an
+HTTPS reverse proxy or, on a trusted network, set `secure_cookies:
+false`. When the cookie is `Secure` off loopback, start-up logs one
+warning saying so.
 
 **CSRF.** A cookie is sent by the browser on *every* request to the
 site, including ones another site's page tricked it into making. So a

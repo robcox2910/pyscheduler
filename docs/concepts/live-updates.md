@@ -25,7 +25,10 @@ sends a line of news whenever something happens (this is called
 
 The page does not build rows from this news. It asks the server for
 the new HTML of just that row (`/ui/fragments/board-row/<run_id>`) and
-swaps it in, so all drawing lives in one place, in Python.
+swaps it in, so all drawing lives in one place, in Python. A `reload`
+redraws the whole board (jobs, tags and criticality may have changed),
+and a board opened without `?date=` moves on to the new day by itself
+once the first run of that day is heard after midnight.
 
 ## Why Ids and Replay
 
@@ -51,13 +54,33 @@ replayed too.
 Events are published only after the change is safely in the store, so a
 page never hears about something a crash could take back.
 
+## When the Radio Goes Quiet for Good
+
+A browser reconnects by itself when the line drops. But if the server
+answers a reconnect with anything other than the stream (most often
+`401`, because the 8-hour session has run out or the user was
+removed), the browser gives up for good. A board that silently stopped
+changing would lie, so the page says **"Live updates stopped —
+reloading"** and reloads itself. A reload is an ordinary page load: an
+expired session lands on the login page, which brings you back
+afterwards. The same happens when a row or counts fetch, an action
+button or the log viewer is answered `401`: the page says "Your session
+has expired — please sign in again" and reloads.
+
+When a reload swaps the users file or the tokens file, the server ends
+every open stream itself. Everyone's browser reconnects straight away
+with `Last-Event-ID`, so nothing is missed, and a removed user or
+revoked token is refused at the door.
+
 ## Tailing a Log
 
 `GET /events/log/<run_id>?stream=stdout|stderr&attempt=` is the same
 idea for a log file: it sends the last 200 lines, then every second the
 new whole lines (at most 64 KiB per tick), and an `end` event a moment
 after the attempt has finished. If the file shrinks (it was rotated)
-it starts again from the top with a `reset` line.
+it starts again from the top with a `reset` line. A reload that swaps
+the users or tokens ends open tails too (without `end`), and the viewer
+reconnects and starts the tail afresh.
 
 ## Try It
 
