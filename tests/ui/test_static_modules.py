@@ -25,6 +25,7 @@ MAX_LINES = 400
 NODE = shutil.which("node")
 HARNESS = Path(__file__).parent / "js_harness.mjs"
 NODE_SECONDS = 20.0
+BACKOFF_FIRST_MS = 1000
 IMPORT = re.compile(r"""^import\s+(?:[^"']*\sfrom\s+)?["'](?P<path>[^"']+)["'];$""", re.MULTILINE)
 SCRIPT_TAG = re.compile(r"<script\b[^>]*>")
 SESSION_EXPIRED = "Your session has expired — please sign in again"
@@ -109,3 +110,40 @@ class TestWithNode:
         done = _node(str(HARNESS), str(STATIC_DIR / "common.js"), case)
         assert done.returncode == 0, done.stderr
         assert json.loads(done.stdout) == {"reloads": 1, "notice": notice}
+
+
+    def test_restart_waits_for_the_scheduler(self) -> None:
+        """A 503 from ``/api/health`` is waited out (1 s, then 2 s) before the one reload."""
+        done = _node(str(HARNESS), str(STATIC_DIR / "common.js"), "restart")
+        assert done.returncode == 0, done.stderr
+        seen = json.loads(done.stdout)
+        assert seen["reloads"] == 1
+        assert seen["delays"][-2:] == [BACKOFF_FIRST_MS, BACKOFF_FIRST_MS * 2]
+        assert seen["notice"] == "waiting"
+
+    def test_restart_waits_out_a_network_error(self) -> None:
+        """A network error from ``/api/health`` is waited out once, then the page reloads."""
+        done = _node(str(HARNESS), str(STATIC_DIR / "common.js"), "restart-net")
+        assert done.returncode == 0, done.stderr
+        seen = json.loads(done.stdout)
+        assert seen["reloads"] == 1
+        assert seen["delays"][-1] == BACKOFF_FIRST_MS
+
+    def test_board_moves_on_only_when_the_day_has_changed(self) -> None:
+        """A later-dated run before midnight does not reload; after midnight it does, checked once a minute."""
+        done = _node(str(HARNESS), str(STATIC_DIR / "common.js"), "board-early")
+        assert done.returncode == 0, done.stderr
+        assert json.loads(done.stdout) == [
+            {"reloads": 0, "checks": 1},
+            {"reloads": 0, "checks": 1},
+            {"reloads": 1, "checks": 2},
+        ]
+
+    def test_board_has_one_health_check_in_flight(self) -> None:
+        """Two events during one pending check cost one check."""
+        done = _node(str(HARNESS), str(STATIC_DIR / "common.js"), "board-inflight")
+        assert done.returncode == 0, done.stderr
+        assert json.loads(done.stdout) == [
+            {"reloads": 0, "checks": 1},
+            {"reloads": 1, "checks": 1},
+        ]

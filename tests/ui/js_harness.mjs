@@ -7,6 +7,17 @@
 // <case> is "closed" (the live feed closed for good), "fragment" (a
 // fragment answered 401) or "post" (an action answered 401). It prints
 // one JSON line: {"reloads": <page reloads>, "notice": <last text shown>}.
+//
+// Four more cases use a fake clock (timers run at once and are recorded,
+// Date.now() is ours) and a scripted /api/health:
+//
+//   "restart"  the port answers 503, 503, then 200: the page reloads once,
+//              after waiting 1 s then 2 s. Prints {"reloads", "delays", "notice"}.
+//   "restart-net"  a network error, then 200: the same, one wait.
+//   "board-early"  run events for a later date arrive while health still says
+//              today (no reload; one check per minute), then health moves on
+//              (reload). Prints {"reloads", "checks"} after each step.
+//   "board-inflight"  two events arrive while one check is still pending: one check.
 
 const target = process.argv[2];
 const which = process.argv[3];
@@ -79,9 +90,9 @@ class FakeEventSource {
   addEventListener(kind, handler) {
     (this.listeners[kind] ||= []).push(handler);
   }
-  fire(kind) {
+  fire(kind, data = {}) {
     for (const handler of this.listeners[kind] || []) {
-      handler({ data: "{}" });
+      handler({ data: JSON.stringify(data) });
     }
   }
   close() {
@@ -91,15 +102,48 @@ class FakeEventSource {
 globalThis.EventSource = FakeEventSource;
 
 const answer = 401;
-globalThis.fetch = async () => ({
-  ok: answer >= 200 && answer < 300,
-  status: answer,
-  redirected: false,
-  json: async () => ({ error: "unauthorised" }),
-  text: async () => "",
-});
+const healthScript = []; // what /api/health answers next: a status, {today}, or "net"
+let healthCalls = 0;
+let healthGate = null; // a promise the next health answer waits for
+globalThis.fetch = async (url) => {
+  if (url === "/api/health") {
+    healthCalls += 1;
+    if (healthGate) {
+      await healthGate;
+    }
+    const next = healthScript.length > 1 ? healthScript.shift() : healthScript[0];
+    if (next === "net") {
+      throw new TypeError("network error");
+    }
+    const status = typeof next === "number" ? next : 200;
+    return {
+      ok: status === 200,
+      status,
+      redirected: false,
+      json: async () => (typeof next === "object" ? next : { error: "scheduler is starting" }),
+      text: async () => "",
+    };
+  }
+  return {
+    ok: answer >= 200 && answer < 300,
+    status: answer,
+    redirected: false,
+    json: async () => ({ error: "unauthorised" }),
+    text: async () => "",
+  };
+};
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const delays = [];
+const realSetTimeout = globalThis.setTimeout;
+let clock = 1_000_000;
+if (which !== "closed" && which !== "fragment" && which !== "post") {
+  globalThis.setTimeout = (fn, ms) => {
+    delays.push(ms);
+    return realSetTimeout(fn, 0);
+  };
+  Date.now = () => clock;
+}
+const wait = (ms) => new Promise((resolve) => realSetTimeout(resolve, ms));
 const seen = () => ({ reloads, notice: notices.at(-1) || "" });
 const shared = await import(target);
 
@@ -112,6 +156,49 @@ if (which === "closed") {
   await shared.fragment("/ui/fragments/board-counts", "#board-counts");
 } else if (which === "post") {
   await shared.post("/api/runs/x/kill", {});
+}
+else if (which === "restart" || which === "restart-net") {
+  healthScript.push(which === "restart" ? 503 : "net", ...(which === "restart" ? [503] : []), { today: "x" });
+  shared.reloadBecause("waiting");
+  await wait(50);
+  console.log(JSON.stringify({ ...seen(), delays }));
+  process.exit(0);
+} else if (which.startsWith("board")) {
+  const table = new FakeElement("table");
+  table.dataset.date = "2026-01-01";
+  byId.board = table;
+  const later = { run_date: "2026-01-02", run_id: 1 };
+  await import(target.replace("common.js", "board.js"));
+  const steps = [];
+  const step = async () => {
+    await wait(20);
+    steps.push({ reloads, checks: healthCalls });
+  };
+  if (which === "board-early") {
+    healthScript.push({ today: "2026-01-01" });
+    sources[0].fire("run", later);
+    await step();
+    sources[0].fire("run", later); // within the minute: no new check
+    await step();
+    clock += 61_000;
+    healthScript.length = 0;
+    healthScript.push({ today: "2026-01-02" });
+    sources[0].fire("run", later);
+    await step();
+  } else {
+    let release = () => {};
+    healthGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    healthScript.push({ today: "2026-01-02" });
+    sources[0].fire("run", later);
+    sources[0].fire("run", later);
+    await step();
+    release();
+    await step();
+  }
+  console.log(JSON.stringify(steps));
+  process.exit(0);
 }
 await wait(1700);
 console.log(JSON.stringify(seen()));
