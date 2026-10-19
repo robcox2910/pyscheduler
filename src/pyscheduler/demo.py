@@ -6,8 +6,13 @@ config of twelve jobs (chains, a file watcher, a flaky job that needs a
 second try, and a critical job that always fails), a ``users.yaml`` with
 one user, ``admin`` / ``demo``, and then really runs the jobs for three
 days with quick commands (``true``, ``false``, ``sleep 0.1``), so the
-board, the graph and the timeline have something to show. ``serve_demo``
-then opens the shop and waits for Ctrl-C.
+board, the graph and the timeline have something to show. Only when
+every run has come to rest does it write the ``seeded`` marker, so a
+seed that failed or was stopped half way is simply done again.
+``serve_demo`` then opens the shop and waits for Ctrl-C.
+
+Seeding runs real child processes, and pynet watches its children only
+from the main thread, so both functions must be called there.
 
 The demo only ever listens on the loopback address, on a free port, and
 the password ``demo`` is meant for exactly that: a toy on your own
@@ -16,7 +21,6 @@ machine.
 Example::
 
     from pathlib import Path
-from typing import cast
     from pyscheduler.demo import seed_demo, serve_demo
 
     seed_demo(Path("demo"))
@@ -26,7 +30,9 @@ from typing import cast
 import argparse
 import hashlib
 import secrets
+import shutil
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
 from datetime import date, timedelta
@@ -36,11 +42,20 @@ from typing import cast
 import pynet.loop
 from pyweb.security import hash_password
 
-from pyscheduler.client import ApiClient
+from pyscheduler.client import ApiClient, ApiError
+from pyscheduler.demo_config import check_folder, config_text
 from pyscheduler.engine.model import FINAL_STATES, RunState
 from pyscheduler.service import serve
 
-__all__ = ["LOGIN_NAME", "LOGIN_PASSWORD", "main", "seed_demo", "serve_demo"]
+__all__ = [
+    "LOGIN_NAME",
+    "LOGIN_PASSWORD",
+    "SEEDED_MARK",
+    "SeedInterruptedError",
+    "main",
+    "seed_demo",
+    "serve_demo",
+]
 
 LOGIN_NAME = "admin"
 """The demo's only user."""
@@ -50,6 +65,15 @@ LOGIN_PASSWORD = "demo"  # noqa: S105 -- a toy password for a loopback-only demo
 
 CONFIG_NAME = "pysched.yaml"
 """The config file ``seed_demo`` writes in its folder."""
+
+SEEDED_MARK = "seeded"
+"""The file ``seed_demo`` writes last, once every seeded run has come to rest."""
+
+SCRATCH = ("state", "logs", "marks", "inbox")
+"""The folders a new seed clears first (a half-done seed may have left them)."""
+
+INTERRUPTED = 130
+"""``main``'s exit code when Ctrl-C stopped the seed (128 + SIGINT)."""
 
 DAYS = 3
 """How many run dates (today and the days before) are seeded."""
@@ -63,131 +87,15 @@ SETTLE_SECONDS = 20.0
 POLL = 0.05
 """How long the seeding loops nap (real seconds)."""
 
-WATCH_POLL = "1s"
-"""How often the demo's file watcher looks."""
-
 RESTING = FINAL_STATES | {RunState.BLOCKED, RunState.HELD}
 """The states in which a seeded run counts as finished for the demo."""
 
 ROOTS = ("extract", "fetch-rates", "inbox", "payments-export")
 """The jobs triggered for each seeded day; their dependents follow by themselves."""
 
-JOBS = """
-jobs:
-  extract:
-    description: Copy the day's trades out of the trading system.
-    command: sleep 0.1
-    schedule: manual
-    tags: [etl]
-    owner: data-team
 
-  transform:
-    description: Turn raw trades into warehouse rows.
-    command: sleep 0.1
-    depends_on: [extract]
-    tags: [etl]
-    owner: data-team
-
-  fetch-rates:
-    description: Download exchange rates; the server fails once, then answers.
-    command: 'if test -e "{marks}/{{run_date}}"; then exit 0; else touch "{marks}/{{run_date}}"; exit 1; fi'
-    schedule: manual
-    retries: {{count: 2, delay: 1s}}
-    tags: [etl, flaky]
-    owner: data-team
-
-  load:
-    description: Load the rows, priced with the day's rates.
-    command: sleep 0.1
-    depends_on: [transform, fetch-rates]
-    criticality: critical
-    tags: [etl]
-    owner: data-team
-
-  report:
-    description: Mail the morning report once the load is in.
-    command: "true"
-    depends_on: [load]
-    tags: [etl, reports]
-    owner: finance
-
-  inbox:
-    description: Wait for the day's prices file to arrive and sit still.
-    type: file_watcher
-    schedule: manual
-    watch: "{inbox}/prices.csv"
-    min_age: 0s
-    poll: {watch_poll}
-    give_up_after: 1m
-    tags: [files]
-    owner: finance
-
-  parse-prices:
-    description: Read the prices the watcher found.
-    command: sleep 0.1
-    depends_on: [inbox]
-    tags: [files]
-    owner: finance
-
-  payments-export:
-    description: Export the day's payments. It is broken, on purpose.
-    command: "false"
-    schedule: manual
-    criticality: critical
-    tags: [payments]
-    owner: payments
-
-  payments-notify:
-    description: Tell the bank the export is ready (never starts if the export fails).
-    command: "true"
-    depends_on: [payments-export]
-    tags: [payments]
-    owner: payments
-
-  payments-cleanup:
-    description: Tidy up after a failed export.
-    command: sleep 0.1
-    depends_on:
-      - {{job: payments-export, on: failure}}
-    tags: [payments]
-    owner: payments
-
-  housekeeping:
-    description: Nightly tidy-up of old files.
-    command: sleep 0.1
-    schedule: "0 3 * * *"
-    catch_up: none
-    tags: [ops]
-    owner: platform
-
-  weekly-audit:
-    description: Monday morning audit (nothing has run yet; see the forecast).
-    command: "true"
-    schedule: "0 6 * * 1"
-    catch_up: none
-    tags: [ops]
-    owner: platform
-"""
-"""The twelve jobs; ``{marks}``, ``{inbox}`` and ``{watch_poll}`` are filled in, ``{{run_date}}`` is left for the scheduler."""
-
-
-def _config_text(folder: Path, token_file: Path, users_file: Path) -> str:
-    """Return the text of the demo's config for ``folder``."""
-    header = (
-        "scheduler:\n"
-        "  name: pyscheduler-demo\n"
-        "  timezone: UTC\n"
-        f"  state_dir: {folder / 'state'}\n"
-        f"  log_dir: {folder / 'logs'}\n"
-        "  listen: 127.0.0.1:0\n"
-        "  max_running: 8\n"
-        f"  api_tokens_file: {token_file}\n"
-        f"  users_file: {users_file}\n"
-    )
-    jobs = JOBS.format(
-        marks=folder / "marks", inbox=folder / "inbox", watch_poll=WATCH_POLL
-    ).lstrip("\n")
-    return header + jobs
+class SeedInterruptedError(Exception):
+    """Raised by ``seed_demo`` when the scheduler stopped (Ctrl-C) before the seed finished."""
 
 
 def _wait_for_runs(client: ApiClient, days: Sequence[date]) -> int:
@@ -231,6 +139,45 @@ def _seed_runs(url: str, token: str) -> None:
     _wait_for_runs(client, days)
 
 
+def _fresh(folder: Path) -> None:
+    """Clear what an earlier, unfinished seed may have left in ``folder``."""
+    (folder / SEEDED_MARK).unlink(missing_ok=True)
+    for name in SCRATCH:
+        shutil.rmtree(folder / name, ignore_errors=True)
+
+
+async def _run_seed(path: Path, token: str) -> None:
+    """Start the scheduler for ``path``, seed it from a worker thread, then stop it.
+
+    Raises:
+        SeedInterruptedError: If the scheduler went away (Ctrl-C) mid-seed.
+        TimeoutError: If it does not start or the runs do not finish in time.
+
+    """
+    stop = pynet.loop.Event()
+    ports: list[int] = []
+    task = pynet.loop.spawn(serve(path, ready=ports.append, stop=stop), name="demo-seed")
+    lost: ApiError | None = None
+    try:
+        async with pynet.loop.timeout(READY_SECONDS):
+            while not ports and not task.done():
+                await pynet.loop.sleep(POLL)
+        if task.done():
+            task.result()  # raises what serve raised
+            msg = "the demo scheduler stopped before it was ready"
+            raise SeedInterruptedError(msg)
+        url = f"http://127.0.0.1:{ports[0]}"
+        try:
+            await pynet.loop.run_in_thread(lambda: _seed_runs(url, token))
+        except ApiError as exc:  # the scheduler stopped under us (a signal)
+            lost = exc
+    finally:
+        stop.set()
+        await task  # raises what serve raised, if it failed
+    if lost is not None:
+        raise SeedInterruptedError(str(lost))
+
+
 def seed_demo(folder: Path) -> Path:
     """Write the demo config and login into ``folder``, run a few days of jobs; return the config path.
 
@@ -238,15 +185,34 @@ def seed_demo(folder: Path) -> Path:
     hashed now), a private tokens file used only to drive the seeding,
     and the scheduler's ``state/`` and ``logs/``. The jobs are real
     quick commands run by an in-process scheduler, which is stopped again
-    before this returns, so the state can be served straight away.
+    before this returns, so the state can be served straight away. What
+    an unfinished earlier seed left is cleared first, and the ``seeded``
+    marker is written last, once every run has come to rest.
+
+    It must be called on the main thread: the jobs are child processes,
+    and pynet only watches children from there (PyStack seeds on its
+    main thread too).
 
     Raises:
+        RuntimeError: If called off the main thread.
+        ValueError: If the folder's path has characters the generated
+            config cannot hold (quotes, backslashes, ``$``, backticks).
+        SeedInterruptedError: If the scheduler was stopped (Ctrl-C) mid-seed.
         TimeoutError: If the scheduler does not start or the runs do not finish in time.
 
     """
+    if threading.current_thread() is not threading.main_thread():
+        msg = (
+            "seed_demo must run on the main thread: the seeded jobs are child "
+            "processes, and pynet only watches children from the main thread"
+        )
+        raise RuntimeError(msg)
+    folder = folder.absolute()
+    check_folder(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "marks").mkdir(exist_ok=True)
-    (folder / "inbox").mkdir(exist_ok=True)
+    _fresh(folder)
+    (folder / "marks").mkdir()
+    (folder / "inbox").mkdir()
     (folder / "inbox" / "prices.csv").write_text("AAPL,190.1\nMSFT,410.2\n", encoding="utf-8")
     users_file = folder / "users.yaml"
     users_file.write_text(
@@ -259,47 +225,34 @@ def seed_demo(folder: Path) -> Path:
     token_file.write_text(f"- {{name: seeder, token_sha256: {digest}, role: operator}}\n", "utf-8")
     token_file.chmod(0o600)
     path = folder / CONFIG_NAME
-    path.write_text(_config_text(folder, token_file, users_file), encoding="utf-8")
-
-    async def main() -> None:
-        """Start the scheduler, seed it from a worker thread, then stop it."""
-        stop = pynet.loop.Event()
-        ports: list[int] = []
-        task = pynet.loop.spawn(serve(path, ready=ports.append, stop=stop), name="demo-seed")
-        try:
-            async with pynet.loop.timeout(READY_SECONDS):
-                while not ports and not task.done():
-                    await pynet.loop.sleep(POLL)
-            if task.done():
-                task.result()  # raises what serve raised
-                msg = "the demo scheduler stopped before it was ready"
-                raise RuntimeError(msg)
-            url = f"http://127.0.0.1:{ports[0]}"
-            await pynet.loop.run_in_thread(lambda: _seed_runs(url, token))
-        finally:
-            stop.set()
-            await task
-
-    pynet.loop.run(main())
+    path.write_text(config_text(folder, token_file, users_file), encoding="utf-8")
+    pynet.loop.run(_run_seed(path, token))
+    (folder / SEEDED_MARK).write_text("the demo seed finished\n", encoding="utf-8")
     return path
 
 
 def serve_demo(
     folder: Path, *, seconds: float | None = None, ready: Callable[[str], None] | None = None
 ) -> None:
-    """Serve the demo in ``folder`` (seeding it first if it is empty) until Ctrl-C.
+    """Serve the demo in ``folder`` (seeding it first unless a seed finished there) until Ctrl-C.
 
-    It prints the web address and the login, and calls ``ready(url)`` once
-    the scheduler is listening. With ``seconds`` it stops by itself after
-    that long, which is how tests and PyStack use it.
+    A folder without the ``seeded`` marker (new, or left half-seeded) is
+    seeded again first. It prints the web address and the login, and
+    calls ``ready(url)`` once the scheduler is listening. With
+    ``seconds`` it stops by itself after that long, which is how tests
+    and PyStack use it. Like ``seed_demo`` it must be called on the main
+    thread.
 
     Raises:
+        RuntimeError: If it has to seed and is called off the main thread.
+        SeedInterruptedError: If Ctrl-C stopped the seed.
         ConfigError: If the config in ``folder`` is damaged.
         ServiceError: If the scheduler refuses to start.
 
     """
+    folder = folder.absolute()
     path = folder / CONFIG_NAME
-    if not path.exists():
+    if not (folder / SEEDED_MARK).exists():
         seed_demo(folder)
 
     def listening(port: int) -> None:
@@ -341,8 +294,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--seed-only", action="store_true", help="seed, then exit")
     parser.add_argument("--seconds", type=float, default=None, help="stop serving after this long")
     args = parser.parse_args(argv)
-    if args.seed_only:
-        sys.stdout.write(f"{seed_demo(args.folder)}\n")
-        return 0
-    serve_demo(args.folder, seconds=args.seconds)
+    try:
+        if args.seed_only:
+            sys.stdout.write(f"{seed_demo(args.folder)}\n")
+            return 0
+        serve_demo(args.folder, seconds=args.seconds)
+    except SeedInterruptedError:
+        sys.stderr.write("seed interrupted\n")
+        return INTERRUPTED
     return 0
