@@ -660,13 +660,13 @@ wheels = [
 
 [[package]]
 name = "pycrypt"
-version = "0.1.0"
-source = { git = "https://github.com/robcox2910/pycrypt?tag=v0.1.0#c834608a8ebeb50960d42a1cc998cd34adcbda17" }
+version = "0.1.1"
+source = { git = "https://github.com/robcox2910/pycrypt?tag=v0.1.1#a67e801e3d123a3e359935077c783b95e1a642d4" }
 
 [[package]]
 name = "pydb"
-version = "0.4.0"
-source = { git = "https://github.com/robcox2910/pydb?tag=v0.4.0#97aab3550080a5ef52d0d89b3a0661887b5e64c3" }
+version = "0.4.1"
+source = { git = "https://github.com/robcox2910/pydb?tag=v0.4.1#4256469224eb0981df2f7a43411471628259cb6c" }
 
 [[package]]
 name = "pygments"
@@ -679,16 +679,16 @@ wheels = [
 
 [[package]]
 name = "pymq"
-version = "0.3.1"
-source = { git = "https://github.com/robcox2910/pymq?tag=v0.3.1#a6d0f66fe997c6880a85bc416fb02fb6b21366b9" }
+version = "0.4.1"
+source = { git = "https://github.com/robcox2910/pymq?tag=v0.4.1#651ee7e44e28a288311d1519085b55888e69c0da" }
 dependencies = [
     { name = "pynet" },
 ]
 
 [[package]]
 name = "pynet"
-version = "0.1.0"
-source = { git = "https://github.com/robcox2910/pynet?tag=v0.1.0#c43b2e1d06533f545ec7368288d5873e07ff5c33" }
+version = "0.1.1"
+source = { git = "https://github.com/robcox2910/pynet?tag=v0.1.1#824795ac00dddddad64621ab869a0a7b1f85befb" }
 
 [[package]]
 name = "pyparsing"
@@ -739,14 +739,14 @@ requires-dist = [
     { name = "commitizen", marker = "extra == 'dev'", specifier = ">=4.4.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.1" },
-    { name = "pydb", git = "https://github.com/robcox2910/pydb?tag=v0.4.0" },
-    { name = "pymq", git = "https://github.com/robcox2910/pymq?tag=v0.3.1" },
-    { name = "pynet", git = "https://github.com/robcox2910/pynet?tag=v0.1.0" },
+    { name = "pydb", git = "https://github.com/robcox2910/pydb?tag=v0.4.1" },
+    { name = "pymq", git = "https://github.com/robcox2910/pymq?tag=v0.4.1" },
+    { name = "pynet", git = "https://github.com/robcox2910/pynet?tag=v0.1.1" },
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.400" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3.1" },
-    { name = "pyweb", git = "https://github.com/robcox2910/pyweb?tag=v0.3.0" },
+    { name = "pyweb", git = "https://github.com/robcox2910/pyweb?tag=v0.3.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.3" },
 ]
 provides-extras = ["dev"]
@@ -807,8 +807,8 @@ wheels = [
 
 [[package]]
 name = "pyweb"
-version = "0.3.0"
-source = { git = "https://github.com/robcox2910/pyweb?tag=v0.3.0#2d35d70e411c70b203df189da067d55614cd5087" }
+version = "0.2.2"
+source = { git = "https://github.com/robcox2910/pyweb?tag=v0.3.1#015d2e473383bfd09f177d0d383307efa239742f" }
 dependencies = [
     { name = "pycrypt" },
     { name = "pynet" },
