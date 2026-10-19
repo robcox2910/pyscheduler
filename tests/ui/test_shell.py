@@ -1,10 +1,13 @@
 """Test the web UI shell: HTML helpers, login and logout, static files, headers."""
 
+import html
 import subprocess
 import sys
+from datetime import timedelta
+from urllib.parse import quote
 
 import pytest
-from api_helpers import PHRASE, ApiHarness, MakeApi, log_in, users_yaml
+from api_helpers import PHRASE, START, TODAY, ApiHarness, MakeApi, log_in, users_yaml
 from ui_helpers import (
     HOSTILE,
     SHELL_PATH,
@@ -12,10 +15,13 @@ from ui_helpers import (
     csrf_of,
     find,
     parse,
+    seed,
     sign_in,
+    stored_run,
 )
 
 from pyscheduler.api.access import SESSION_COOKIE
+from pyscheduler.engine.model import RunState, make_run_id
 from pyscheduler.ui.html import Safe, h, join
 
 OK = 200
@@ -25,6 +31,10 @@ NOT_FOUND = 404
 FORBIDDEN = 403
 TOO_MANY = 429
 BAD_PASSWORDS = 5
+MINUTE = timedelta(minutes=1)
+NO_SLASH = HOSTILE.replace("/", "")
+"""Hostile text a run id in a URL path can carry (a ``/`` would end the path segment)."""
+NO_SLASH_RUN = make_run_id(NO_SLASH, TODAY, 1)
 HTML = {"Accept": "text/html"}
 DEV_HTML = {"Accept": "text/html", "Host": "127.0.0.1:8470"}
 PEOPLE = {"ada": "admin", "vic": "viewer", "ola": "operator"}
@@ -246,23 +256,45 @@ class TestShell:
 
         h_.run(body)
 
-    @pytest.mark.parametrize("path", [SHELL_PATH, "/login?next=/%22%3E%3Cscript%3Ex"])
-    def test_every_page_escapes(self, api: MakeApi, path: str) -> None:
-        """A hostile caller name, title and ``next`` reach the page escaped, never raw.
+    @pytest.mark.parametrize(
+        ("path", "shows"),
+        [
+            (SHELL_PATH, HOSTILE),
+            ("/login?next=/%22%3E%3Cscript%3Ex", None),
+            ("/", HOSTILE),
+            (f"/?q={quote(HOSTILE)}&tag={quote(HOSTILE)}", HOSTILE),
+            (f"/?criticality={quote(HOSTILE)}", HOSTILE),
+            (f"/ui/fragments/board-row/{quote(NO_SLASH_RUN, safe='')}", NO_SLASH),
+            (f"/ui/fragments/board-row/{quote(NO_SLASH_RUN, safe='')}x", NO_SLASH),
+            (f"/ui/fragments/board-counts?tag={quote(HOSTILE)}", None),
+        ],
+    )
+    def test_every_page_escapes(self, api: MakeApi, path: str, shows: str | None) -> None:
+        """Hostile names, reasons, titles and query text reach each page escaped, never raw.
 
-        Later tasks add their pages to the parameter list.
+        Later tasks add their pages to the parameter list. A run of a job
+        named ``HOSTILE`` and one named ``NO_SLASH`` (each with its name as
+        the reason too) are in the store for today; the page must contain
+        ``shows`` escaped.
         """
         h_ = api(tokens=False, users=users_yaml(ada="admin"))
         add_shell(h_, name=HOSTILE, body=HOSTILE)
+        seed(
+            h_,
+            *(
+                stored_run(name, RunState.FAILED, TODAY, START, reason=name, took=MINUTE)
+                for name in (HOSTILE, NO_SLASH)
+            ),
+        )
 
         async def body() -> None:
             """Fetch the page and look for the raw text."""
             await sign_in(h_, "ada")
             text = (await h_.client.get(path)).text
             assert "<script>" not in text.replace('src="/static/app.js"', "")
-            assert "<script" not in text.split("<main")[1]
-            if path == SHELL_PATH:
-                assert ESCAPED in text
+            assert "<script" not in text.partition("<main")[2 if "<main" in text else 0]
+            if shows is not None:
+                assert html.escape(shows, quote=True) in text
 
         h_.run(body)
 
@@ -327,6 +359,7 @@ class TestLogout:
             "import pyscheduler.ui.login",
             "import pyscheduler.ui.live",
             "import pyscheduler.ui.logtail",
+            "import pyscheduler.ui.board",
             "import pyscheduler.api; import pyscheduler.ui",
         ):
             run = subprocess.run(  # noqa: S603 - fixed arguments

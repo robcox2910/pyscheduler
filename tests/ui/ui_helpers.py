@@ -1,6 +1,7 @@
 """Helpers for the web UI tests: parse HTML, add a probe page, sign in, open event streams."""
 
 from collections.abc import Mapping
+from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
 
 from api_helpers import PHRASE, ApiHarness
@@ -11,6 +12,8 @@ from pyweb.sse import EventStream, ServerEvent
 from pyweb.testing import TestResponse
 
 from pyscheduler.api.auth import Principal
+from pyscheduler.engine.model import Attempt, Outcome, Run, RunState, Trigger, make_run_id
+from pyscheduler.store import Batch
 from pyscheduler.ui.html import h
 from pyscheduler.ui.layout import page
 
@@ -134,3 +137,58 @@ async def next_event(stream: EventStream) -> ServerEvent:
     """Return the stream's next event, failing the test if none comes within ``EVENT_WAIT``."""
     async with timeout(EVENT_WAIT):
         return await anext(stream.source)
+
+
+def stored_run(
+    job: str,
+    state: RunState,
+    run_date: date,
+    at: datetime,
+    *,
+    seq: int = 1,
+    reason: str = "",
+    took: timedelta | None = None,
+    outcome: Outcome | None = None,
+) -> tuple[Run, list[Attempt]]:
+    """Return a run of ``job`` due ``at``; with ``took`` it has one attempt that ended so."""
+    run_id = make_run_id(job, run_date, seq)
+    attempts: list[Attempt] = []
+    if took is not None:
+        attempts.append(
+            Attempt(
+                run_id=run_id,
+                attempt=1,
+                started_at=at,
+                ended_at=at + took,
+                exit_code=0,
+                signal=None,
+                outcome=outcome,
+                pid=None,
+                stdout_path="",
+                stderr_path="",
+                status_path="",
+                reason="",
+            )
+        )
+    run = Run(
+        run_id=run_id,
+        job=job,
+        run_date=run_date,
+        scheduled_at=at,
+        state=state,
+        reason=reason,
+        attempt=len(attempts),
+        rerun=0,
+        trigger=Trigger.MANUAL,
+        config_version=1,
+        created_at=at,
+        updated_at=at,
+    )
+    return run, attempts
+
+
+def seed(h_: ApiHarness, *rows: tuple[Run, list[Attempt]]) -> None:
+    """Write runs and their attempts straight to the store (before the engine starts)."""
+    h_.store.apply(
+        Batch(runs=[run for run, _ in rows], attempts=[a for _, found in rows for a in found])
+    )

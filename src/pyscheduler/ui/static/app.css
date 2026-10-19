@@ -24,6 +24,8 @@
   --topbar-text: #e5e7eb;
   --topbar-active: #ffffff;
   --danger: #b42318;
+  --flag-bg: #fdecc8;
+  --flag-text: #7a4b00;
 
   --state-succeeded: #1a7f37;
   --state-failed: #b42318;
@@ -46,6 +48,8 @@
     --topbar-text: #aab3c0;
     --topbar-active: #ffffff;
     --danger: #f97066;
+    --flag-bg: #4a3510;
+    --flag-text: #f6d58e;
 
     --state-succeeded: #4ac26b;
     --state-failed: #f97066;
@@ -144,3 +148,16 @@ input[type="text"], input[type="password"] {
 }
 .login-card label { display: block; margin-bottom: var(--space-3); color: var(--muted); }
 .error { color: var(--danger); margin: 0 0 var(--space-3); }
+
+/* The job board. */
+.board-filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+.board-filters input[type="text"] { width: auto; }
+.board-filters input, .board-filters select { font: inherit; }
+.counts { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-3); }
+.counts a { text-decoration: none; color: var(--text); }
+.counts a[aria-current="true"] { border-bottom: 2px solid var(--accent); }
+.board td.off-typical { background: var(--flag-bg); color: var(--flag-text); font-weight: 600; }
+.board .tag { margin-right: var(--space-1); font-size: var(--size-small); }
+.board .actions { white-space: nowrap; }
+.board .actions button { font-size: var(--size-small); margin-right: var(--space-1); }
+.empty { color: var(--muted); }

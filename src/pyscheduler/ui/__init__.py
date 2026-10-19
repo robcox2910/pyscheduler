@@ -8,6 +8,7 @@ from pyweb.auth import SessionAuth, UserStore
 from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.api.access import STATIC_PREFIX
 from pyscheduler.engine.core import Engine
+from pyscheduler.ui.board import add_board
 from pyscheduler.ui.live import LiveFeed, add_live
 from pyscheduler.ui.login import add_login
 from pyscheduler.ui.logtail import add_log_tail
@@ -29,11 +30,11 @@ def add_ui(
     dispatcher: Dispatcher | None,
     live: LiveFeed | None = None,
 ) -> None:
-    """Add the web UI to ``app``: static files, login (with a users file) and the live feeds.
+    """Add the web UI to ``app``: static files, login (with a users file), the pages and live feeds.
 
     Args:
         app: The app (the access layer is already installed).
-        engine: The engine the pages read (used by the pages later tasks add).
+        engine: The engine the pages read.
         session_auth: The ``SessionAuth`` from ``build_access``; ``None``
             when there is no login (development mode, or no users file).
         users: The user table the login page checks.
@@ -50,3 +51,4 @@ def add_ui(
     if live is not None:
         add_live(app, live)
     add_log_tail(app, engine)
+    add_board(app, engine)
