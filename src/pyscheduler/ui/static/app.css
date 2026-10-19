@@ -264,3 +264,4 @@ input[type="text"], input[type="password"] {
 .diff .diff-head { color: var(--muted); font-weight: 600; }
 .dead .last-error { word-break: break-word; }
 #admin-message { white-space: pre-wrap; }
+.session-notice { margin: 0 0 var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--state-amber); border-radius: 4px; }
