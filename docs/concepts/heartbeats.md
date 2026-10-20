@@ -11,7 +11,12 @@ parcels that driver was carrying.
 
 That is a **heartbeat**. A running `pysched-agent` sends a signed
 `heartbeat` message every 10 seconds (and a `hello` when it first
-connects). Each one says which attempts the agent is running right now.
+connects). Each one says which attempts the agent is running right now,
+and also repeats the agent's tags and how many attempts it may run
+(`max_running`). That matters with an outside broker (`agents: broker:`):
+when the scheduler restarts, the agent's line to the broker never drops,
+so it sends no new `hello`, and the first heartbeat is how the new
+scheduler learns what the agent offers.
 
 !!! warning "The broker has no door guard"
     Heartbeats travel over the pymq broker, which has **no authentication
@@ -34,6 +39,15 @@ an agent comes back and reports an attempt it is still running, the job
 simply carries on. When it comes back and does *not* list an attempt
 (because it restarted and the job is gone), the countdown for that attempt
 starts then.
+
+The other way round can happen too: the scheduler gave up on an attempt
+(it went `lost`), but the agent was only cut off and the job is still
+running there. The scheduler sent a `kill` when it gave up, but a sealed
+order more than five minutes old is refused as stale, so an agent that
+comes back later never obeys it. So when a `hello` or heartbeat lists an
+attempt the scheduler no longer follows, it sends a **fresh** `TERM`, then
+`KILL` after the `kill_grace`, at most once per round, however many
+heartbeats list it.
 
 An order that the agent has not yet confirmed (`started`) is posted again
 every `agent_grace`, so a dropped letter does not strand a job. The agent

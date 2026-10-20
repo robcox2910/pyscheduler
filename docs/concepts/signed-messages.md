@@ -18,8 +18,13 @@ Every message between the scheduler and an agent is sealed like that:
   **stale** and refused. Keep the clocks of your machines roughly right.
 - **The serial number.** Each message has a random one-time **nonce**. A
   nonce seen before is a **replay** and is refused. Nonces are
-  remembered for ten minutes, twice the date window, which is the longest
-  an old copy could still look fresh.
+  remembered for up to ten minutes, twice the date window, which is the
+  longest an old copy could still look fresh. The memory is kept in RAM,
+  so it is lost when the scheduler (or the agent) restarts: a copy less
+  than five minutes old can be played again just after a restart. That
+  is harmless, because every report is idempotent on its attempt (a
+  repeated `started` or `finished` changes nothing), and a repeated
+  order for an attempt the agent already has never runs it twice.
 - **The right kind of letter.** The scheduler only accepts reports
   (`hello`, `started`, `heartbeat`, `finished`, `log_reply`); an agent
   only accepts orders (`work`, `kill`, acks, log requests). A valid
@@ -32,10 +37,11 @@ includes the secret or the contents.
 !!! warning "What the seal does not do"
     The seal proves who wrote a message and that it is unchanged. It does
     **not** hide it: the broker has **no authentication and no encryption**,
-    so anyone who can reach it can *read* every order, job command, log
-    line and report, and can flood the queues. Run the broker on
-    loopback, on a trusted network, or through a tunnel (SSH or a VPN),
-    and do not put secrets in a job command line.
+    so anyone who can reach it can *read* every order, job command, job
+    environment (`env:` values, `${ENV}` ones included), log line and
+    report, and can flood the queues. Run the broker on loopback, on a
+    trusted network, or through a tunnel (SSH or a VPN), and do not put
+    secrets in a remote job's command line or environment.
 
 ## Secrets
 

@@ -81,6 +81,6 @@ with something you can run.
 27. [Remote Agents (The Delivery Drivers)](concepts/remote-agents.md): `pysched-agent` workers, `agent` and `agent_tags`, lost attempts, remote logs and the two-agent demo.
 28. [Heartbeats (The Walkie-Talkie Check-In)](concepts/heartbeats.md): How the scheduler knows an agent is still there: `agent_grace` and `lost_after`.
 29. [Signed Messages (The Wax Seal and the Date Stamp)](concepts/signed-messages.md): HMAC seals, fresh dates, one-time nonces, and what the broker still leaves open.
-27. [Live Updates (The Radio With Numbered Messages)](concepts/live-updates.md): Server-sent events with ids, replay and reset, and the live log tail.
-28. [Graph Layout (The Seating Plan)](concepts/graph-layout.md): Layers, barycentres and dashed cross-date edges.
-29. [Timelines (The Train Timetable With Ghost Trains)](concepts/timelines.md): Lanes, bars, ghost bars and the day the clocks change.
+30. [Live Updates (The Radio With Numbered Messages)](concepts/live-updates.md): Server-sent events with ids, replay and reset, and the live log tail.
+31. [Graph Layout (The Seating Plan)](concepts/graph-layout.md): Layers, barycentres and dashed cross-date edges.
+32. [Timelines (The Train Timetable With Ghost Trains)](concepts/timelines.md): Lanes, bars, ghost bars and the day the clocks change.

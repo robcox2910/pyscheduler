@@ -82,7 +82,20 @@ pysched-agent --broker sched.example:8471 --name gpu-01 --tags linux,gpu --secre
   and the job's [retries](retries-and-backoff.md) apply like for any other
   failure. Any news about the attempt (a `started`, a heartbeat that
   lists it, a `finished`) stops its countdown, so an agent that comes
-  back in time keeps its job.
+  back in time keeps its job. An agent that comes back *too late* and
+  still lists the lost attempt is told to stop it again with a freshly
+  sealed `TERM`, then `KILL` (see [Heartbeats](heartbeats.md)), so the
+  retry does not race an old copy of the job.
+- **A crash at just the wrong moment.** The scheduler acks a `finished`
+  report as soon as it has it, a moment before the engine has written the
+  ending down, and the agent then stops sending it. If the scheduler
+  crashes in that tiny window, the restart usually still learns the
+  ending: the job is still an agent job, so the work is sent again and
+  the agent answers from its logbook with `started` and `finished`. But
+  if the config changed meanwhile so that the job no longer runs on an
+  agent, the attempt is only *adopted* (followed, not sent again), no
+  report comes, and after `lost_after` it ends as `lost` even though it
+  succeeded. Retries then apply as for any lost attempt.
 - **Logs.** A remote job's log lives on the agent's machine, so asking for
   it (API, UI or `pysched log`) fetches it *from the agent*. If that agent
   is offline, the API answers **503** rather than a stale or empty log.
