@@ -42,13 +42,16 @@ class TestReports:
 
         run_hub(tmp_path, body)
 
-    def test_rival_agent_cannot_settle_or_be_acked(self, tmp_path: Path) -> None:
-        """Ignore another known agent's ``finished`` for this agent's attempt."""
+    @pytest.mark.parametrize("recovered", [False, True])
+    def test_rival_agent_cannot_settle_or_be_acked(self, tmp_path: Path, recovered: bool) -> None:
+        """Ignore another known agent's ``finished`` for this agent's attempt, even after recovery."""
 
         async def body(w: HubWorld) -> None:
             """Let a rival with its own valid secret claim the attempt."""
             w.hub.set_secrets(AgentSecrets({NAME: SECRET, RIVAL: RIVAL_SECRET}))
             handle = await started_handle(w)
+            if recovered:
+                w.hub.recovered()
             nonce = await w.agent.finished(secret=RIVAL_SECRET, agent=RIVAL)
             await until(lambda: nonce in w.hub._verifier._seen)
             await pynet.loop.sleep(SETTLE)

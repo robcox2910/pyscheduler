@@ -152,7 +152,7 @@ docstring-code-format = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests/alerts", "tests/engine", "tests/api", "tests/agents"]
+pythonpath = ["tests", "tests/alerts", "tests/engine", "tests/api", "tests/agents"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

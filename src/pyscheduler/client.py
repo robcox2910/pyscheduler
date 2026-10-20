@@ -262,6 +262,10 @@ class ApiClient:
         """Return ``{"deliveries": [...]}``: the dead deliveries, each with its ``alert``."""
         return self.call("GET", "/api/alerts/dead", query={"limit": limit})
 
+    def agents(self) -> JsonObject:
+        """Return ``{"agents": [...]}``: each agent's status, tags, load and last report."""
+        return self.call("GET", "/api/agents")
+
     def validate(self) -> JsonObject:
         """Check the config files on the scheduler's disk; return ``{"ok", "warnings"}``."""
         return self.call("GET", "/api/config/validate")

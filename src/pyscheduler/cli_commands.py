@@ -231,6 +231,27 @@ def log(client: ApiClient, args: argparse.Namespace) -> int:
     return OK
 
 
+AGENT_HEADER = ("AGENT", "STATUS", "LOAD", "TAGS", "LAST_SEEN")
+"""The columns of the ``agents`` table."""
+
+
+def agents(client: ApiClient, args: argparse.Namespace) -> int:
+    """Print each agent: online or offline, ``running/max_running``, tags, last report."""
+    del args
+    rows = [
+        [
+            a["name"],
+            "online" if a["online"] else "offline",
+            f"{len(a['running'])}/{a['max_running']}",
+            ",".join(a["tags"]),
+            a["last_seen"],
+        ]
+        for a in client.agents()["agents"]
+    ]
+    say(table(AGENT_HEADER, rows))
+    return OK
+
+
 def _print_runs(found: list[dict[str, object]]) -> None:
     """Print one ``run_id: state`` line per run (or a note when there are none)."""
     if not found:
@@ -290,5 +311,6 @@ CLIENT_COMMANDS: dict[str, Callable[[ApiClient, argparse.Namespace], int]] = {
     "trigger": trigger,
     "backfill": backfill,
     "reload": reload,
+    "agents": agents,
     **dict.fromkeys(RUN_ACTIONS, run_action),
 }

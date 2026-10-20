@@ -292,6 +292,8 @@ class TestShell:
             ("/admin", HOSTILE),
             ("/admin/configs/1", HOSTILE),
             ("/ui/fragments/dead-letters", HOSTILE),
+            ("/agents", None),
+            (f"/ui/fragments/agent-row/{quote(NO_SLASH, safe='')}", NO_SLASH),
         ],
     )
     def test_every_page_escapes(self, api: MakeApi, path: str, shows: str | None) -> None:

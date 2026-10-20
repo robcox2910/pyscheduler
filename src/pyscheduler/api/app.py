@@ -18,6 +18,7 @@ The routes, exactly as the design lists them:
 - ``GET /api/alerts?kind=&job=&since=&limit=``; ``GET /api/alerts/dead?limit=``
 - ``POST /api/alerts/{id}/replay``
 - ``POST /api/reload``; ``GET /api/config/validate``
+- ``GET /api/agents``
 """
 
 from pyweb.app import App
@@ -25,6 +26,7 @@ from pyweb.app import App
 from pyscheduler.alerts.dispatch import Dispatcher
 from pyscheduler.api.access import build_access, needs_session_key
 from pyscheduler.api.admin import Reload, Validate, add_admin_routes
+from pyscheduler.api.agents import add_agent_routes
 from pyscheduler.api.alerts import add_alert_routes
 from pyscheduler.api.auth import TokenHolder, TokenTable
 from pyscheduler.api.jobs import add_job_routes
@@ -103,6 +105,7 @@ def build_app(
     add_job_routes(app, engine)
     add_run_routes(app, engine)
     add_alert_routes(app, engine, dispatcher)
+    add_agent_routes(app, engine)
     add_ui(
         app,
         engine,

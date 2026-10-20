@@ -312,13 +312,13 @@ class AgentHub(HubLink):
         Before ``recovered()``, an unknown attempt's report is not acked, so
         the agent keeps sending it until recovery adopts the attempt. After
         it, no run will ever follow that attempt, so the report is acked and
-        dropped.
+        dropped (unless another agent runs it: a rival's claim is never acked).
         """
         handle = self._ours(agent, key)
         if handle is None:
             if self._done.get(key) == agent:
                 self._ack(agent, key)
-            elif self._recovered:
+            elif self._recovered and key not in self._handles:  # never ack a rival's claim
                 logger.info(
                     "finished from %s for %s.%d, which no run follows: acked and dropped",
                     agent,

@@ -137,6 +137,14 @@ class TestJobs:
         [problem] = _problems(tmp_path, text)
         assert "neither listen nor broker" in problem.message
 
+    @pytest.mark.parametrize("extra", ["agent: build-01\n", "agent_tags: [linux]\n"])
+    def test_file_watcher_cannot_use_an_agent(self, tmp_path: Path, extra: str) -> None:
+        """Refuse agent settings on a file watcher, which would hold a slot while polling here."""
+        watcher = "jobs:\n  w:\n    type: file_watcher\n    watch: /x\n    schedule: manual\n"
+        [problem] = _problems(tmp_path, AGENTS + watcher + textwrap.indent(extra, "    "))
+        assert "file watcher" in problem.message
+        assert problem.job == "w"
+
 
 class TestSecretsFile:
     """The secrets file: format, length, permissions and secrecy."""

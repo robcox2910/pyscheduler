@@ -140,6 +140,10 @@ input[type="text"], input[type="password"] {
 .badge.queued, .badge.waiting, .badge.scheduled { background: var(--state-grey); }
 .badge.retry_wait, .badge.held { background: var(--state-amber); }
 .badge.skipped, .badge.cancelled { background: var(--state-muted); }
+.badge.online { background: var(--state-succeeded); }
+.badge.offline { background: var(--state-muted); }
+.agents .tag, .agent-name { margin-right: var(--space-1); font-size: var(--size-small); }
+.agents td a { display: block; }
 .critical::before { content: "\25B2 "; color: var(--danger); }
 
 .login-page { display: grid; place-items: center; min-height: 100vh; }

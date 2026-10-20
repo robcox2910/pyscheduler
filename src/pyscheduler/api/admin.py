@@ -5,7 +5,7 @@ not need to know where the config files live. ``config_actions`` makes
 the usual pair: both read the files on disk on a helper thread;
 ``reload`` then swaps the new config into the engine (and re-reads the
 tokens file and the users file, so a revoked token or a removed user
-stops working), ``validate`` only reports.
+stops working, and the agents' secrets), ``validate`` only reports.
 """
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -21,6 +21,7 @@ from pyscheduler.api.serialize import problem_json
 from pyscheduler.api.support import BAD_REQUEST, ApiError, actor_of, guarded
 from pyscheduler.api.users import UserHolder, UsersFileError, UserTable
 from pyscheduler.config import Config, ConfigError, Problem, load_config
+from pyscheduler.config.agent_secrets import AgentSecrets
 from pyscheduler.engine.core import Engine
 
 __all__ = ["Reload", "Validate", "add_admin_routes", "config_actions"]
@@ -68,6 +69,26 @@ def _reread_users(
         return None, [Problem(str(path), 1, f"users_file: {exc}")]
 
 
+def _agents_moved(config: Config, running: Config, path: Path) -> list[Problem]:
+    """Return a problem if ``config`` moves where agents meet the scheduler (a restart only).
+
+    Turning agents on or off counts as a move: the hub and its broker are
+    set up once, at start.
+    """
+
+    def meeting(where: Config) -> tuple[object, object]:
+        """Return the ``(listen, broker)`` pair of ``where`` (both ``None``: agents off)."""
+        agents = where.agents
+        return (None, None) if agents is None else (agents.listen, agents.broker)
+
+    if meeting(config) == meeting(running):
+        return []
+    agents = config.agents or running.agents
+    file, line = (str(path), 1) if agents is None else (agents.source.file, agents.source.line)
+    message = "agents: changing listen or broker (or turning agents on or off) needs a restart"
+    return [Problem(file, line, message)]
+
+
 def config_actions(
     engine: Engine,
     path: Path,
@@ -76,6 +97,7 @@ def config_actions(
     tokens: TokenHolder | None = None,
     users: UserHolder | None = None,
     on_failed: Callable[[Sequence[Problem]], None] | None = None,
+    agent_secrets: Callable[[AgentSecrets], None] | None = None,
 ) -> tuple[Reload, Validate]:
     """Return ``(reload, validate)`` callables for the config at ``path``.
 
@@ -91,6 +113,12 @@ def config_actions(
     development mode and tokens, fails the whole reload. ``users`` works
     the same way for the ``users_file``. Each swap tells the holder's
     watchers (the web UI then ends its open streams).
+
+    The agents' secrets file is read with the config (a bad one fails the
+    whole reload). Once the config is in, its secrets go to
+    ``agent_secrets``, even when no other file changed. Moving the
+    ``agents:`` ``listen`` or ``broker`` (or adding or removing the
+    section) fails the reload: that needs a restart.
 
     A reload that comes back with errors (the files, the tokens or the users)
     calls ``on_failed`` with those error problems, whoever asked for it.
@@ -130,6 +158,7 @@ def config_actions(
             return problems
         loaded = config
         token_table, user_table, trouble = await run_in_thread(lambda: reread(loaded))
+        trouble += _agents_moved(config, engine.config, path)
         if trouble:
             _failed(trouble)
             return trouble + problems
@@ -138,6 +167,8 @@ def config_actions(
             tokens.swap(token_table)
         if users is not None:
             users.swap(user_table)
+        if agent_secrets is not None and config.agents is not None:
+            agent_secrets(config.agents.secrets)
         return problems
 
     async def validate() -> list[Problem]:

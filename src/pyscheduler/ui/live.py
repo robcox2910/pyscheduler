@@ -16,6 +16,11 @@ The engine feeds the desk through its listener hooks (``attach``):
 - ``attempt`` ``{run_id, attempt, ended}`` -- an attempt started or ended;
 - ``reload`` ``{version}`` -- a reload put a new config in force.
 
+The agent hub's book feeds it too (``attach_agents``):
+
+- ``agent`` ``{name, online, running}`` -- an agent came, went, or its
+  load changed (``running`` counts the attempts it holds).
+
 Every bulletin is published on the event loop after the change is
 durable, so a page never hears of a change the store does not hold yet.
 
@@ -41,6 +46,7 @@ from pyweb.app import App, CallNext
 from pyweb.messages import HttpRequest, Outcome
 from pyweb.sse import EventStream, ServerEvent
 
+from pyscheduler.agents.book import AgentBook, AgentState
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Attempt, Run
 
@@ -250,6 +256,18 @@ class LiveFeed:
                 unsubscribe()
 
         return detach
+
+    def attach_agents(self, book: AgentBook) -> Callable[[], None]:
+        """Publish an ``agent`` event whenever ``book`` changes; return the detach function."""
+
+        def on_agent(state: AgentState) -> None:
+            """Publish an ``agent`` event."""
+            self.publish(
+                "agent",
+                {"name": state.name, "online": state.online, "running": len(state.running)},
+            )
+
+        return book.watch(on_agent)
 
 
 def add_live(app: App, live: LiveFeed) -> None:

@@ -137,6 +137,7 @@ class ApiHarness:
     engine: Engine
     client: TestClient
     live: LiveFeed | None = None
+    hub: FakeHub | None = None
 
     async def advance_to(self, when: datetime) -> None:
         """Move the clock to ``when`` one timer at a time, settling the engine after each."""
@@ -176,11 +177,13 @@ class MakeApi(Protocol):
         env: dict[str, str] | None = None,
         users: str | None = None,
         live: bool = False,
+        hub: bool = False,
     ) -> ApiHarness:
         """Return a harness; ``tokens=False`` is development mode; ``env`` feeds ``${NAME}``.
 
         ``users`` is the text of a users file (normal mode, with web sessions).
         ``live`` attaches a ``LiveFeed`` (boot id ``BOOT``) and serves ``/events``.
+        ``hub`` gives the engine a ``FakeHub`` placement whose book the agent pages read.
         """
         ...
 

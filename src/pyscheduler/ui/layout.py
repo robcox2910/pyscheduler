@@ -58,6 +58,7 @@ NAV: tuple[tuple[str, str, str, Role], ...] = (
     ("graph", "/graph", "Graph", "viewer"),
     ("timeline", "/timeline", "Timeline", "viewer"),
     ("forecast", "/forecast", "Forecast", "viewer"),
+    ("agents", "/agents", "Agents", "viewer"),
     ("admin", "/admin", "Admin", "admin"),
 )
 """The menu: (key, link, label, the role that sees it)."""

@@ -176,6 +176,10 @@ class FakeHub:
         """Count the call."""
         self.recovered_calls += 1
 
+    def states(self) -> list[AgentState]:
+        """Return a copy of every agent's state in the book, by name."""
+        return self.book.states()
+
     async def fetch_log(
         self,
         agent: str,

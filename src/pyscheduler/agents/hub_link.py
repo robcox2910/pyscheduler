@@ -80,7 +80,7 @@ class HubLink:
         self._online: dict[str, bool] = {}
         self._stopped = False
         self.attached = False
-        """Whether the reports queue is being consumed."""
+        """Whether the reports queue's consume has been set up (not whether the line is up now)."""
 
     def __repr__(self) -> str:
         """Show where the hub meets its agents, never a secret."""

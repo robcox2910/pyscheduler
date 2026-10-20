@@ -22,6 +22,7 @@ from pynet.messaging import JsonValue
 
 from pyscheduler.api.serialize import duration_text, instant
 from pyscheduler.engine.model import Attempt, Run
+from pyscheduler.engine.remote import remote_agent
 from pyscheduler.ui.board_view import (
     DASH,
     BoardView,
@@ -188,9 +189,17 @@ def _summary(view: BoardView, run: Run, reason: str) -> Safe:
     )
 
 
+def _where(attempt: Attempt) -> Safe:
+    """Return the cell saying where an attempt ran: its PID here, or the agent's name."""
+    agent = remote_agent(attempt)
+    if agent is not None:
+        return h("td", None, h("a", {"href": "/agents", "class": "agent-name"}, agent))
+    return h("td", None, DASH if attempt.pid is None else str(attempt.pid))
+
+
 def _attempts(view: BoardView, attempts: Sequence[Attempt], reasons: Sequence[str]) -> Safe:
     """Return the attempts table."""
-    heads = ("#", "Started", "Ended", "Took", "Exit", "Signal", "Outcome", "PID", "Reason")
+    heads = ("#", "Started", "Ended", "Took", "Exit", "Signal", "Outcome", "PID / agent", "Reason")
     rows = [
         h(
             "tr",
@@ -206,7 +215,7 @@ def _attempts(view: BoardView, attempts: Sequence[Attempt], reasons: Sequence[st
             h("td", None, DASH if a.exit_code is None else str(a.exit_code)),
             h("td", None, DASH if a.signal is None else str(a.signal)),
             h("td", None, a.outcome.value if a.outcome else DASH),
-            h("td", None, DASH if a.pid is None else str(a.pid)),
+            _where(a),
             h("td", None, reason or DASH),
         )
         for a, reason in zip(attempts, reasons, strict=True)

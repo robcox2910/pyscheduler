@@ -74,6 +74,10 @@ class HubPlacement:
         """Tell the hub recovery is done (see ``AgentHub.recovered``)."""
         self.hub.recovered()
 
+    def states(self) -> list[AgentState]:
+        """Return a copy of every agent's state in the hub's book, by name."""
+        return self.hub.book.states()
+
     async def fetch_log(
         self,
         agent: str,

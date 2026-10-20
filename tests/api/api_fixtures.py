@@ -12,6 +12,7 @@ from pyscheduler.api.users import UserHolder, UserTable
 from pyscheduler.config import load_config
 from pyscheduler.engine.clock import FakeClock
 from pyscheduler.engine.core import Engine
+from pyscheduler.fake_hub import FakeHub
 from pyscheduler.store import Store
 from pyscheduler.testing import FakeLauncher
 from pyscheduler.ui.live import LiveFeed
@@ -28,6 +29,7 @@ def api(tmp_path: Path) -> MakeApi:
         env: dict[str, str] | None = None,
         users: str | None = None,
         live: bool = False,
+        hub: bool = False,
     ) -> ApiHarness:
         """Write the config, tokens and users, then build the store, fakes, engine and app."""
         header = (
@@ -54,7 +56,8 @@ def api(tmp_path: Path) -> MakeApi:
         store = Store.open(tmp_path / "state", sync=False)
         clock = FakeClock(START)
         launcher = FakeLauncher(clock)
-        engine = Engine(config, store, clock=clock, launcher=launcher)
+        fake_hub = FakeHub(clock) if hub else None
+        engine = Engine(config, store, clock=clock, launcher=launcher, placement=fake_hub)
         reload, validate = config_actions(engine, path, env=env or {}, tokens=holder, users=people)
         feed = None
         if live:
@@ -64,6 +67,8 @@ def api(tmp_path: Path) -> MakeApi:
             engine, tokens=holder, reload=reload, validate=validate, users=people, live=feed
         )
         client = TestClient(app)
-        return ApiHarness(tmp_path, path, config, store, clock, launcher, engine, client, feed)
+        return ApiHarness(
+            tmp_path, path, config, store, clock, launcher, engine, client, feed, fake_hub
+        )
 
     return make

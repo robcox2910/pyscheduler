@@ -3,8 +3,10 @@
 import hashlib
 from pathlib import Path
 
+import pynet.loop
 import pytest
 from pyweb.security import verify_password
+from service_agent_helpers import Running, run_service
 
 from pyscheduler import cli_commands
 from pyscheduler.cli import main
@@ -219,3 +221,20 @@ class TestAgainstServer:
 
         assert with_service(path, body) == OK
         assert "only the newest 1 runs" in capsys.readouterr().err
+
+
+class TestAgentsCommand:
+    """``pysched agents`` prints the scheduler's agents as a table."""
+
+    def test_agents_table(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """The table names the agent, its status, load and tags."""
+
+        async def body(r: Running) -> int:
+            """Wait for the agent, then run the command."""
+            await r.agent_online()
+            return await pynet.loop.run_in_thread(lambda: main(["agents", "--url", r.url]))
+
+        assert run_service(tmp_path, body) == OK
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].split() == ["AGENT", "STATUS", "LOAD", "TAGS", "LAST_SEEN"]
+        assert lines[1].split()[:4] == ["build-01", "online", "0/2", "gpu,linux"]

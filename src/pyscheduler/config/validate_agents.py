@@ -2,12 +2,14 @@
 
 Like checking that a delivery slip names a courier who works for us: the
 agent must be in the secrets file, its tags must be well formed, and a job
-cannot ask for one named courier and for any courier with a skill.
+cannot ask for one named courier and for any courier with a skill. A file
+watcher only waits here for files to land, so it never goes to a courier:
+it would hold a courier's seat the whole time it waits.
 """
 
 from typing import Protocol
 
-from pyscheduler.config.model import AgentsDef, Config, JobDef, SourceRef
+from pyscheduler.config.model import AgentsDef, Config, JobDef, JobKind, SourceRef
 from pyscheduler.values import check_name
 
 
@@ -22,7 +24,11 @@ class Checker(Protocol):
 
 
 def check_agents(checker: Checker, config: Config) -> None:
-    """Note agent jobs that name unknown agents, bad tags, both settings, or no ``agents:``."""
+    """Note agent jobs that name unknown agents, bad tags, both settings, or no ``agents:``.
+
+    A file watcher with ``agent`` or ``agent_tags`` is refused too: it polls
+    on the scheduler, so it would hold an agent slot for nothing.
+    """
     agents = config.agents
     known = None if agents is None else agents.secrets.names
     for job in config.jobs.values():
@@ -37,6 +43,11 @@ def _problems(
 ) -> list[str]:
     """Return what is wrong with one agent job's settings."""
     found: list[str] = []
+    if job.kind is JobKind.FILE_WATCHER:
+        found.append(
+            "a file watcher cannot use agent or agent_tags: it waits here, "
+            "and would hold an agent slot while it polls"
+        )
     if job.agent is not None and job.agent_tags:
         found.append("use either agent or agent_tags, not both")
     if agents is None:

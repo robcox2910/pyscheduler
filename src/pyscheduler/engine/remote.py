@@ -30,7 +30,7 @@ from typing import Protocol
 from pynet.loop import Task
 from pynet.messaging import JsonValue
 
-from pyscheduler.agents.book import Refusal, RunKey
+from pyscheduler.agents.book import AgentState, Refusal, RunKey
 from pyscheduler.agents.log_messages import LogReply
 from pyscheduler.agents.messages import WorkOrder, work_payload
 from pyscheduler.agents.remote_handle import RemoteHandle
@@ -100,6 +100,10 @@ class Placement(Protocol):
 
     def recovered(self) -> None:
         """Note that recovery has picked up every remote attempt it will follow."""
+        ...
+
+    def states(self) -> list[AgentState]:
+        """Return a copy of every agent's state, by name (for the API and the UI)."""
         ...
 
     async def fetch_log(
