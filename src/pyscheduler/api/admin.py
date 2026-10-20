@@ -22,6 +22,7 @@ from pyscheduler.api.support import BAD_REQUEST, ApiError, actor_of, guarded
 from pyscheduler.api.users import UserHolder, UsersFileError, UserTable
 from pyscheduler.config import Config, ConfigError, Problem, load_config
 from pyscheduler.config.agent_secrets import AgentSecrets
+from pyscheduler.config.model import AgentsDef
 from pyscheduler.engine.core import Engine
 
 __all__ = ["Reload", "Validate", "add_admin_routes", "config_actions"]
@@ -69,23 +70,35 @@ def _reread_users(
         return None, [Problem(str(path), 1, f"users_file: {exc}")]
 
 
+_RESTART_FIELDS = ("listen", "broker", "agent_grace", "lost_after")
+"""The ``agents:`` settings the hub reads once, at start: changing one needs a restart."""
+
+
+def _agents_on(agents: AgentsDef | None) -> bool:
+    """Return whether ``agents`` turns agents on (it sets ``listen`` or ``broker``)."""
+    return agents is not None and (agents.listen is not None or agents.broker is not None)
+
+
 def _agents_moved(config: Config, running: Config, path: Path) -> list[Problem]:
-    """Return a problem if ``config`` moves where agents meet the scheduler (a restart only).
+    """Return a problem naming the ``agents:`` settings ``config`` changes that need a restart.
 
-    Turning agents on or off counts as a move: the hub and its broker are
-    set up once, at start.
+    Those are where agents meet the scheduler (``listen``, ``broker``) and
+    the hub's timings (``agent_grace``, ``lost_after``). Turning agents on
+    or off counts too: the hub is set up once, at start.
     """
-
-    def meeting(where: Config) -> tuple[object, object]:
-        """Return the ``(listen, broker)`` pair of ``where`` (both ``None``: agents off)."""
-        agents = where.agents
-        return (None, None) if agents is None else (agents.listen, agents.broker)
-
-    if meeting(config) == meeting(running):
+    new, old = config.agents, running.agents
+    on_new, on_old = _agents_on(new), _agents_on(old)
+    if on_new != on_old:
+        changed = ["agents (turning agents on or off)"]
+    elif new is None or old is None or not on_new:
         return []
-    agents = config.agents or running.agents
-    file, line = (str(path), 1) if agents is None else (agents.source.file, agents.source.line)
-    message = "agents: changing listen or broker (or turning agents on or off) needs a restart"
+    else:
+        changed = [f for f in _RESTART_FIELDS if getattr(new, f) != getattr(old, f)]
+    if not changed:
+        return []
+    either = new or old
+    file, line = (str(path), 1) if either is None else (either.source.file, either.source.line)
+    message = f"agents: changing {', '.join(changed)} needs a restart"
     return [Problem(file, line, message)]
 
 

@@ -1,6 +1,7 @@
 """Helpers for the service tests with agents: a real ``serve`` and a real agent on one loop."""
 
 import socket
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,11 +25,11 @@ jobs:
     schedule: manual
     agent: {NAME}
   slow:
-    command: "sleep 2"
+    command: "sleep 8"
     schedule: manual
     agent_tags: [linux]
 """
-"""``remote`` runs on the agent by name; ``slow`` by tag, long enough to be caught running."""
+"""``remote`` runs on the agent by name; ``slow`` by tag, and outlasts a prompt stop of ``serve``."""
 
 
 def free_port() -> int:
@@ -61,6 +62,8 @@ class Running:
     client: ApiClient
     broker_port: int
     agent: Agent
+    serve_stopped_at: float | None = None
+    """When ``serve`` returned (``time.monotonic``), set by ``run_service``."""
 
     async def call[T](self, work: Callable[[ApiClient], T]) -> T:
         """Run ``work(client)`` on a helper thread (the client blocks)."""
@@ -99,10 +102,13 @@ def run_service[T](
     *,
     secret: str = SECRET,
     start_agent: bool = True,
+    stop_serve_first: bool = False,
 ) -> T:
     """Run ``serve`` with an embedded broker and (unless told not to) a real agent; run ``body``.
 
-    The agent stops first, then ``serve`` is stopped through its ``stop`` event.
+    The agent stops first, then ``serve`` is stopped through its ``stop``
+    event; with ``stop_serve_first`` it is the other way round, so ``serve``
+    stops while the agent still runs its work.
     """
     broker_port = free_port()
     path = write_agents_config(folder, broker_port, secret=secret)
@@ -119,16 +125,28 @@ def run_service[T](
             raise RuntimeError(msg)
         url = f"http://127.0.0.1:{ports[0]}"
         agent = make_service_agent(folder, broker_port)
+        running = Running(url, ApiClient(url, None), broker_port, agent)
+
+        async def stop_serve() -> None:
+            """Stop ``serve`` and note when it returned."""
+            stop.set()
+            await task
+            running.serve_stopped_at = time.monotonic()
+
         try:
             if start_agent:
                 await agent.start()
-            return await body(Running(url, ApiClient(url, None), broker_port, agent))
+            return await body(running)
         finally:
             try:
-                if start_agent:
-                    await agent.stop()
+                if stop_serve_first:
+                    await stop_serve()
             finally:
-                stop.set()
-                await task
+                try:
+                    if start_agent:
+                        await agent.stop()
+                finally:
+                    if not stop_serve_first:
+                        await stop_serve()
 
     return pynet.loop.run(main())

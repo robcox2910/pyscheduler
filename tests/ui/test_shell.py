@@ -331,6 +331,22 @@ class TestShell:
 
         h_.run(body)
 
+    @pytest.mark.parametrize("path", ["/agents", "/ui/fragments/agent-row/build-01"])
+    def test_agent_pages_escape_hostile_tags(self, api: MakeApi, path: str) -> None:
+        """A hub-backed agents page and row draw a hostile agent tag escaped, never raw."""
+        h_ = api(tokens=False, hub=True)
+        hub = h_.hub
+        assert hub is not None
+
+        async def body() -> None:
+            """Bring an agent with a hostile tag online and fetch the page."""
+            hub.connect("build-01", tags=(HOSTILE,))
+            text = (await h_.client.get(path, headers=DEV_HTML)).text
+            assert html.escape(HOSTILE, quote=True) in text
+            assert "<script" not in text.partition("<main")[2 if "<main" in text else 0]
+
+        h_.run(body)
+
 
 class TestSignedInLogin:
     """A signed-in user who opens the login form again can still submit it."""

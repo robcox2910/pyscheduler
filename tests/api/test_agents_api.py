@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from api_helpers import JOBS, OK, UNAUTHORISED, VIEWER, ApiHarness, MakeApi, body_of
 
 from pyscheduler.api import config_actions
@@ -130,6 +131,28 @@ class TestReloadAgents:
             _rewrite(h_, LISTEN, MOVED)
             [problem] = await reload("ops")
             assert "needs a restart" in problem.message
+            assert h_.engine.config is before
+            assert swapped == []
+
+        h_.run(body)
+
+    @pytest.mark.parametrize(("field", "value"), [("agent_grace", "30s"), ("lost_after", "5m")])
+    def test_changing_a_timing_needs_a_restart(
+        self, api: MakeApi, tmp_path: Path, field: str, value: str
+    ) -> None:
+        """A new ``agent_grace`` or ``lost_after`` fails the reload, naming it; nothing changes."""
+        h_ = _agents_config(api, tmp_path)
+        swapped: list[AgentSecrets] = []
+        reload, _ = config_actions(h_.engine, h_.config_path, env={}, agent_secrets=swapped.append)
+        before = h_.engine.config
+
+        async def body() -> None:
+            """Change the timing and reload."""
+            _rewrite(
+                h_, "secrets_file: agents.yaml}", f"secrets_file: agents.yaml, {field}: {value}}}"
+            )
+            [problem] = await reload("ops")
+            assert f"agents: changing {field} needs a restart" in problem.message
             assert h_.engine.config is before
             assert swapped == []
 

@@ -98,18 +98,20 @@ class TestServiceAgents:
         run_service(tmp_path, body, secret=WRONG_SECRET, start_agent=False)
 
     def test_stops_with_a_remote_attempt_running(self, tmp_path: Path) -> None:
-        """``serve`` stops promptly (engine first, then the hub) while an agent runs a job."""
-        ended: list[float] = []
+        """``serve`` stops promptly (engine first, then the hub) while the agent runs a long job."""
+        seen: list[tuple[Running, float]] = []
 
         async def body(r: Running) -> None:
-            """Start the slow job and leave it running."""
+            """Start the slow job (longer than ``STOP_SECONDS``) and leave it running."""
             await r.agent_online()
             run = (await r.call(lambda c: c.trigger("slow", run_date=_today())))["run"]
             await _state(r, run["run_id"], "running")
-            ended.append(time.monotonic())
+            seen.append((r, time.monotonic()))
 
-        run_service(tmp_path, body)
-        assert time.monotonic() - ended[0] < STOP_SECONDS
+        run_service(tmp_path, body, stop_serve_first=True)
+        [(r, asked)] = seen
+        assert r.serve_stopped_at is not None
+        assert r.serve_stopped_at - asked < STOP_SECONDS
 
     def test_busy_broker_port_refuses_to_start(self, tmp_path: Path) -> None:
         """An embedded broker that cannot listen stops ``serve`` with a ``ServiceError``."""
