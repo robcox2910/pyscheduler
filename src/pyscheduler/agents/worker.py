@@ -214,6 +214,9 @@ class Agent(Reporter):
             logger.exception("cannot journal work %s.%d; dropping it", *order.key)
             await delivery.nack(requeue=False)
             return
+        except BaseException:  # never leave a launch counted that will not happen
+            self._unlaunch(order.key, ours=ours)
+            raise
         if not new:
             self._unlaunch(order.key, ours=ours)
         # The journal has it now: a failed ack must not stop the launch, or the
