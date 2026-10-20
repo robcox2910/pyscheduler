@@ -146,6 +146,37 @@ Concept pages: [The Web UI](docs/concepts/web-ui.md),
 [Timelines](docs/concepts/timelines.md); the auth modes are in
 [The HTTP API](docs/concepts/http-api.md).
 
+## Phase 4: Remote Agents
+
+A shop with drivers can deliver across town. Phase 4 lets a job run on
+another machine:
+
+- **Agents**: `pysched-agent` is a worker that takes sealed orders from a
+  pymq broker, runs them with the same minder the scheduler uses and
+  reports back. A job picks its place with `agent: name` or
+  `agent_tags: [gpu]`.
+- **An `agents:` section**: the scheduler embeds a broker (`listen`) or
+  uses an existing one (`broker`), with a secrets file naming each agent.
+- **Heartbeats**: an agent says "still here" every 10 seconds. Silence for
+  `agent_grace` marks it offline; an attempt unheard for `lost_after` is
+  failed as `lost`, and retries apply.
+- **Remote logs**: fetched from the agent on demand (503 if it is offline).
+- **Signed messages**: every message carries an HMAC seal, a date and a
+  one-time nonce. The broker itself has no authentication or encryption,
+  so use loopback, a trusted network or a tunnel.
+- `GET /api/agents`, the `/agents` page and `pysched agents` show who is online.
+
+Try it: a scheduler and two agents in one process, a pinned job and a
+tagged job, and a printout of which agent ran each:
+
+```bash
+uv run python examples/agents_demo.py
+```
+
+Concept pages: [Remote Agents](docs/concepts/remote-agents.md),
+[Heartbeats](docs/concepts/heartbeats.md) and
+[Signed Messages](docs/concepts/signed-messages.md).
+
 ## Config Reference
 
 The config format (scheduler settings, calendars, pools, defaults and
@@ -169,7 +200,8 @@ time zones and DST, dependencies, runs and states, retries and backoff,
 pools and limits, the minder, clocks and launchers, group commit,
 concurrency, recovery and catch-up, validation, operator actions,
 forecast, notifiers, routing alerts, alerts, file watchers, the HTTP API,
-the service and CLI, the web UI, live updates, graph layout and timelines.
+the service and CLI, the web UI, live updates, graph layout, timelines,
+remote agents, heartbeats and signed messages.
 
 Build the docs site with:
 
@@ -184,7 +216,7 @@ uv run --with mkdocs-material mkdocs build --strict
 | v0.1 | **Core engine**: YAML reader, config and validation, schedules, calendars, time zones, run dates, forecast, journalled store, the minder, local runs, dependencies, retries, pools, holds, catch-up, backfill, rerun, JSON HTTP API, `pysched` CLI |
 | v0.2 (done) | **Alerts and file watchers**: alert rules (failed, never started, too long, too short, lost), routing through a pymq broker, notifiers (log, command, webhook, Slack, Telegram, email), file-watcher jobs |
 | v0.3 (done) | **Web UI**: login and roles, job board, run detail with live log tail, dependency graph, timeline with forecast, operator actions, live updates over SSE |
-| v0.4 | **Remote agents**: `pysched-agent` workers over a pymq broker, heartbeats, lost-agent handling, remote log fetch, signed messages |
+| v0.4 (done) | **Remote agents**: `pysched-agent` workers over a pymq broker, heartbeats, lost-agent handling, remote log fetch, signed messages |
 
 ## Development
 

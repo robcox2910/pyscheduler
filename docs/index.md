@@ -78,6 +78,9 @@ with something you can run.
 24. [Alerts (The Smoke Alarm and the Teacher Who Notices You Never Arrived)](concepts/alerts.md): Every alert kind, `must_start_by`, `max_runtime`, `min_runtime`, dedupe and a job's `alerts:`.
 25. [File Watchers (Waiting at the Letterbox Until the Parcel Stops Rustling)](concepts/file-watchers.md): Waiting for a file to arrive and sit still, `{files}`, give-up, and why no slot is used.
 26. [The Web UI (The School Noticeboard)](concepts/web-ui.md): The board, run pages, roles and the seeded demo.
+27. [Remote Agents (The Delivery Drivers)](concepts/remote-agents.md): `pysched-agent` workers, `agent` and `agent_tags`, lost attempts, remote logs and the two-agent demo.
+28. [Heartbeats (The Walkie-Talkie Check-In)](concepts/heartbeats.md): How the scheduler knows an agent is still there: `agent_grace` and `lost_after`.
+29. [Signed Messages (The Wax Seal and the Date Stamp)](concepts/signed-messages.md): HMAC seals, fresh dates, one-time nonces, and what the broker still leaves open.
 27. [Live Updates (The Radio With Numbered Messages)](concepts/live-updates.md): Server-sent events with ids, replay and reset, and the live log tail.
 28. [Graph Layout (The Seating Plan)](concepts/graph-layout.md): Layers, barycentres and dashed cross-date edges.
 29. [Timelines (The Train Timetable With Ghost Trains)](concepts/timelines.md): Lanes, bars, ghost bars and the day the clocks change.

@@ -70,3 +70,29 @@ names both places.
 `load_config` does the same work but raises a `ConfigError` listing every
 problem if there are any, so a broken config never starts running. It also
 runs the whole-config checks described in [Validation](validation.md).
+
+## The `agents:` Section
+
+An optional top-level `agents:` section turns on [remote
+agents](remote-agents.md): jobs with `agent:` or `agent_tags:` run on
+`pysched-agent` workers instead of on the scheduler.
+
+```yaml
+agents:
+  listen: "127.0.0.1:8471"   # embed a broker here, or...
+  # broker: "queue.example:5672"   # ...use one that is already running
+  secrets_file: agents.yaml        # required; relative to this file
+  agent_grace: 60s                 # silence before an agent is offline (default 60s)
+  lost_after: 10m                  # silence before an attempt is lost (default 10m)
+```
+
+- Set `listen` **or** `broker`, not both. `secrets_file` is required: a
+  list of `{name, secret}` lines, secrets at least 32 characters, file
+  readable by its owner only (a warning if others can read it).
+- A job's `agent` must name an agent in the secrets file; `agent` and
+  `agent_tags` together, or on a file watcher, are problems.
+- A reload applies a changed secrets file, but changing `listen`,
+  `broker`, `agent_grace` or `lost_after` needs a restart.
+- Secrets never appear in the API, the UI or the config history.
+- The broker has no authentication or encryption: use loopback, a trusted
+  network or a tunnel. See [Signed Messages](signed-messages.md).
