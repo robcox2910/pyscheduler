@@ -11,11 +11,10 @@ from pathlib import Path
 
 from pyscheduler.agents.journal import Entry
 from pyscheduler.agents.log_messages import LogReply, LogRequest
+from pyscheduler.agents.logsource import read_from, read_tail
 from pyscheduler.agents.messages import WorkOrder
-from pyscheduler.api.runs import read_tail
 from pyscheduler.engine.adopted import minder_alive, read_pid
 from pyscheduler.engine.status_note import AttemptResult, read_status
-from pyscheduler.ui.logtail import read_from
 
 __all__ = ["Found", "attempt_files", "look", "read_log"]
 
@@ -86,10 +85,11 @@ def read_log(entry: Entry | None, request: LogRequest) -> LogReply:
     path = entry.stdout_path if request.stream == "stdout" else entry.stderr_path
     try:
         if request.mode == "tail":
-            found = read_tail(path, request.count)
+            size = path.stat().st_size
+            found = read_tail(path, request.count, end=size)
             if found is None:
                 return missing
-            return LogReply(request.request_id, lines=found[0], truncated=found[1])
+            return LogReply(request.request_id, lines=found[0], truncated=found[1], offset=size)
         if not path.exists():
             return missing
         data, offset, shrank = read_from(path, request.offset, request.limit)

@@ -3,11 +3,14 @@
 import dataclasses
 from pathlib import Path
 
+import pynet.loop
+import pytest
 from agent_helpers import HOST, NAME, RUN_ID, now_clock
 from hub_helpers import KEY, HubWorld, hub_config, run_hub, started_handle, work
 
 from pyscheduler.agents.book import Refusal
 from pyscheduler.agents.hub import AgentHub
+from pyscheduler.agents.hub_link import AgentOffline
 from pyscheduler.agents.placement import HubPlacement
 from pyscheduler.agents.remote_handle import RemoteHandle
 from pyscheduler.config import JobDef
@@ -71,3 +74,14 @@ class TestHubPlacement:
             placement.recovered()
 
         run_hub(tmp_path, body)
+
+    def test_fetch_log_goes_to_the_hub(self, tmp_path: Path) -> None:
+        """Pass a log request to the hub, which refuses an agent that is offline."""
+        placement, _ = _placement(tmp_path)
+
+        async def body() -> None:
+            """Ask an agent the hub has never heard from."""
+            with pytest.raises(AgentOffline):
+                await placement.fetch_log(NAME, RUN_ID, 1, "stdout", mode="tail", count=1)
+
+        pynet.loop.run(body())

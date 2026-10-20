@@ -77,6 +77,7 @@ class TestRoundTrips:
             assert parse_log_request(log_request_payload(request)) == request
         for reply in (
             LogReply(REQUEST_ID, lines=["a"], truncated=True),
+            LogReply(REQUEST_ID, lines=["a"], offset=2),
             LogReply(REQUEST_ID, data=b"\x00hi", offset=7, shrank=True),
             LogReply(REQUEST_ID, missing=True),
         ):

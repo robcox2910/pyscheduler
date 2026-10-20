@@ -13,6 +13,7 @@ from pynet.messaging import JsonValue
 
 from pyscheduler.agents.book import AgentState, Refusal, RunKey
 from pyscheduler.agents.hub import AgentHub
+from pyscheduler.agents.log_messages import LogReply
 from pyscheduler.agents.remote_handle import RemoteHandle
 from pyscheduler.config import JobDef
 
@@ -72,3 +73,20 @@ class HubPlacement:
     def recovered(self) -> None:
         """Tell the hub recovery is done (see ``AgentHub.recovered``)."""
         self.hub.recovered()
+
+    async def fetch_log(
+        self,
+        agent: str,
+        run_id: str,
+        attempt: int,
+        stream: str,
+        *,
+        mode: str,
+        count: int | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> LogReply:
+        """Ask ``agent`` for part of an attempt's log (see ``AgentHub.fetch_log``)."""
+        return await self.hub.fetch_log(
+            agent, run_id, attempt, stream, mode=mode, count=count, offset=offset, limit=limit
+        )

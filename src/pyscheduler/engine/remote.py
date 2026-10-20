@@ -31,6 +31,7 @@ from pynet.loop import Task
 from pynet.messaging import JsonValue
 
 from pyscheduler.agents.book import Refusal, RunKey
+from pyscheduler.agents.log_messages import LogReply
 from pyscheduler.agents.messages import WorkOrder, work_payload
 from pyscheduler.agents.remote_handle import RemoteHandle
 from pyscheduler.config import JobDef
@@ -99,6 +100,21 @@ class Placement(Protocol):
 
     def recovered(self) -> None:
         """Note that recovery has picked up every remote attempt it will follow."""
+        ...
+
+    async def fetch_log(
+        self,
+        agent: str,
+        run_id: str,
+        attempt: int,
+        stream: str,
+        *,
+        mode: str,
+        count: int | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> LogReply:
+        """Ask ``agent`` for part of an attempt's log (see ``AgentHub.fetch_log``)."""
         ...
 
 

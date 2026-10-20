@@ -13,10 +13,14 @@ the top.
 - ``lines`` -- a JSON list of strings: first the last ``DEFAULT_TAIL``
   lines, then each new batch of whole lines;
 - ``reset`` -- the file shrank, so the lines that follow start from its top;
-- ``end`` -- the attempt has ended and everything it wrote has been sent.
+- ``end`` -- the attempt has ended and everything it wrote has been sent;
+  or, with ``{"message": ...}``, the log can no longer be read ("the agent
+  is offline", "the agent did not answer").
 
-The file is read on a helper thread every ``LOG_POLL`` seconds, at most
-``LOG_CHUNK`` bytes at a time. The path on the server never leaves it.
+The log is read through a ``LogSource`` every ``LOG_POLL`` seconds, at most
+``LOG_CHUNK`` bytes at a time: a file on a helper thread, or, for an
+attempt that ran on an agent, a request to that agent over the broker.
+The path on the server never leaves it.
 
 ``LogTails.close_all`` ends every open tail at its next look, without
 ``end`` (a reload that swaps the users or the tokens does this): the
@@ -26,17 +30,22 @@ afresh.
 
 import json
 import logging
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from pathlib import Path
 
 from pynet.loop import run_in_thread, sleep
 from pyweb.app import App
 from pyweb.messages import HttpRequest, HttpResponse
 from pyweb.sse import EventStream, ServerEvent
 
-from pyscheduler.api.runs import DEFAULT_TAIL, log_path, log_query, read_tail
+from pyscheduler.agents.logsource import (
+    LOG_CHUNK,
+    LogSource,
+    LogUnavailableError,
+    log_source_for,
+    read_from,
+)
+from pyscheduler.api.runs import DEFAULT_TAIL, log_path, log_query
 from pyscheduler.api.support import ApiError, not_found
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Attempt
@@ -48,9 +57,6 @@ logger = logging.getLogger("pyscheduler.ui")
 
 LOG_POLL = 1.0
 """Seconds between looks at the log file."""
-
-LOG_CHUNK = 65536
-"""The most bytes read from the log file per look (and the longest held-back line)."""
 
 
 @dataclass(eq=False)
@@ -91,56 +97,6 @@ class LogTails:
         self._open.clear()
 
 
-def read_from(path: Path, offset: int, limit: int) -> tuple[bytes, int, bool]:
-    """Return up to ``limit`` bytes of ``path`` from ``offset``, the new offset, and if it shrank.
-
-    A file shorter than ``offset`` was rotated: it is read from 0 instead
-    and the flag is true. A missing file reads as nothing new.
-
-    Raises:
-        OSError: If the file is there but cannot be read (say, no permission).
-
-    """
-    try:
-        handle = path.open("rb")
-    except FileNotFoundError:
-        return b"", offset, False
-    with handle:
-        size = handle.seek(0, os.SEEK_END)
-        shrank = size < offset
-        start = 0 if shrank else offset
-        handle.seek(start)
-        data = handle.read(limit)
-    return data, start + len(data), shrank
-
-
-def _first_look(path: Path, count: int) -> tuple[list[str], int]:
-    """Return the last ``count`` whole lines of ``path`` and the offset just after them.
-
-    An unfinished last line is left for the polls, so it is sent whole.
-    (A last line longer than ``LOG_CHUNK`` is sent as it stands.)
-
-    Raises:
-        OSError: If the file is there but cannot be read.
-
-    """
-    try:
-        size = path.stat().st_size
-    except FileNotFoundError:
-        return [], 0
-    back = min(size, LOG_CHUNK)
-    data, _, _ = read_from(path, size - back, back)
-    cut = data.rfind(b"\n")
-    if cut >= 0:
-        end = size - back + cut + 1
-    elif back == size:
-        end = 0  # the whole file is one unfinished line
-    else:
-        end = size
-    found = read_tail(path, count, end=end) if end else None
-    return (found[0] if found else []), end
-
-
 def _split(data: bytes, *, flush: bool) -> tuple[list[str], bytes]:
     """Return the whole lines in ``data`` and the unfinished rest.
 
@@ -162,7 +118,12 @@ def _lines(lines: list[str]) -> ServerEvent:
 _END = ServerEvent(EMPTY, event="end")
 
 
-def _unreadable(path: Path, error: OSError) -> ServerEvent:
+def _unavailable(error: LogUnavailableError) -> ServerEvent:
+    """Return the ``end`` that stops the tail and says why (``{"message": ...}``)."""
+    return ServerEvent(json.dumps({"message": str(error)}), event="end")
+
+
+def _unreadable(path: str, error: OSError) -> ServerEvent:
     """Log (on the server only) why ``path`` cannot be read; return the ``end`` that stops the tail.
 
     Ending the stream (rather than failing it) keeps the browser from
@@ -172,10 +133,22 @@ def _unreadable(path: Path, error: OSError) -> ServerEvent:
     return _END
 
 
+def _stopped(path: str, error: OSError | LogUnavailableError) -> ServerEvent:
+    """Return the ``end`` for a log that cannot be read (see ``_unreadable``, ``_unavailable``)."""
+    if isinstance(error, OSError):
+        return _unreadable(path, error)
+    return _unavailable(error)
+
+
 async def _tail(
-    engine: Engine, attempt: Attempt, path: Path, tails: LogTails, generation: int
+    engine: Engine,
+    attempt: Attempt,
+    source: LogSource,
+    path: str,
+    tails: LogTails,
+    generation: int,
 ) -> AsyncIterator[ServerEvent]:
-    """Yield the tail of ``path``, then its new lines, then ``end`` once ``attempt`` is over.
+    """Yield the tail of ``source`` (the log at ``path``), then its new lines, then ``end`` once ``attempt`` is over.
 
     It holds a ticket from ``tails`` and stops early, without ``end``,
     once that ticket is closed. ``generation`` is ``tails.generation`` from
@@ -196,17 +169,16 @@ async def _tail(
     try:
         store = engine.store
 
-        def look() -> tuple[list[str], int, bool]:
-            """Read the first tail, and check the attempt again (it may have ended meanwhile)."""
-            lines, offset = _first_look(path, DEFAULT_TAIL)
+        def check() -> bool:
+            """Check the attempt again (it may have ended meanwhile)."""
             rows = store.attempts_for(run_id)
-            over = any(r.attempt == number and r.ended_at is not None for r in rows)
-            return lines, offset, over
+            return any(r.attempt == number and r.ended_at is not None for r in rows)
 
         try:
-            lines, offset, over = await run_in_thread(look)
-        except OSError as exc:
-            yield _unreadable(path, exc)
+            lines, offset = await source.first_look(DEFAULT_TAIL)
+            over = await run_in_thread(check)
+        except (OSError, LogUnavailableError) as exc:
+            yield _stopped(path, exc)
             return
         ended[0] = ended[0] or over
         yield _lines(lines)
@@ -217,9 +189,9 @@ async def _tail(
                 return
             final = ended[0]  # noted before this read, so the read sees all it wrote
             try:
-                data, offset, shrank = await run_in_thread(read_from, path, offset, LOG_CHUNK)
-            except OSError as exc:
-                yield _unreadable(path, exc)
+                data, offset, shrank = await source.read(offset, LOG_CHUNK)
+            except (OSError, LogUnavailableError) as exc:
+                yield _stopped(path, exc)
                 return
             if shrank:
                 rest = b""
@@ -255,8 +227,9 @@ def add_log_tail(app: App, engine: Engine, tails: LogTails | None = None) -> Non
                 raise not_found(msg)
         except ApiError as exc:
             return exc.response()
+        source = log_source_for(engine, attempt, stream, chunk=LOG_CHUNK)
         return EventStream(
-            _tail(engine, attempt, Path(path), held, generation), keepalive=KEEPALIVE
+            _tail(engine, attempt, source, path, held, generation), keepalive=KEEPALIVE
         )
 
     del log_tail

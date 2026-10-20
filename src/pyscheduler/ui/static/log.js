@@ -120,12 +120,21 @@ if (logBox) {
       text.textContent = "";
       fresh = false;
     });
-    opened.addEventListener("end", () => {
+    opened.addEventListener("end", (event) => {
       opened.close();
       if (source === opened) {
         source = null;
       }
-      tell("The attempt has ended.");
+      let note = "The attempt has ended.";
+      try {
+        const said = JSON.parse(event.data).message;
+        if (typeof said === "string") {
+          note = `The log stopped: ${said}.`;
+        }
+      } catch {
+        // an `end` without a message is the plain kind
+      }
+      tell(note);
     });
     opened.addEventListener("error", () => {
       if (opened.readyState === EventSource.CLOSED) {

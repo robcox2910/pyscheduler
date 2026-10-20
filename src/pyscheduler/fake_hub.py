@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pynet.messaging import JsonValue
 
 from pyscheduler.agents.book import AgentBook, AgentState, Refusal, RunKey
+from pyscheduler.agents.hub_link import AgentOffline
+from pyscheduler.agents.log_messages import LogReply
 from pyscheduler.agents.messages import parse_key
 from pyscheduler.agents.remote_handle import RemoteHandle
 from pyscheduler.config import JobDef
@@ -65,6 +67,9 @@ class FakeHub:
         adopted: The attempts followed through ``adopt``, in order.
         signals: Each ``(key, "TERM"|"KILL")`` sent to an agent, in order.
         recovered_calls: How often ``recovered`` was called.
+        logs: The scripted log bytes of each ``(run_id, attempt, stream)``.
+        silent: Agents that are online but never answer a log request.
+        log_requests: How many log requests were made.
         stopped: While true, ``dispatch`` and ``adopt`` raise ``RuntimeError``.
 
     """
@@ -86,6 +91,9 @@ class FakeHub:
         self.adopted: list[RunKey] = []
         self.signals: list[tuple[RunKey, str]] = []
         self.recovered_calls = 0
+        self.logs: dict[tuple[str, int, str], bytes] = {}
+        self.silent: set[str] = set()
+        self.log_requests = 0
         self.stopped = False
         self._profiles: dict[str, tuple[frozenset[str], int]] = {}
         self._talking: dict[str, Cancel] = {}
@@ -167,6 +175,45 @@ class FakeHub:
     def recovered(self) -> None:
         """Count the call."""
         self.recovered_calls += 1
+
+    async def fetch_log(
+        self,
+        agent: str,
+        run_id: str,
+        attempt: int,
+        stream: str,
+        *,
+        mode: str,
+        count: int | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> LogReply:
+        """Answer a log request from the scripted ``logs``, as an agent would.
+
+        Raises:
+            AgentOffline: If ``agent`` is not online.
+            TimeoutError: If ``agent`` is in ``silent``.
+
+        """
+        self.log_requests += 1
+        if not self.online(agent):
+            raise AgentOffline(agent)
+        if agent in self.silent:
+            raise TimeoutError
+        data = self.logs.get((run_id, attempt, stream))
+        if data is None:
+            return LogReply("fake", missing=True)
+        if mode == "tail":
+            lines = data.decode("utf-8", errors="replace").removesuffix("\n").split("\n")
+            wanted = lines[-(count or 1) :] if data else []
+            return LogReply(
+                "fake", lines=wanted, truncated=len(wanted) < len(lines), offset=len(data)
+            )
+        start, size = offset or 0, len(data)
+        shrank = size < start
+        begin = 0 if shrank else start
+        chunk = data[begin : begin + (limit or 0)]
+        return LogReply("fake", data=chunk, offset=begin + len(chunk), shrank=shrank)
 
     def dispatch(self, agent: str, payload: Mapping[str, JsonValue]) -> RemoteHandle:
         """Send ``payload`` to ``agent``; it starts there unless the agent already has it.

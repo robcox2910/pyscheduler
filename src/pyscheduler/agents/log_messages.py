@@ -102,7 +102,8 @@ class LogReply:
         lines: For ``tail``: the lines found.
         truncated: For ``tail``: whether earlier text was left out.
         data: For ``read``: the bytes found.
-        offset: For ``read``: the offset just after ``data``.
+        offset: For ``read``: the offset just after ``data``. For ``tail``: the
+            log's size when the lines were read (where a live tail carries on).
         shrank: For ``read``: the file was shorter than the offset (rotated) and was read from 0.
         missing: There is no such log (or attempt) on the agent.
 
@@ -122,6 +123,8 @@ def log_reply_payload(reply: LogReply) -> dict[str, JsonValue]:
     payload: dict[str, JsonValue] = {"request_id": reply.request_id, "missing": reply.missing}
     if reply.lines is not None:
         payload |= {"lines": list(reply.lines), "truncated": reply.truncated}
+        if reply.offset:
+            payload["offset"] = reply.offset
     if reply.data is not None:
         payload |= {
             "data_b64": base64.b64encode(reply.data).decode("ascii"),
@@ -149,7 +152,7 @@ def parse_log_reply(payload: Mapping[str, JsonValue]) -> LogReply:
         lines=None if lines is None else [str(x) for x in lines],
         truncated=_flag(payload, "truncated"),
         data=data,
-        offset=count_of(payload, "offset") if data is not None else 0,
+        offset=count_of(payload, "offset") if data is not None or "offset" in payload else 0,
         shrank=_flag(payload, "shrank"),
         missing=_flag(payload, "missing"),
     )

@@ -269,6 +269,7 @@ class TestKillAndLogs:
             replies = {r.request_id: r for r in found}
             tail, read, unknown = (replies[a.request_id] for a in asks)
             assert (tail.lines, tail.truncated, tail.missing) == (["b", "c"], True, False)
+            assert tail.offset == len(b"a\nb\nc\n")  # where a live tail carries on
             assert read.data == b"b\nc\n"
             assert (read.offset, read.shrank) == (len(b"a\nb\nc\n"), False)
             assert unknown.missing
