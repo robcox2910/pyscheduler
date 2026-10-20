@@ -105,28 +105,29 @@ class FakeAgent:
         *,
         secret: str = SECRET,
         agent: str = NAME,
-    ) -> None:
-        """Seal ``payload`` as a report of ``kind`` and post it."""
+    ) -> str:
+        """Seal ``payload`` as a report of ``kind``, post it and return its nonce."""
         assert self.client is not None
         body, headers = seal(kind, agent, payload, secret, now=self.clock.now())
         await self.client.put(REPORTS_QUEUE, body, headers=headers)
+        return str(body["nonce"])
 
     async def hello(self, running: Iterable[RunKey] = ()) -> None:
         """Say hello with ``TAGS``, room for four and ``running``."""
         await self.report(HELLO_TYPE, hello_payload(TAGS, 4, running))
 
-    async def heartbeat(self, running: Iterable[RunKey] = ()) -> None:
-        """Send a heartbeat listing ``running``."""
-        await self.report(HEARTBEAT_TYPE, heartbeat_payload(running))
+    async def heartbeat(self, running: Iterable[RunKey] = ()) -> str:
+        """Send a heartbeat listing ``running``; return its nonce."""
+        return await self.report(HEARTBEAT_TYPE, heartbeat_payload(running))
 
     async def started(self, key: RunKey = KEY) -> None:
         """Report ``key`` started with the ``OUT``/``ERR`` log paths."""
         await self.report(STARTED_TYPE, started_payload(key[0], key[1], OUT, ERR))
 
-    async def finished(self, key: RunKey = KEY, exit_code: int = 0, **kwargs: str) -> None:
-        """Report ``key`` finished with ``exit_code``."""
+    async def finished(self, key: RunKey = KEY, exit_code: int = 0, **kwargs: str) -> str:
+        """Report ``key`` finished with ``exit_code``; return the report's nonce."""
         result = AttemptResult(exit_code, None, self.clock.now(), self.clock.now(), None)
-        await self.report(FINISHED_TYPE, finished_payload(key[0], key[1], result), **kwargs)
+        return await self.report(FINISHED_TYPE, finished_payload(key[0], key[1], result), **kwargs)
 
     def of(self, kind: str) -> list[tuple[str, Message]]:
         """Return the ``(delivery id, order)`` pairs of ``kind`` received so far."""
@@ -194,6 +195,7 @@ def run_hub(
         assert config.agents is not None
         hub = AgentHub(config, clock=clock, secrets=config.agents.secrets)
         await hub.start()
+        await until(lambda: hub.attached)
         agent = FakeAgent(hub.address[1], clock)
         world = HubWorld(hub, agent, clock, server)
         try:

@@ -88,14 +88,17 @@ class AgentHub(HubLink):
         self._lost_timers: dict[RunKey, Cancel] = {}
         self._reputs: dict[RunKey, Cancel] = {}
         self._started_watchers: list[Callable[[RemoteHandle], None]] = []
+        self._recovered = False
         self._unwatch = self.book.watch(self._on_agent)
 
     # Lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the embedded broker (with ``listen``), connect, and consume the reports.
+        """Start the embedded broker (with ``listen``) and the client, and return.
 
-        Waits for the broker as long as it takes to answer the first time.
+        The reports queue is declared and consumed in the background once
+        the broker answers (``attached`` turns true); ``start`` never waits
+        for an outside broker that is down.
         """
         await self._connect()
 
@@ -115,6 +118,14 @@ class AgentHub(HubLink):
         self._lost_timers.clear()
         self._reputs.clear()
         await self._hang_up()
+
+    def recovered(self) -> None:
+        """Note that recovery has adopted every remote attempt it will follow.
+
+        From now on a ``finished`` for an attempt nobody follows is acked
+        and dropped, so the agent stops sending it.
+        """
+        self._recovered = True
 
     def watch_started(self, callback: Callable[[RemoteHandle], None]) -> Callable[[], None]:
         """Call ``callback`` with the handle when an attempt's first ``started`` arrives.
@@ -160,8 +171,9 @@ class AgentHub(HubLink):
     def adopt(self, agent: str, run_id: str, attempt: int, started_at: datetime) -> RemoteHandle:
         """Follow an attempt recovery found running on ``agent``; return its handle.
 
-        If the agent is not online, the ``lost_after`` countdown starts now
-        (P4-R8); any report for the attempt stops it.
+        The ``lost_after`` countdown starts now (P4-R8), whether or not the
+        agent is online; any report for the attempt (``started``,
+        ``finished``, or a heartbeat that lists it) stops it.
 
         Raises:
             RuntimeError: If the hub has stopped.
@@ -171,8 +183,7 @@ class AgentHub(HubLink):
         if (known := self._handles.get(key)) is not None:
             return known
         handle = self._follow(agent, key, started_at)
-        if not self._online.get(agent, False):
-            self._arm_lost(handle, self.clock.now() + self.lost_after)
+        self._arm_lost(handle, self.clock.now() + self.lost_after)
         return handle
 
     @staticmethod
@@ -219,7 +230,11 @@ class AgentHub(HubLink):
 
         The log line holds the reason and the delivery id only, never a
         secret or the payload. The delivery is always acked (on return).
+        Once the hub is stopping, reports are dropped unread: the agents
+        send them again.
         """
+        if self._stopped:
+            return
         try:
             self._act(self._verifier.check(delivery.body, delivery.headers))
         except Rejected as exc:
@@ -259,10 +274,17 @@ class AgentHub(HubLink):
         return handle if handle is not None and handle.agent == agent else None
 
     def _seen(self, agent: str, running: set[RunKey]) -> None:
-        """Stop the countdown and re-puts of every attempt ``agent`` says it runs."""
-        for key in running:
-            if self._ours(agent, key) is not None:
-                self._quiet(key)
+        """Stop the countdown and re-puts of every attempt ``agent`` says it runs.
+
+        A started attempt the agent no longer lists gets a ``lost_after``
+        countdown (if none runs): its ``finished`` should be on the way,
+        and if it never comes the attempt is lost.
+        """
+        for handle in [h for h in self._handles.values() if h.agent == agent]:
+            if handle.key in running:
+                self._quiet(handle.key)
+            elif handle.stdout_path is not None and handle.key not in self._lost_timers:
+                self._arm_lost(handle, self.clock.now() + self.lost_after)
 
     def _quiet(self, key: RunKey) -> None:
         """Cancel ``key``'s lost countdown and its re-puts."""
@@ -285,14 +307,23 @@ class AgentHub(HubLink):
                     logger.exception("started watcher failed")
 
     def _finished(self, agent: str, key: RunKey, result: AttemptResult) -> None:
-        """Resolve the attempt and ack the report; ack a repeat; leave an unknown one unacked.
+        """Resolve the attempt and ack the report; ack a repeat; handle an unknown one.
 
-        An unknown attempt's report is not acked, so the agent keeps sending
-        it until recovery adopts the attempt.
+        Before ``recovered()``, an unknown attempt's report is not acked, so
+        the agent keeps sending it until recovery adopts the attempt. After
+        it, no run will ever follow that attempt, so the report is acked and
+        dropped.
         """
         handle = self._ours(agent, key)
         if handle is None:
             if self._done.get(key) == agent:
+                self._ack(agent, key)
+            elif self._recovered:
+                logger.info(
+                    "finished from %s for %s.%d, which no run follows: acked and dropped",
+                    agent,
+                    *key,
+                )
                 self._ack(agent, key)
             else:
                 logger.info("finished from %s for %s.%d, which it does not follow", agent, *key)
@@ -321,8 +352,11 @@ class AgentHub(HubLink):
     def _on_agent(self, state: AgentState) -> None:
         """When an agent goes offline, start its attempts' countdowns and fail its log requests.
 
-        Each countdown runs from ``went_offline``; one that is already
-        running (from dispatch or adoption, with no report since) is kept.
+        Each countdown runs from ``went_offline``. One that is already
+        running (from dispatch, adoption or a heartbeat that dropped the
+        attempt, with no report since) is kept: it was armed while the agent
+        was online, so before ``went_offline``, and it always ends at or
+        before ``went_offline + lost_after``; re-arming would only extend it.
         """
         was = self._online.get(state.name, False)
         self._online[state.name] = state.online
@@ -349,3 +383,5 @@ class AgentHub(HubLink):
             return
         logger.warning("attempt %s.%d on agent %s is lost", *key, handle.agent)
         self._settle(handle, AttemptResult(None, None, None, self.clock.now(), None), lost=True)
+        # If it is in fact still running there, stop it before the engine's retry starts.
+        self._send_kill(handle, "TERM")

@@ -17,7 +17,9 @@ from pyscheduler.agents.messages import (
     LOG_REPLY_TYPE,
     LOG_REQUEST_TYPE,
     WORK_TYPE,
+    RunKey,
     key_payload,
+    kill_payload,
     message_id,
 )
 from pyscheduler.agents.remote_handle import RemoteHandle
@@ -25,6 +27,7 @@ from pyscheduler.agents.remote_handle import RemoteHandle
 GRACE = timedelta(seconds=60)
 LOST_AFTER = timedelta(minutes=10)
 JUST_BEFORE = timedelta(seconds=1)
+BEAT = timedelta(seconds=50)
 SETTLE = 0.2
 TAIL_COUNT = 5
 FIRST, SECOND, THIRD = 1, 2, 3
@@ -185,6 +188,8 @@ class TestLiveness:
             assert result.start_error is None
             assert result.ended_at == w.clock.now()
             assert w.hub.book.states()[0].running == set()
+            _, kill = await w.agent.wait_for(KILL_TYPE)  # in case it still runs there
+            assert kill.payload == kill_payload(*KEY, "TERM")
             await w.agent.finished()  # too late: acked, and ignored
             await w.agent.wait_for(ACK_TYPE)
             assert handle.lost
@@ -267,6 +272,47 @@ class TestLiveness:
             assert not handle.done
 
         run_hub(tmp_path, body)
+
+    def test_adopt_while_online_never_listed_is_lost(self, tmp_path: Path) -> None:
+        """Lose an adopted attempt the online agent never lists, after ``lost_after``."""
+
+        async def body(w: HubWorld) -> None:
+            """Adopt with the agent online and heartbeat without the key."""
+            await w.online()
+            handle = w.hub.adopt(NAME, RUN_ID, FIRST, w.clock.now())
+            await _beat_through(w, LOST_AFTER - JUST_BEFORE, [])
+            assert not handle.done
+            await w.clock.advance(JUST_BEFORE)
+            await handle.wait()
+            assert handle.lost
+
+        run_hub(tmp_path, body)
+
+    def test_started_attempt_dropped_from_heartbeats_is_lost(self, tmp_path: Path) -> None:
+        """Lose a started attempt that the online agent stops listing, unless it lists it again."""
+
+        async def body(w: HubWorld) -> None:
+            """Drop the key from the heartbeats, list it again, then drop it for good."""
+            handle = await started_handle(w)
+            await _beat_through(w, LOST_AFTER / 2, [])
+            await _beat_through(w, LOST_AFTER, [KEY])  # listed again: the countdown stops
+            assert not handle.done
+            await _beat_through(w, LOST_AFTER - JUST_BEFORE, [])
+            assert not handle.done
+            await w.clock.advance(JUST_BEFORE)
+            await handle.wait()
+            assert handle.lost
+
+        run_hub(tmp_path, body)
+
+
+async def _beat_through(w: HubWorld, span: timedelta, running: list[RunKey]) -> None:
+    """Keep the agent online across ``span``, heartbeating with ``running``."""
+    end = w.clock.now() + span
+    while w.clock.now() < end:
+        nonce = await w.agent.heartbeat(running)
+        await until(lambda seal=nonce: seal in w.hub._verifier._seen)  # the hub acted on it
+        await w.clock.advance(min(BEAT, end - w.clock.now()))
 
 
 class TestLogs:

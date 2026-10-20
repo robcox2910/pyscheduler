@@ -46,6 +46,10 @@ logger = logging.getLogger("pyscheduler.agents.hub")
 LOG_TIMEOUT = timedelta(seconds=10)
 """How long ``fetch_log`` waits for the agent's ``log_reply``."""
 REQUEST_ID_BYTES = 8
+ATTACH_WAIT = 10.0
+"""Seconds ``_attach`` waits for the broker line each time round."""
+ATTACH_RETRY = 1.0
+"""Seconds ``_attach`` pauses after a failed attempt."""
 
 
 class AgentOffline(Exception):
@@ -75,6 +79,8 @@ class HubLink:
         self._requests: dict[str, tuple[str, Future[LogReply]]] = {}
         self._online: dict[str, bool] = {}
         self._stopped = False
+        self.attached = False
+        """Whether the reports queue is being consumed."""
 
     def __repr__(self) -> str:
         """Show where the hub meets its agents, never a secret."""
@@ -106,9 +112,11 @@ class HubLink:
         raise NotImplementedError
 
     async def _connect(self) -> None:
-        """Start the embedded broker (with ``listen``), connect, and consume the reports.
+        """Start the embedded broker (with ``listen``) and the client, then attach in the background.
 
-        Waits for the broker as long as it takes to answer the first time.
+        Returns without waiting for the broker: ``_attach`` declares and
+        consumes the reports queue once the line is up. Until then sends
+        fail and are logged, and the re-puts cover them.
         """
         address = self.broker
         if self.listen is not None:
@@ -124,9 +132,25 @@ class HubLink:
         client = BrokerClient(*address)
         self._client = client
         await client.start()
-        await client.wait_connected()
-        await client.declare_queue(REPORTS_QUEUE, QUEUE_CONFIG)
-        await client.consume(REPORTS_QUEUE, self._on_delivery)
+        self._spawn(self._attach(client), "attach")
+
+    async def _attach(self, client: BrokerClient) -> None:
+        """Declare and consume ``scheduler.reports`` once the broker answers; retry until then.
+
+        After the first success the client re-declares and re-consumes by
+        itself on every reconnect.
+        """
+        while True:
+            try:
+                await client.wait_connected(ATTACH_WAIT)
+                await client.declare_queue(REPORTS_QUEUE, QUEUE_CONFIG)
+                await client.consume(REPORTS_QUEUE, self._on_delivery)
+            except (BrokerError, TimeoutError) as exc:
+                logger.warning("cannot reach the agents' broker yet: %s", type(exc).__name__)
+                await pynet.loop.sleep(ATTACH_RETRY)
+            else:
+                self.attached = True
+                return
 
     async def _hang_up(self) -> None:
         """Fail the waiting log requests, end every task, hang up and close the broker."""
@@ -219,7 +243,10 @@ class HubLink:
 
         timer = self.clock.call_at(self.clock.now() + LOG_TIMEOUT, expire)
         try:
-            await self._send(agent, LOG_REQUEST_TYPE, log_request_payload(request))
+            # The send runs on its own task: a broker that is down cannot hold the
+            # caller past the timeout.
+            send = self._send(agent, LOG_REQUEST_TYPE, log_request_payload(request))
+            self._spawn(send, f"log-{request_id}")
             return await future
         finally:
             timer.cancel()
