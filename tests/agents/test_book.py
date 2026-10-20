@@ -1,0 +1,323 @@
+"""Tests for the agent book: liveness, load, placement and watching."""
+
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+
+import pynet.loop
+
+from pyscheduler.agents.book import AgentBook, AgentState, Refusal
+from pyscheduler.engine.clock import FakeClock
+
+START = datetime(2026, 10, 20, tzinfo=UTC)
+GRACE = timedelta(seconds=60)
+FIFTY = timedelta(seconds=50)
+TEN = timedelta(seconds=10)
+SLOTS = 2
+KEY_A = ("a.2026-10-20.1", 1)
+KEY_B = ("b.2026-10-20.1", 1)
+
+
+def run(body: Callable[[FakeClock, AgentBook], Awaitable[None]]) -> None:
+    """Run ``body`` on the loop with a fresh fake clock and book."""
+    clock = FakeClock(START)
+    book = AgentBook(clock=clock, grace=GRACE)
+
+    async def main() -> None:
+        """Run the body, then close the book."""
+        try:
+            await body(clock, book)
+        finally:
+            book.close()
+
+    pynet.loop.run(main())
+
+
+class TestLiveness:
+    """Heartbeats keep an agent online; silence past the grace ends it."""
+
+    def test_heartbeat_keeps_online_and_grace_makes_offline(self) -> None:
+        """Heartbeats at +0 s and +50 s keep it online until +110 s."""
+
+        async def body(clock: FakeClock, book: AgentBook) -> None:
+            """Beat twice, then fall silent."""
+            book.heard("a", tags=["x"], max_running=SLOTS)
+            await clock.advance(FIFTY)
+            book.heard("a", running=[])
+            await clock.advance(GRACE - TEN)
+            (state,) = book.states()
+            assert state.online
+            assert state.went_offline is None
+            await clock.advance(TEN)
+            (state,) = book.states()
+            assert not state.online
+            assert state.went_offline == START + FIFTY + GRACE
+            assert state.last_seen == START + FIFTY
+
+        run(body)
+
+    def test_none_arguments_keep_stored_values(self) -> None:
+        """A bare heartbeat leaves tags and capacity alone; running replaces."""
+
+        async def body(_clock: FakeClock, book: AgentBook) -> None:
+            """Say hello, reserve, then send heartbeats."""
+            book.heard("a", tags=["x"], max_running=SLOTS, running=[KEY_A])
+            book.heard("a")
+            (state,) = book.states()
+            assert state.tags == frozenset({"x"})
+            assert state.max_running == SLOTS
+            assert state.running == {KEY_A}
+            book.heard("a", running=[KEY_B])
+            assert book.states()[0].running == {KEY_B}
+
+        run(body)
+
+    def test_returning_agent_is_online_again(self) -> None:
+        """A heartbeat after going offline brings it back."""
+
+        async def body(clock: FakeClock, book: AgentBook) -> None:
+            """Go offline, then beat."""
+            book.heard("a", max_running=1)
+            await clock.advance(GRACE)
+            assert not book.states()[0].online
+            book.heard("a")
+            assert book.states()[0].online
+
+        run(body)
+
+    def test_states_are_sorted_copies(self) -> None:
+        """States come back sorted by name and cannot mutate the book."""
+
+        async def body(_clock: FakeClock, book: AgentBook) -> None:
+            """Add two agents and mutate a returned state."""
+            book.heard("b", max_running=1)
+            book.heard("a", max_running=1)
+            states = book.states()
+            assert [s.name for s in states] == ["a", "b"]
+            states[0].running.add(KEY_A)
+            assert book.states()[0].running == set()
+
+        run(body)
+
+
+class TestChoose:
+    """Placement follows P4-R7."""
+
+    def test_choose_by_name(self) -> None:
+        """Online with room is chosen; full is busy; offline or unknown is offline."""
+
+        async def body(clock: FakeClock, book: AgentBook) -> None:
+            """Walk one agent through free, busy and offline."""
+            none = frozenset[str]()
+            assert book.choose(agent="b", tags=none) == Refusal("waiting for agent b (offline)")
+            book.heard("b", max_running=1)
+            assert book.choose(agent="b", tags=none) == "b"
+            book.reserve("b", KEY_A)
+            book.reserve("b", KEY_A)
+            assert book.choose(agent="b", tags=none) == Refusal("waiting for agent b (busy)")
+            book.release("b", KEY_A)
+            book.release("b", KEY_A)
+            assert book.choose(agent="b", tags=none) == "b"
+            await clock.advance(GRACE)
+            assert book.choose(agent="b", tags=none) == Refusal("waiting for agent b (offline)")
+
+        run(body)
+
+    def test_zero_capacity_is_busy(self) -> None:
+        """An agent that has not said hello has no slots."""
+
+        async def body(_clock: FakeClock, book: AgentBook) -> None:
+            """Hear a bare heartbeat."""
+            book.heard("a")
+            assert book.choose(agent="a", tags=frozenset()) == Refusal("waiting for agent a (busy)")
+
+        run(body)
+
+    def test_choose_by_tags_least_busy_then_name(self) -> None:
+        """The less busy tagged agent wins; ties go by name; none gives the tags reason."""
+
+        async def body(_clock: FakeClock, book: AgentBook) -> None:
+            """Three agents, two with the tags."""
+            tags = frozenset({"linux", "gpu"})
+            reason = Refusal("waiting for an agent with tags gpu, linux")
+            book.heard("a", tags=["linux"], max_running=SLOTS)
+            assert book.choose(agent=None, tags=tags) == reason
+            book.heard("c", tags=["gpu", "linux"], max_running=SLOTS)
+            book.heard("b", tags=["gpu", "linux", "x"], max_running=SLOTS)
+            assert book.choose(agent=None, tags=tags) == "b"
+            book.reserve("b", KEY_A)
+            assert book.choose(agent=None, tags=tags) == "c"
+            book.reserve("c", KEY_B)
+            assert book.choose(agent=None, tags=tags) == "b"
+            book.reserve("b", KEY_B)
+            book.reserve("c", KEY_A)
+            assert book.choose(agent=None, tags=tags) == reason
+
+        run(body)
+
+
+class TestWatch:
+    """Watchers hear about real changes only."""
+
+    def test_watch_notifies_on_change(self) -> None:
+        """Online flips, load and capacity changes notify; no-ops and unsubscribed do not."""
+
+        async def body(clock: FakeClock, book: AgentBook) -> None:
+            """Provoke each kind of change."""
+            seen: list[AgentState] = []
+            stop = book.watch(seen.append)
+            book.heard("a", tags=["x"], max_running=SLOTS)
+            count = len(seen)
+            assert count >= 1
+            book.heard("a")
+            book.heard("a", running=[])
+            assert len(seen) == count
+            book.reserve("a", KEY_A)
+            book.reserve("a", KEY_A)
+            assert len(seen) == count + 1
+            assert seen[-1].running == {KEY_A}
+            book.release("a", KEY_A)
+            book.release("a", KEY_A)
+            assert len(seen) == count + 2
+            await clock.advance(GRACE)
+            assert not seen[-1].online
+            assert len(seen) == count + 3
+            book.heard("a")
+            assert seen[-1].online
+            stop()
+            before = len(seen)
+            book.reserve("a", KEY_B)
+            assert len(seen) == before
+
+        run(body)
+
+
+class TestReservations:
+    """Hub reservations and agent reports are kept apart."""
+
+    def test_stale_heartbeat_does_not_free_a_reserved_slot(self) -> None:
+        """A heartbeat without the key keeps the slot; reporting it hands it over."""
+
+        async def body(_clock: FakeClock, book: AgentBook) -> None:
+            """Reserve, beat without it, beat with it, beat without it."""
+            none = frozenset[str]()
+            busy = Refusal("waiting for agent a (busy)")
+            book.heard("a", max_running=1)
+            book.reserve("a", KEY_A)
+            book.heard("a", running=[])
+            assert book.choose(agent="a", tags=none) == busy
+            book.heard("a", running=[KEY_A])
+            assert book.choose(agent="a", tags=none) == busy
+            book.heard("a", running=[])
+            assert book.choose(agent="a", tags=none) == "a"
+
+        run(body)
+
+    def test_unreported_key_is_held_until_release(self) -> None:
+        """A reserved key the agent never reports stays until released."""
+
+        async def body(_clock: FakeClock, book: AgentBook) -> None:
+            """Beat repeatedly, then release."""
+            book.heard("a", max_running=1)
+            book.reserve("a", KEY_A)
+            book.heard("a", running=[KEY_B])
+            assert book.states()[0].running == {KEY_A, KEY_B}
+            book.release("a", KEY_A)
+            book.release("a", KEY_B)
+            assert book.states()[0].running == set()
+
+        run(body)
+
+    def test_reserve_unknown_agent_creates_offline_entry(self) -> None:
+        """Recovery can hold a slot before the agent says hello."""
+
+        async def body(clock: FakeClock, book: AgentBook) -> None:
+            """Reserve, then check no timer fires and hello keeps the key."""
+            book.reserve("a", KEY_A)
+            (state,) = book.states()
+            assert not state.online
+            assert state.max_running == 0
+            assert state.running == {KEY_A}
+            assert clock.next_due() is None
+            book.heard("a", max_running=SLOTS)
+            assert book.states()[0].running == {KEY_A}
+
+        run(body)
+
+
+class TestRobustness:
+    """Closing, failing watchers and the tag path."""
+
+    def test_close_makes_book_inert(self) -> None:
+        """After close, nothing goes offline and heard arms no timer."""
+
+        async def body(clock: FakeClock, book: AgentBook) -> None:
+            """Close, advance, then hear."""
+            book.heard("a", max_running=1)
+            book.close()
+            await clock.advance(GRACE * 2)
+            assert book.states()[0].online
+            book.heard("b", max_running=1)
+            assert clock.next_due() is None
+            assert book.states()[0].name == "a"
+            assert len(book.states()) == 1
+
+        run(body)
+
+    def test_throwing_watcher_does_not_stop_others(self) -> None:
+        """A failing callback is logged and the rest still hear."""
+
+        async def body(_clock: FakeClock, book: AgentBook) -> None:
+            """Watch with a thrower and a recorder."""
+            seen: list[AgentState] = []
+
+            def boom(_state: AgentState) -> None:
+                """Fail."""
+                raise RuntimeError
+
+            book.watch(boom)
+            book.watch(seen.append)
+            book.heard("a", max_running=1)
+            assert len(seen) == 1
+
+        run(body)
+
+    def test_unsubscribe_inside_callback_is_safe(self) -> None:
+        """A watcher may stop itself while being called."""
+
+        async def body(_clock: FakeClock, book: AgentBook) -> None:
+            """Stop on first call; a second watcher keeps hearing."""
+            calls: list[int] = []
+            others: list[int] = []
+
+            def once(_state: AgentState) -> None:
+                """Record the call and unsubscribe."""
+                calls.append(1)
+                stop()
+
+            stop = book.watch(once)
+            book.watch(lambda _s: others.append(1))
+            book.heard("a", max_running=1)
+            book.reserve("a", KEY_A)
+            assert len(calls) == 1
+            assert len(others) == SLOTS
+
+        run(body)
+
+    def test_tag_path_skips_offline_and_full_agents(self) -> None:
+        """Only an online tagged agent with room is a candidate."""
+
+        async def body(clock: FakeClock, book: AgentBook) -> None:
+            """One goes offline, one fills up, one is free."""
+            tags = frozenset({"gpu"})
+            book.heard("a", tags=["gpu"], max_running=1)
+            await clock.advance(GRACE)
+            assert book.choose(agent=None, tags=tags) == Refusal(
+                "waiting for an agent with tags gpu"
+            )
+            book.heard("b", tags=["gpu"], max_running=1)
+            book.reserve("b", KEY_A)
+            book.heard("c", tags=["gpu"], max_running=SLOTS)
+            book.reserve("c", KEY_B)
+            assert book.choose(agent=None, tags=tags) == "c"
+
+        run(body)

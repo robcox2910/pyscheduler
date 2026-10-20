@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pyscheduler.api import runs as runs_module
+from pyscheduler.agents import logsource as logsource_module
 from pyscheduler.api.runs import read_tail
 from pyscheduler.api.serialize import (
     date_text,
@@ -103,7 +103,7 @@ class TestReadTail:
 
     def test_small_blocks(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Step back several blocks; keep a final line with no newline; strip CR."""
-        monkeypatch.setattr(runs_module, "BLOCK", 4)
+        monkeypatch.setattr(logsource_module, "BLOCK", 4)
         path = tmp_path / "out.log"
         path.write_bytes(b"first line\r\nsecond line\nthird")
         assert read_tail(path, TWO_LINES) == (["second line", "third"], True)
@@ -111,8 +111,8 @@ class TestReadTail:
 
     def test_byte_cap(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stop at the byte cap and drop the partial first line."""
-        monkeypatch.setattr(runs_module, "BLOCK", 4)
-        monkeypatch.setattr(runs_module, "MAX_TAIL_BYTES", 8)
+        monkeypatch.setattr(logsource_module, "BLOCK", 4)
+        monkeypatch.setattr(logsource_module, "MAX_TAIL_BYTES", 8)
         path = tmp_path / "out.log"
         path.write_bytes(b"aaaaaaaaaa\nbb\ncc\n")
         assert read_tail(path, 10) == (["bb", "cc"], True)

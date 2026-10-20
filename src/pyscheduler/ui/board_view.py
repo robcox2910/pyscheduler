@@ -21,6 +21,7 @@ from pynet.messaging import JsonValue
 from pyscheduler.api.serialize import duration_text, instant, redact
 from pyscheduler.config.model import Criticality, JobDef
 from pyscheduler.engine.model import Attempt, Run, RunState
+from pyscheduler.engine.remote import remote_agent
 from pyscheduler.schedule.forecast import median
 from pyscheduler.ui.dates import in_range
 from pyscheduler.ui.html import Safe, h, join
@@ -188,6 +189,12 @@ def _actions(run: Run) -> Safe:
     return h("td", {"data-col": "actions", "class": "actions"}, *action_buttons(run))
 
 
+def _on_agent(attempt: Attempt | None) -> Safe | None:
+    """Return "on <agent>" for an attempt that runs on an agent, else ``None``."""
+    agent = None if attempt is None else remote_agent(attempt)
+    return None if agent is None else h("small", {"class": "agent-name"}, f" on {agent}")
+
+
 def row(view: BoardView, run: Run) -> Safe:
     """Return the board's ``<tr>`` for ``run``."""
     job = view.jobs.get(run.job)
@@ -229,6 +236,7 @@ def row(view: BoardView, run: Run) -> Safe:
             "td",
             {"data-col": "attempt"},
             h("a", {"href": f"/runs/{quote(run.run_id, safe='')}"}, str(run.attempt)),
+            _on_agent(attempt),
         ),
         h(
             "td",

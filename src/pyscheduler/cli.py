@@ -137,6 +137,7 @@ def _add_client(add: AddParser) -> None:
                 "--downstream", action="store_true", help="also rerun final downstream runs"
             )
     add("reload", parents=conn, help="reload the config files")
+    add("agents", parents=conn, help="list the agents: online or not, load and tags")
     alerts = add("alerts", parents=conn, help="list alerts and how their delivery went")
     alerts.add_argument("--kind", help="only this kind of alert, such as failed")
     alerts.add_argument("--job", help="only this job's alerts")

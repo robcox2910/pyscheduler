@@ -12,6 +12,8 @@ the slot is given back and the next queued runs are started.
 
 A file watcher's attempt has no process: a ``WatcherHandle`` stands in
 for it (see ``watch_runs``), and its found files go in the final commit.
+A remote attempt is sent to an agent instead of launched, and a
+``RemoteHandle`` follows it (see ``remote``).
 """
 
 import os
@@ -19,6 +21,8 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+from pyscheduler.agents.messages import WorkOrder
+from pyscheduler.agents.remote_handle import RemoteHandle
 from pyscheduler.config import JobDef
 from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.launcher import (
@@ -29,12 +33,9 @@ from pyscheduler.engine.launcher import (
 )
 from pyscheduler.engine.model import Attempt, Outcome, Run, RunState
 from pyscheduler.engine.outcomes import LOST, Watch, classify
-from pyscheduler.engine.watch_runs import WatchRuns
+from pyscheduler.engine.remote import SHELL, RemoteRuns, is_remote
 from pyscheduler.engine.watcher import WatcherHandle
 from pyscheduler.templates import render
-
-SHELL = ("/bin/sh", "-c")
-"""How a command written as one string is run."""
 
 MERGED = "stdout"
 """The ``stderr`` value that sends standard error to the stdout file."""
@@ -44,16 +45,20 @@ _NO_RETRY = frozenset({Outcome.SUCCEEDED, Outcome.KILLED})
 __all__ = ["LOST", "MERGED", "SHELL", "AttemptRunner", "Watch", "classify"]
 
 
-def _log_paths(spec: LaunchSpec | WatcherHandle | None) -> tuple[str, str]:
-    """Return the stdout and stderr paths to record for an attempt (``""`` for none)."""
+type _Spec = LaunchSpec | WatcherHandle | WorkOrder | None
+"""What starts an attempt: a launch spec, a watcher, a work order for an agent, or nothing."""
+
+
+def _log_paths(spec: _Spec) -> tuple[str, str]:
+    """Return the stdout and stderr paths to record for an attempt (``""`` for none yet)."""
     if isinstance(spec, WatcherHandle):
         return str(spec.log_path), ""
-    if spec is None:
+    if spec is None or isinstance(spec, WorkOrder):  # an agent reports its paths later
         return "", ""
     return str(spec.stdout_path), str(spec.stderr_path or spec.stdout_path)
 
 
-class AttemptRunner(WatchRuns):
+class AttemptRunner(RemoteRuns):
     """Start attempts, arm their timeouts, and turn their endings into run states."""
 
     def _start_attempt(self, run: Run) -> bool:
@@ -76,12 +81,14 @@ class AttemptRunner(WatchRuns):
             config_version=self.config_version,
             updated_at=now,
         )
-        spec: LaunchSpec | WatcherHandle | None = None
+        spec: _Spec = None
         error: str | None = None
         try:
             if job.watch is not None:
                 log = self._watch_log(running, job)
                 spec = self._watcher(running, job, job.watch, now, log)
+            elif is_remote(job):
+                spec = self._work_order(running, job)
             else:
                 spec = self._launch_spec(running, job)
         except (KeyError, ValueError) as exc:
@@ -98,7 +105,7 @@ class AttemptRunner(WatchRuns):
             pid=None,
             stdout_path=stdout,
             stderr_path=stderr,
-            status_path="" if job.watch else str(self._status_path(run.run_id, number)),
+            status_path=self._status_text(run.run_id, number, job),
             reason="",
         )
         self.book.put(running)
@@ -110,6 +117,12 @@ class AttemptRunner(WatchRuns):
         """Return where the minder writes the status note of this attempt."""
         return self.config.settings.state_dir / "status" / f"{run_id}.{attempt}.json"
 
+    def _status_text(self, run_id: str, attempt: int, job: JobDef) -> str:
+        """Return the attempt row's status path: none for a watcher, ``agent:<name>`` if remote."""
+        if job.watch is not None:
+            return ""
+        return self._remote_status(run_id) or str(self._status_path(run_id, attempt))
+
     def _launch_spec(self, run: Run, job: JobDef) -> LaunchSpec:
         """Render the command and log paths of ``run``'s current attempt.
 
@@ -119,28 +132,14 @@ class AttemptRunner(WatchRuns):
 
         """
         values = self._values(run, job)
-        if isinstance(job.command, str):
-            argv = (*SHELL, render(job.command, values))
-        else:
-            argv = tuple(render(word, values) for word in job.command)
-        env = {
-            **os.environ,
-            **{key: render(value, values) for key, value in job.env.items()},
-            "PYSCHED_JOB": job.name,
-            "PYSCHED_RUN_DATE": run.run_date.isoformat(),
-            "PYSCHED_RUN_ID": run.run_id,
-            "PYSCHED_ATTEMPT": str(run.attempt),
-        }
-        files = self._upstream_files(run, job)
-        if files is not None:
-            env["PYSCHED_FILES"] = "\n".join(files)
+        argv, cwd, env = self._command(run, job)
         stderr = None if job.stderr == MERGED else Path(render(job.stderr, values))
         return LaunchSpec(
             run_id=run.run_id,
             attempt=run.attempt,
             argv=argv,
-            cwd=None if job.cwd is None else render(job.cwd, values),
-            env=env,
+            cwd=cwd,
+            env={**os.environ, **env},
             stdout_path=Path(render(job.stdout, values)),
             stderr_path=stderr,
             status_path=self._status_path(run.run_id, run.attempt),
@@ -151,7 +150,7 @@ class AttemptRunner(WatchRuns):
         self,
         running: Run,
         row: Attempt,
-        spec: LaunchSpec | WatcherHandle | None,
+        spec: _Spec,
         error: str | None,
     ) -> None:
         """Commit ``running``, launch, commit the pid, wait, then record the ending.
@@ -175,9 +174,17 @@ class AttemptRunner(WatchRuns):
                 handle = await self.launcher.launch(spec)
             except (OSError, ValueError, TypeError) as exc:  # Popen refuses a NUL with ValueError
                 error = str(exc)
+        elif isinstance(spec, WorkOrder):
+            try:
+                handle = self._dispatch(row, spec)
+            except (RuntimeError, ValueError) as exc:  # no hub, or the hub refuses it
+                error = str(exc)
         if handle is None:
             result = AttemptResult(None, None, None, self.clock.now(), error)
             await self._finish(row, result, Watch())
+            return
+        if isinstance(handle, RemoteHandle):
+            await self._follow_remote(running, row, handle)
             return
         self._handles[running.run_id] = handle
         if running.run_id in self._kill_requested:  # an operator kill came mid-launch

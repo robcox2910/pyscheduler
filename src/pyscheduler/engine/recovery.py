@@ -11,6 +11,7 @@ starts:
    ``memory_days``. A ``running`` run whose attempt left a status note is
    finished from it; one whose minder is still alive is *adopted* and
    watched until it ends; one with neither is ``lost`` (and may retry).
+   One on a remote agent is sent again or adopted (see ``remote``).
    Queued runs are queued again, retry waits re-armed, and the rest
    re-checked.
 2. **catch_up**: apply each job's ``catch_up`` policy to the firings
@@ -41,6 +42,7 @@ from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.launcher import AttemptResult, read_status
 from pyscheduler.engine.model import Attempt, Run, RunState, Trigger
 from pyscheduler.engine.reload import DISABLED, ConfigReload
+from pyscheduler.engine.remote import remote_agent
 from pyscheduler.engine.retention import Retention, prune
 from pyscheduler.schedule.firings import Firing, firings_between
 from pyscheduler.store import ConfigRecord, Store
@@ -163,6 +165,8 @@ class Recovery(ConfigReload, AttemptRunner, Retention):
         if job is not None and spec is not None and watcher is not None:
             task = self._spawn(self._resume_watch(run, job, spec, watcher), f"watch-{run_id}")
             self._attempt_tasks[run_id] = task
+        elif found.row is not None and (agent := remote_agent(found.row)) is not None:
+            self._attempt_tasks[run_id] = self._pick_up_remote(run, job, found.row, agent)
         elif found.status is not None:
             self._spawn(self._finish(row, found.status, Watch()), f"recover-{run_id}")
         elif found.row is not None and found.pid is not None and found.alive:
@@ -351,7 +355,7 @@ def _inspect(store: Store, run: Run) -> _Found:
     since = row.started_at if row is not None else run.updated_at
     kills = [e for e in store.events_for(run.run_id) if e.action == "kill" and e.at >= since]
     killer = kills[-1].actor if kills else None
-    if row is None or not row.status_path:  # no row yet, or a watcher (no process)
+    if row is None or not row.status_path or remote_agent(row):  # no process of ours to find
         return _Found(row, None, None, killer=killer)
     path = Path(row.status_path)
     note = read_pid(path)

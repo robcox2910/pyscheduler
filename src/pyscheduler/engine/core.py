@@ -38,6 +38,7 @@ from pyscheduler.engine.clock import MAX_NAP, Clock
 from pyscheduler.engine.launcher import Launcher, drain_launches
 from pyscheduler.engine.model import RunState, Trigger
 from pyscheduler.engine.recovery import LAST_TICK, Recovery
+from pyscheduler.engine.remote import Placement
 from pyscheduler.schedule.firings import Firing, next_firing
 from pyscheduler.store import Store
 
@@ -69,6 +70,7 @@ class Engine(Recovery):
         clock: The clock to tell the time and set timers with.
         launcher: What starts attempts.
         config_version: The version of ``config`` recorded on runs.
+        placement: Where runs of agent jobs go (the agent hub), or ``None``.
 
     """
 
@@ -80,6 +82,7 @@ class Engine(Recovery):
         clock: Clock,
         launcher: Launcher,
         config_version: int = 1,
+        placement: Placement | None = None,
     ) -> None:
         """Prepare the engine; nothing happens until ``start``."""
         super().__init__(
@@ -98,6 +101,7 @@ class Engine(Recovery):
         self._dropped = {}
         self.last_active = None
         self.watch_reloads(self._resize_watch_limit)
+        self._setup_remote(placement)
 
     async def start(self) -> None:
         """Start the writer, recover, catch up, then start the firing task and prune.
@@ -113,6 +117,8 @@ class Engine(Recovery):
         """
         await self.writer.start()
         await self.recover()
+        if self.placement is not None:  # every remote attempt is followed again by now
+            self.placement.recovered()
         now = self.clock.now()
         tick, record = await pynet.loop.run_in_thread(
             lambda: (self.store.get_engine(LAST_TICK), self.store.latest_config())
@@ -146,6 +152,7 @@ class Engine(Recovery):
         self.closing.set()  # the launch thread refuses everything still queued
         try:
             await self._wind_down(kill_running=kill_running)
+            self._drop_placements()
             await drain_launches()  # after this, no minder is forked any more
         finally:
             try:
@@ -329,7 +336,10 @@ class Engine(Recovery):
         while freed and not self._stopping:  # go again if a slot was handed straight back
             freed = False
             force = frozenset(self._force)
-            batch = self.ready.take_startable(self.admission, force=force, limit=PUMP_BATCH - taken)
+            room = PUMP_BATCH - taken
+            batch = self.ready.take_startable(
+                self.admission, force=force, limit=room, place=self._place
+            )
             taken += len(batch)
             if taken >= PUMP_BATCH:
                 self._pump_soon()

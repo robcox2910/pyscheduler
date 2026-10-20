@@ -34,6 +34,7 @@ pymq = { git = "https://github.com/robcox2910/pymq", tag = "v0.4.1" }
 
 [project.scripts]
 pysched = "pyscheduler.cli:main"
+pysched-agent = "pyscheduler.agents.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/robcox2910/pyscheduler"
@@ -129,6 +130,20 @@ max-args = 9
 # The minder starts once per attempt and must import as little as it can:
 # plain os paths instead of pathlib, try/except instead of contextlib.
 "src/pyscheduler/minder.py" = ["PTH", "SIM105"]
+# The brief names the exception Rejected (it reads as a verdict, not an error).
+"src/pyscheduler/agents/signing.py" = ["N818"]
+# The agent settles every order and turns any launch failure into a start error,
+# whatever the exception; it logs only the exception's type, never a traceback
+# (an exception's text or locals could carry the order's payload).
+"src/pyscheduler/agents/worker.py" = ["BLE001", "TRY400"]
+# The agent command line ends any unforeseen failure with one line, not a traceback.
+"src/pyscheduler/agents/cli.py" = ["BLE001"]
+# The hub settles every report whatever goes wrong and logs only the exception's
+# type (a traceback could carry the payload).
+"src/pyscheduler/agents/hub.py" = ["BLE001", "TRY400"]
+# AgentOffline is the brief's name (it reads as a state, like Rejected), and
+# fetch_log takes the brief's keyword arguments.
+"src/pyscheduler/agents/hub_link.py" = ["N818", "PLR0913"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -137,7 +152,7 @@ docstring-code-format = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests/alerts", "tests/engine", "tests/api"]
+pythonpath = ["tests", "tests/alerts", "tests/engine", "tests/api", "tests/agents"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -167,7 +182,7 @@ venv = ".venv"
 
 [[tool.pyright.executionEnvironments]]
 root = "tests"
-extraPaths = [".", "tests/alerts", "tests/engine", "tests/api"]
+extraPaths = [".", "tests/alerts", "tests/engine", "tests/api", "tests/agents"]
 reportPrivateUsage = false
 
 [tool.commitizen]

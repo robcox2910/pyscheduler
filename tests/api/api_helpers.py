@@ -18,7 +18,9 @@ from pyscheduler.api.session_key import load_or_make_key
 from pyscheduler.config import Config
 from pyscheduler.engine.clock import FakeClock
 from pyscheduler.engine.core import Engine
-from pyscheduler.store import Store
+from pyscheduler.engine.model import Attempt, Run, RunState, Trigger
+from pyscheduler.fake_hub import FakeHub
+from pyscheduler.store import Batch, Store
 from pyscheduler.testing import FakeLauncher
 from pyscheduler.ui.live import LiveFeed
 
@@ -135,6 +137,7 @@ class ApiHarness:
     engine: Engine
     client: TestClient
     live: LiveFeed | None = None
+    hub: FakeHub | None = None
 
     async def advance_to(self, when: datetime) -> None:
         """Move the clock to ``when`` one timer at a time, settling the engine after each."""
@@ -174,10 +177,62 @@ class MakeApi(Protocol):
         env: dict[str, str] | None = None,
         users: str | None = None,
         live: bool = False,
+        hub: bool = False,
     ) -> ApiHarness:
         """Return a harness; ``tokens=False`` is development mode; ``env`` feeds ``${NAME}``.
 
         ``users`` is the text of a users file (normal mode, with web sessions).
         ``live`` attaches a ``LiveFeed`` (boot id ``BOOT``) and serves ``/events``.
+        ``hub`` gives the engine a ``FakeHub`` placement whose book the agent pages read.
         """
         ...
+
+
+REMOTE_AGENT = "build-01"
+"""The agent the remote-log tests run attempts on."""
+AGENT_LOG = "/agent/logs/adhoc/2026-10-19/adhoc.2026-10-19.1.out"
+"""Where that agent says it wrote the stdout of ``ADHOC_RUN``."""
+ADHOC_RUN = "adhoc.2026-10-19.1"
+
+
+def remote_attempt(h: ApiHarness, *, ended: bool, paths: bool = True) -> FakeHub:
+    """Give the harness's engine a ``FakeHub`` with ``REMOTE_AGENT`` online and a remote attempt.
+
+    The store gets a run of ``adhoc`` with attempt 1 on that agent (finished when ``ended``).
+    Without ``paths`` the agent has not reported ``started`` yet. The hub's stdout log
+    for it holds ``one`` and ``two`` as whole lines.
+    """
+    hub = FakeHub(h.clock)
+    hub.connect(REMOTE_AGENT)
+    hub.logs[ADHOC_RUN, 1, "stdout"] = b"one\ntwo\n"
+    h.engine.placement = hub
+    run = Run(
+        ADHOC_RUN,
+        "adhoc",
+        TODAY,
+        START,
+        RunState.RUNNING,
+        "",
+        1,
+        0,
+        Trigger.MANUAL,
+        1,
+        START,
+        START,
+    )
+    row = Attempt(
+        run_id=run.run_id,
+        attempt=1,
+        started_at=START,
+        ended_at=START + timedelta(minutes=1) if ended else None,
+        exit_code=0 if ended else None,
+        signal=None,
+        outcome=None,
+        pid=None,
+        stdout_path=AGENT_LOG if paths else "",
+        stderr_path=AGENT_LOG.replace(".out", ".err") if paths else "",
+        status_path=f"agent:{REMOTE_AGENT}",
+        reason="",
+    )
+    h.store.apply(Batch(runs=[run], attempts=[row]))
+    return hub

@@ -56,8 +56,10 @@ from pyscheduler.engine.base import EngineFailedError
 from pyscheduler.engine.clock import SystemClock
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.launcher import MinderLauncher
+from pyscheduler.service_agents import ServiceAgents
 from pyscheduler.service_parts import (
     RunLog,
+    ServiceError,
     SignalHooks,
     StartingGate,
     logger,
@@ -78,10 +80,6 @@ __all__ = [
 
 CLOSE_GRACE = 5.0
 """How many seconds in-flight API requests get to finish when the service closes."""
-
-
-class ServiceError(Exception):
-    """Raised when ``serve`` refuses to start (unsafe address, bad tokens or users, busy port)."""
 
 
 class SchedulerFailedError(Exception):
@@ -159,8 +157,8 @@ def _access(config: Config) -> tuple[TokenTable | None, UserTable | None]:
     return tokens, users
 
 
-async def _open_engine(config: Config) -> tuple[Engine, ConfigRecord | None]:
-    """Open the store and build (not start) the engine; return it and the record to save.
+async def _open_engine(config: Config, agents: ServiceAgents) -> tuple[Engine, ConfigRecord | None]:
+    """Open the store and build (not start) the engine on ``agents``' clock and placement.
 
     The version is the stored one when the digest is unchanged, else the
     next one. The record is saved only after ``start``, so catch-up still
@@ -175,7 +173,12 @@ async def _open_engine(config: Config) -> tuple[Engine, ConfigRecord | None]:
     changed = latest is None or latest.digest != config.digest
     version = 1 if latest is None else latest.version + int(changed)
     engine = Engine(
-        config, store, clock=SystemClock(), launcher=MinderLauncher(), config_version=version
+        config,
+        store,
+        clock=agents.clock,
+        launcher=MinderLauncher(),
+        config_version=version,
+        placement=agents.placement,
     )
     engine.subscribe(RunLog())
     if not changed:
@@ -184,14 +187,18 @@ async def _open_engine(config: Config) -> tuple[Engine, ConfigRecord | None]:
     return engine, ConfigRecord(version, engine.clock.now(), config.digest, sources)
 
 
-async def _start(engine: Engine, record: ConfigRecord | None) -> None:
-    """Start the engine, then save the config record.
+async def _start(engine: Engine, record: ConfigRecord | None, agents: ServiceAgents) -> None:
+    """Start the agent hub and the engine, then save the config record.
+
+    The hub starts first, so recovery's ``recovered()`` reaches a started hub.
 
     Raises:
+        ServiceError: If the agents' embedded broker cannot listen.
         SchedulerFailedError: If recovery or catch-up failed, or the
             record could not be saved.
 
     """
+    await agents.start()
     try:
         await engine.start()
     except EngineFailedError as exc:
@@ -228,6 +235,7 @@ class _Service:
         self.reloads: set[Task[None]] = set()
         self.reload_task: Callable[[], Coroutine[Any, Any, None]] | None = None
         self.detach_live: Callable[[], None] | None = None
+        self.agents: ServiceAgents | None = None
 
     def on_reload(self) -> None:
         """Start a reload for SIGHUP (ignored until the engine is up)."""
@@ -274,8 +282,12 @@ class _Service:
                         await self.engine.stop()
                         logger.info("scheduler stopped")
                 finally:
-                    if self.signals is not None:
-                        self.signals.restore()
+                    try:  # after the engine: its stop never waits on remote attempts
+                        if self.agents is not None:
+                            await self.agents.stop()
+                    finally:
+                        if self.signals is not None:
+                            self.signals.restore()
 
     async def _stop_alerts(self) -> None:
         """Stop the dispatcher (safe if never started); the monitor stops with the engine."""
@@ -293,7 +305,8 @@ async def serve(
 
     In order: load the config; read the tokens and users; hook the signals;
     open the store (and attach the live feed); take the port (requests get
-    503 ``scheduler is starting`` for now); start the engine; record the
+    503 ``scheduler is starting`` for now); start the agent hub (with an
+    ``agents:`` section, see ``ServiceAgents``); start the engine; record the
     config version (when its digest is new); start the alert dispatcher and
     monitor; open the gate and call ``ready(port)``. It ends when ``stop`` is set, on SIGTERM or
     SIGINT (also during start-up: it stops once the engine is up), or
@@ -305,7 +318,7 @@ async def serve(
     ``CLOSE_GRACE`` seconds), stops the alert dispatcher, then stops the
     engine without killing running attempts: their minders carry on and
     are adopted on the next start. The alert monitor stops with the
-    engine, just before its writer closes.
+    engine, just before its writer closes. The agent hub stops last.
 
     Raises:
         ConfigError: If the config has errors (nothing has been opened).
@@ -324,14 +337,20 @@ async def serve(
     service.signals = SignalHooks(service.wake.set, service.on_reload)
     service.signals.install()
     try:
-        engine, record = await _open_engine(config)
-        service.engine = engine
         live = LiveFeed()
+        agents = service.agents = ServiceAgents(config, SystemClock(), live)
+        engine, record = await _open_engine(config, agents)
+        service.engine = engine
         service.detach_live = live.attach(engine)  # before start: recovery's changes too
         dispatcher = service.dispatcher = Dispatcher(engine)
         monitor = service.monitor = AlertMonitor(engine, dispatcher)  # hears recovery too
         reload, validate = config_actions(
-            engine, config_path, tokens=tokens, users=users, on_failed=monitor.reload_failed
+            engine,
+            config_path,
+            tokens=tokens,
+            users=users,
+            on_failed=monitor.reload_failed,
+            agent_secrets=agents.set_secrets,
         )
         service.reload_task = lambda: reload_for_signal(reload)
         try:  # the key file is read (or made) off the loop; the app is built on it
@@ -359,7 +378,7 @@ async def serve(
             cause = exc.__cause__ if isinstance(exc, PyNetError) and exc.__cause__ else exc
             msg = f"cannot listen on {host}:{port}: {cause}"
             raise ServiceError(msg) from None
-        await _start(engine, record)
+        await _start(engine, record, agents)
         await dispatcher.start()
         await monitor.start()
         if not service.wake.is_set():  # a stop signal while starting skips the rest

@@ -77,3 +77,6 @@ nav:
       - "Live Updates (The Radio With Numbered Messages)": concepts/live-updates.md
       - "Graph Layout (The Seating Plan)": concepts/graph-layout.md
       - "Timelines (The Train Timetable With Ghost Trains)": concepts/timelines.md
+      - "Remote Agents (The Delivery Drivers)": concepts/remote-agents.md
+      - "Heartbeats (The Walkie-Talkie Check-In)": concepts/heartbeats.md
+      - "Signed Messages (The Wax Seal and the Date Stamp)": concepts/signed-messages.md

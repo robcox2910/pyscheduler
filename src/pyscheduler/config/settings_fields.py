@@ -39,14 +39,14 @@ DEFAULT_WATCH_LIMIT = 8
 UTC_ZONE = ZoneInfo("UTC")
 
 
-def _listen(r: Reader, node: Node) -> tuple[str, int] | None:
-    """Read ``listen: host:port``."""
-    text = read_str(r, node, "listen")
+def read_listen(r: Reader, node: Node, what: str = "listen") -> tuple[str, int] | None:
+    """Read ``host:port`` for the setting named ``what``."""
+    text = read_str(r, node, what)
     if text is None:
         return None
     host, sep, port = text.rpartition(":")
     if not sep or not host or _PORT.fullmatch(port) is None or int(port) > MAX_PORT:
-        r.add(node.line, f"listen must be host:port with a port 0-{MAX_PORT}, got {text!r}")
+        r.add(node.line, f"{what} must be host:port with a port 0-{MAX_PORT}, got {text!r}")
         return None
     return host, int(port)
 
@@ -69,7 +69,7 @@ def read_settings(r: Reader, node: Map, main: Path) -> Settings:
 
     name = read_str(r, items["name"], "name") if "name" in items else None
     zone = read_zone(r, items["timezone"], "timezone") if "timezone" in items else None
-    listen = _listen(r, items["listen"]) if "listen" in items else None
+    listen = read_listen(r, items["listen"]) if "listen" in items else None
     return Settings(
         name=name or DEFAULT_NAME,
         timezone=zone or UTC_ZONE,

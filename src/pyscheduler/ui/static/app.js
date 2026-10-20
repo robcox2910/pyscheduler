@@ -9,10 +9,12 @@
 // - board.js: the live job board;
 // - actions.js: run and job action buttons;
 // - log.js: the run page and its live log viewer;
-// - admin.js: config reload and dead-letter replay.
+// - admin.js: config reload and dead-letter replay;
+// - agents.js: the live agents page.
 
 import "./common.js";
 import "./board.js";
 import "./actions.js";
 import "./log.js";
 import "./admin.js";
+import "./agents.js";

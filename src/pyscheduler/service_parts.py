@@ -28,6 +28,7 @@ __all__ = [
     "RELOAD_SIGNAL",
     "STOP_SIGNALS",
     "RunLog",
+    "ServiceError",
     "SignalHooks",
     "StartingGate",
     "logger",
@@ -35,6 +36,16 @@ __all__ = [
 ]
 
 logger = logging.getLogger("pyscheduler.service")
+
+
+class ServiceError(Exception):
+    """Raised when ``serve`` refuses to start.
+
+    For example: an unsafe address, bad tokens or users, a busy port, or
+    an ``agents:`` broker that cannot start (the embedded one) or be used
+    (an outside one).
+    """
+
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 """The signals that end ``serve`` gracefully."""

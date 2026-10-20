@@ -1,9 +1,12 @@
-"""Stand-ins for tests: a launcher that runs no real processes.
+"""Stand-ins for tests: a launcher that runs no real processes, and a pretend hub.
 
 ``FakeLauncher`` pretends to start jobs. Each pretend attempt finishes when
 the ``FakeClock`` reaches its start time plus a planned duration, with a
 planned exit code or signal. A test can therefore run a day of jobs, with
 failures, retries and kills, without starting a single process.
+
+``FakeHub`` (in ``pyscheduler.fake_hub``) does the same for remote agents:
+it plays the agent hub and its agents on the fake clock.
 """
 
 import itertools

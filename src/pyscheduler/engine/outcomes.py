@@ -7,6 +7,7 @@ noticed while it ran (timed out, lost, the files a watcher found).
 
 from dataclasses import dataclass
 
+from pyscheduler.agents.remote_handle import RemoteHandle
 from pyscheduler.engine.clock import Cancel
 from pyscheduler.engine.launcher import AttemptHandle, AttemptResult
 from pyscheduler.engine.model import Outcome
@@ -25,7 +26,8 @@ class Watch:
 
     Attributes:
         timed_out: The timeout rang (the attempt was asked to stop).
-        lost: The process vanished without a status note (found by recovery).
+        lost: The process vanished without a status note (found by recovery), or
+            the hub gave a remote attempt up as lost.
         term: The timer that rings the timeout.
         kill: The timer that sends SIGKILL after the grace.
         files: The files a watcher attempt found (``()`` for others).
@@ -41,8 +43,10 @@ class Watch:
     why: str = ""
 
     def note(self, handle: AttemptHandle) -> None:
-        """Take what a watcher found, or that it gave up, from its ended ``handle``."""
-        if isinstance(handle, WatcherHandle):
+        """Take what a watcher found or that it gave up, or that a remote attempt was lost."""
+        if isinstance(handle, RemoteHandle):
+            self.lost = self.lost or handle.lost
+        elif isinstance(handle, WatcherHandle):
             self.files = handle.files
             if handle.gave_up:
                 self.timed_out = True

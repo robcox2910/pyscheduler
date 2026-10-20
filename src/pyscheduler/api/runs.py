@@ -6,20 +6,20 @@ what the store holds. Store reads and log files are read on a helper
 thread, so the event loop keeps serving everyone else.
 """
 
-import os
 from collections.abc import Awaitable, Callable
 from datetime import date
-from pathlib import Path
 
 from pynet.loop import run_in_thread
 from pynet.messaging import JsonValue
 from pyweb.app import App
 from pyweb.messages import HttpRequest
 
+from pyscheduler.agents.logsource import LogUnavailableError, log_source_for, read_tail
 from pyscheduler.api.alerts import alert_rows
 from pyscheduler.api.serialize import attempt_json, event_json, run_json
 from pyscheduler.api.support import (
     BAD_REQUEST,
+    UNAVAILABLE,
     ApiError,
     actor_of,
     guarded,
@@ -31,6 +31,7 @@ from pyscheduler.api.support import (
 )
 from pyscheduler.engine.core import Engine
 from pyscheduler.engine.model import Attempt, Event, Run, RunState
+from pyscheduler.engine.remote import remote_agent
 
 __all__ = [
     "DEFAULT_TAIL",
@@ -48,12 +49,6 @@ DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 DEFAULT_TAIL = 200
 MAX_TAIL = 5000
-MAX_TAIL_BYTES = 8 * 1024 * 1024
-"""The most bytes read from the end of a log, however long its lines."""
-
-BLOCK = 64 * 1024
-"""How many bytes the tail reader steps back at a time."""
-
 STREAMS = ("stdout", "stderr")
 MAX_ATTEMPT = 10**9
 """The largest attempt number a log request may name."""
@@ -102,45 +97,6 @@ async def find_run(engine: Engine, run_id: str) -> Run:
         msg = f"unknown run {run_id!r}"
         raise not_found(msg)
     return run
-
-
-def read_tail(path: Path, count: int, *, end: int | None = None) -> tuple[list[str], bool] | None:
-    """Return the last ``count`` lines of ``path`` and whether earlier text was left out.
-
-    The file is read backwards in ``BLOCK``-sized steps, never more than
-    ``MAX_TAIL_BYTES``, so a huge log costs no more than its tail. Bytes
-    that are not UTF-8 become U+FFFD. With ``end`` only the first ``end``
-    bytes count (what a live tail has seen so far). Returns ``None`` if
-    the file does not exist.
-    """
-    try:
-        handle = path.open("rb")
-    except FileNotFoundError:
-        return None
-    with handle:
-        pos = handle.seek(0, os.SEEK_END)
-        if end is not None:
-            pos = min(pos, end)
-        data = b""
-        while pos > 0 and len(data) < MAX_TAIL_BYTES:
-            body = data[:-1] if data.endswith(b"\n") else data
-            if body.count(b"\n") >= count:
-                break
-            step = min(BLOCK, pos, MAX_TAIL_BYTES - len(data))
-            pos -= step
-            handle.seek(pos)
-            data = handle.read(step) + data
-    if data.endswith(b"\n"):
-        data = data[:-1]
-    parts = data.split(b"\n") if data else []
-    truncated = pos > 0
-    if truncated and parts:
-        parts = parts[1:]  # it may start part-way through a line
-    if len(parts) > count:
-        parts = parts[-count:]
-        truncated = True
-    lines = [part.decode("utf-8", errors="replace").removesuffix("\r") for part in parts]
-    return lines, truncated
 
 
 def _pick_attempt(attempts: list[Attempt], number: int | None) -> Attempt:
@@ -287,13 +243,19 @@ def add_run_routes(app: App, engine: Engine) -> None:
         """Return the last ``tail`` lines of an attempt's stdout or stderr."""
         stream, number = log_query(request)
         tail = query_int(request, "tail", default=DEFAULT_TAIL, low=1, high=MAX_TAIL)
-        _, path = await log_path(engine, run_id, stream, number)
-        found = await run_in_thread(read_tail, Path(path), tail) if path else None
+        attempt, path = await log_path(engine, run_id, stream, number)
+        source = log_source_for(engine, attempt, stream)
+        try:
+            found = await source.tail(tail) if path else None
+        except LogUnavailableError as exc:
+            raise ApiError(UNAVAILABLE, str(exc)) from None
         if found is None:
             msg = "no log yet"
             raise not_found(msg)
         lines, truncated = found
-        return {"lines": list[JsonValue](lines), "path": path, "truncated": truncated}
+        agent = remote_agent(attempt)
+        shown = path if agent is None else f"{agent}:{path}"  # P4-R5: the path is the agent's
+        return {"lines": list[JsonValue](lines), "path": shown, "truncated": truncated}
 
     @app.post("/api/runs/<run_id>/<action>")
     @guarded
