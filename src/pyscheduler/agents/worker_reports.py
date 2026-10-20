@@ -114,14 +114,21 @@ class Reporter:
             await self._send(FINISHED_TYPE, report)
 
     async def _beat(self) -> None:
-        """Every ``HEARTBEAT_EVERY``, say what runs and send unacked reports again.
+        """Every ``HEARTBEAT_EVERY``, say what runs (and the capacity) and re-send reports.
+
+        The tags and ``max_running`` ride along on every beat, so a scheduler
+        that restarted behind an outside broker (and so got no ``hello``)
+        still knows what this agent offers.
 
         A beat that fails unexpectedly is logged and the next one still comes.
         """
         while True:
             await self.clock.sleep_until(self.clock.now() + HEARTBEAT_EVERY)
             try:
-                await self._send(HEARTBEAT_TYPE, heartbeat_payload(self._handles))
+                beat = heartbeat_payload(
+                    self._handles, tags=self.tags, max_running=self.max_running
+                )
+                await self._send(HEARTBEAT_TYPE, beat)
                 await self._resend()
             except Exception:  # the heartbeat must outlive any one failure
                 logger.exception("heartbeat failed")

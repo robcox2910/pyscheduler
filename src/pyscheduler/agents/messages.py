@@ -251,28 +251,57 @@ def hello_payload(
     }
 
 
-def parse_hello(payload: Mapping[str, JsonValue]) -> tuple[frozenset[str], int, set[RunKey]]:
-    """Return ``(tags, max_running, running)`` from a hello payload or raise ``Rejected``."""
-    tags = payload.get("tags")
-    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+def _tags(value: JsonValue) -> frozenset[str]:
+    """Return the tags in a wire list, each passing the name rule, or raise ``Rejected``."""
+    if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
         raise Rejected(MALFORMED_PAYLOAD)
-    names = frozenset(str(t) for t in tags)
+    names = frozenset(str(t) for t in value)
     try:
         for name in names:
             check_name(name)
     except ValueError:
         raise Rejected(MALFORMED_PAYLOAD) from None
-    return names, count_of(payload, "max_running"), _keys(payload.get("running"))
+    return names
 
 
-def heartbeat_payload(running: Iterable[RunKey]) -> dict[str, JsonValue]:
-    """Return the payload of a ``heartbeat``: the attempts running right now."""
-    return {"running": _key_list(running)}
+def parse_hello(payload: Mapping[str, JsonValue]) -> tuple[frozenset[str], int, set[RunKey]]:
+    """Return ``(tags, max_running, running)`` from a hello payload or raise ``Rejected``."""
+    tags = _tags(payload.get("tags"))
+    return tags, count_of(payload, "max_running"), _keys(payload.get("running"))
 
 
-def parse_heartbeat(payload: Mapping[str, JsonValue]) -> set[RunKey]:
-    """Return the running attempts from a heartbeat payload or raise ``Rejected``."""
-    return _keys(payload.get("running"))
+def heartbeat_payload(
+    running: Iterable[RunKey],
+    *,
+    tags: Iterable[str] | None = None,
+    max_running: int | None = None,
+) -> dict[str, JsonValue]:
+    """Return the payload of a ``heartbeat``: the attempts running now, and the capacity.
+
+    The agent always adds its ``tags`` and ``max_running``, so a scheduler
+    that restarted while the agent stayed connected (an outside broker:
+    no new ``hello``) still learns what the agent offers.
+    """
+    payload: dict[str, JsonValue] = {"running": _key_list(running)}
+    if tags is not None:
+        names: list[JsonValue] = [*sorted(tags)]
+        payload["tags"] = names
+    if max_running is not None:
+        payload["max_running"] = max_running
+    return payload
+
+
+def parse_heartbeat(
+    payload: Mapping[str, JsonValue],
+) -> tuple[frozenset[str] | None, int | None, set[RunKey]]:
+    """Return ``(tags, max_running, running)`` from a heartbeat payload or raise ``Rejected``.
+
+    ``tags`` and ``max_running`` are ``None`` when the heartbeat does not
+    carry them (an older agent's shape).
+    """
+    tags = None if payload.get("tags") is None else _tags(payload.get("tags"))
+    room = None if payload.get("max_running") is None else count_of(payload, "max_running")
+    return tags, room, _keys(payload.get("running"))
 
 
 def started_payload(

@@ -39,6 +39,8 @@ KEY: RunKey = (RUN_ID, 1)
 OUT = "/agent/logs/nightly/out"
 ERR = "/agent/logs/nightly/err"
 SECRETS_MODE = 0o600
+FAKE_SLOTS = 4
+"""How many attempts the fake agent says it has room for."""
 
 
 def hub_config(tmp_path: Path, where: str) -> Config:
@@ -114,11 +116,20 @@ class FakeAgent:
 
     async def hello(self, running: Iterable[RunKey] = ()) -> None:
         """Say hello with ``TAGS``, room for four and ``running``."""
-        await self.report(HELLO_TYPE, hello_payload(TAGS, 4, running))
+        await self.report(HELLO_TYPE, hello_payload(TAGS, FAKE_SLOTS, running))
 
-    async def heartbeat(self, running: Iterable[RunKey] = ()) -> str:
-        """Send a heartbeat listing ``running``; return its nonce."""
-        return await self.report(HEARTBEAT_TYPE, heartbeat_payload(running))
+    async def heartbeat(self, running: Iterable[RunKey] = (), *, capacity: bool = False) -> str:
+        """Send a heartbeat listing ``running`` (with ``TAGS`` and room for four if ``capacity``).
+
+        Returns:
+            The heartbeat's nonce.
+
+        """
+        if capacity:
+            payload = heartbeat_payload(running, tags=TAGS, max_running=FAKE_SLOTS)
+        else:
+            payload = heartbeat_payload(running)
+        return await self.report(HEARTBEAT_TYPE, payload)
 
     async def started(self, key: RunKey = KEY) -> None:
         """Report ``key`` started with the ``OUT``/``ERR`` log paths."""

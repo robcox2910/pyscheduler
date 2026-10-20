@@ -240,12 +240,14 @@ class TestFailures:
         """Keep beating after one beat fails."""
         calls: list[int] = []
 
-        def flaky(running: frozenset[RunKey]) -> dict[str, JsonValue]:
+        def flaky(
+            running: frozenset[RunKey], *, tags: frozenset[str], max_running: int
+        ) -> dict[str, JsonValue]:
             """Fail the first time only."""
             calls.append(1)
             if len(calls) == 1:
                 raise RuntimeError
-            return heartbeat_payload(running)
+            return heartbeat_payload(running, tags=tags, max_running=max_running)
 
         monkeypatch.setattr(worker_reports, "heartbeat_payload", flaky)
         caplog.set_level(logging.WARNING, logger=LOGGER)

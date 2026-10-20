@@ -11,7 +11,7 @@ from agent_helpers import HOST, NAME, SECRET, TAGS, until
 
 from pyscheduler.agents.worker import Agent
 from pyscheduler.client import ApiClient
-from pyscheduler.engine.clock import SystemClock
+from pyscheduler.engine.clock import Clock, SystemClock
 from pyscheduler.service import serve
 from service_helpers import POLL, READY_SECONDS, write_config
 
@@ -47,11 +47,23 @@ def write_secrets(folder: Path, secret: str = SECRET) -> None:
     path.chmod(SECRETS_MODE)
 
 
-def write_agents_config(folder: Path, broker_port: int, *, secret: str = SECRET) -> Path:
-    """Write the secrets and a config whose embedded broker listens on ``broker_port``."""
+def write_agents_config(
+    folder: Path,
+    broker_port: int,
+    *,
+    secret: str = SECRET,
+    outside: bool = False,
+    jobs: str = REMOTE_JOBS,
+) -> Path:
+    """Write the secrets and a config for a broker on ``broker_port``.
+
+    The scheduler embeds the broker (``listen``), or with ``outside`` uses
+    one that runs on its own (``broker``).
+    """
     write_secrets(folder, secret)
-    section = f'agents: {{listen: "{HOST}:{broker_port}", secrets_file: agents.yaml}}\n'
-    return write_config(folder, section + REMOTE_JOBS.lstrip("\n"))
+    where = "broker" if outside else "listen"
+    section = f'agents: {{{where}: "{HOST}:{broker_port}", secrets_file: agents.yaml}}\n'
+    return write_config(folder, section + jobs.lstrip("\n"))
 
 
 @dataclass
@@ -82,8 +94,8 @@ class Running:
                 await pynet.loop.sleep(POLL)
 
 
-def make_service_agent(folder: Path, broker_port: int) -> Agent:
-    """Return a real agent (not started) for the service's embedded broker."""
+def make_service_agent(folder: Path, broker_port: int, clock: Clock | None = None) -> Agent:
+    """Return a real agent (not started) for the broker on ``broker_port``."""
     return Agent(
         name=NAME,
         tags=TAGS,
@@ -92,8 +104,46 @@ def make_service_agent(folder: Path, broker_port: int) -> Agent:
         state_dir=folder / "agent-state",
         log_dir=folder / "agent-logs",
         max_running=AGENT_SLOTS,
-        clock=SystemClock(),
+        clock=clock or SystemClock(),
     )
+
+
+@dataclass
+class Serving:
+    """One ``serve`` running on the loop: its API client and the way to stop it."""
+
+    url: str
+    client: ApiClient
+    task: pynet.loop.Task[None]
+    stop_event: pynet.loop.Event
+
+    async def call[T](self, work: Callable[[ApiClient], T]) -> T:
+        """Run ``work(client)`` on a helper thread (the client blocks)."""
+        return await pynet.loop.run_in_thread(lambda: work(self.client))
+
+    async def stop(self) -> None:
+        """Stop ``serve`` and wait until it has returned."""
+        self.stop_event.set()
+        await self.task
+
+
+async def start_serve(path: Path) -> Serving:
+    """Start ``serve`` on ``path`` and return once its API answers on a port.
+
+    Raises:
+        RuntimeError: If ``serve`` ends before it is ready.
+
+    """
+    stop = pynet.loop.Event()
+    ports: list[int] = []
+    task = pynet.loop.spawn(serve(path, ready=ports.append, stop=stop), name="serve")
+    await until(lambda: bool(ports) or task.done())
+    if task.done():
+        task.result()
+        msg = "serve ended before it was ready"
+        raise RuntimeError(msg)
+    url = f"http://127.0.0.1:{ports[0]}"
+    return Serving(url, ApiClient(url, None), task, stop)
 
 
 def run_service[T](

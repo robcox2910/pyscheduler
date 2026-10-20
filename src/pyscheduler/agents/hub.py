@@ -44,6 +44,7 @@ from pyscheduler.agents.messages import (
     parse_key,
     parse_started,
 )
+from pyscheduler.agents.orphans import OrphanReaper
 from pyscheduler.agents.remote_handle import RemoteHandle
 from pyscheduler.agents.signing import Message, Rejected, Verifier
 from pyscheduler.config.agent_secrets import AgentSecrets
@@ -89,6 +90,8 @@ class AgentHub(HubLink):
         self._reputs: dict[RunKey, Cancel] = {}
         self._started_watchers: list[Callable[[RemoteHandle], None]] = []
         self._recovered = False
+        grace = config.settings.kill_grace
+        self._reaper = OrphanReaper(clock=clock, grace=grace, signal=self._signal_agent)
         self._unwatch = self.book.watch(self._on_agent)
 
     # Lifecycle ---------------------------------------------------------
@@ -113,6 +116,7 @@ class AgentHub(HubLink):
         self._stopped = True
         self._unwatch()
         self.book.close()
+        self._reaper.close()
         for timer in [*self._lost_timers.values(), *self._reputs.values()]:
             timer.cancel()
         self._lost_timers.clear()
@@ -123,7 +127,8 @@ class AgentHub(HubLink):
         """Note that recovery has adopted every remote attempt it will follow.
 
         From now on a ``finished`` for an attempt nobody follows is acked
-        and dropped, so the agent stops sending it.
+        and dropped, so the agent stops sending it, and an attempt nobody
+        follows that an agent reports running is stopped (``OrphanReaper``).
         """
         self._recovered = True
 
@@ -218,10 +223,14 @@ class AgentHub(HubLink):
 
     def _send_kill(self, handle: RemoteHandle, signal: str) -> None:
         """Send a signed ``kill`` for ``handle`` on a task (nothing once stopped)."""
+        self._signal_agent(handle.agent, handle.key, signal)
+
+    def _signal_agent(self, agent: str, key: RunKey, signal: str) -> None:
+        """Seal and send a ``kill`` for ``key`` to ``agent`` on a task (nothing once stopped)."""
         if self._stopped:
             return
-        payload = kill_payload(handle.run_id, handle.attempt, signal)
-        self._spawn(self._send(handle.agent, KILL_TYPE, payload), f"kill-{handle.run_id}")
+        payload = kill_payload(*key, signal)
+        self._spawn(self._send(agent, KILL_TYPE, payload), f"kill-{key[0]}")
 
     # Reports -----------------------------------------------------------
 
@@ -252,8 +261,8 @@ class AgentHub(HubLink):
             self.book.heard(agent, tags=tags, max_running=max_running, running=running)
             self._seen(agent, running)
         elif kind == HEARTBEAT_TYPE:
-            running = parse_heartbeat(payload)
-            self.book.heard(agent, running=running)
+            tags, max_running, running = parse_heartbeat(payload)
+            self.book.heard(agent, tags=tags, max_running=max_running, running=running)
             self._seen(agent, running)
         elif kind == STARTED_TYPE:
             key, out, err = parse_started(payload)
@@ -278,13 +287,16 @@ class AgentHub(HubLink):
 
         A started attempt the agent no longer lists gets a ``lost_after``
         countdown (if none runs): its ``finished`` should be on the way,
-        and if it never comes the attempt is lost.
+        and if it never comes the attempt is lost. After recovery, a listed
+        attempt with no handle (made before any send) is an orphan: stop it.
         """
         for handle in [h for h in self._handles.values() if h.agent == agent]:
             if handle.key in running:
                 self._quiet(handle.key)
             elif handle.stdout_path is not None and handle.key not in self._lost_timers:
                 self._arm_lost(handle, self.clock.now() + self.lost_after)
+        if self._recovered:
+            self._reaper.seen(agent, {k for k in running if k not in self._handles})
 
     def _quiet(self, key: RunKey) -> None:
         """Cancel ``key``'s lost countdown and its re-puts."""

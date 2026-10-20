@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from agent_helpers import (
+    MAX_RUNNING,
     NAME,
     RUN_DATE,
     RUN_ID,
@@ -186,7 +187,7 @@ class TestReports:
             await world.clock.advance(HEARTBEAT_EVERY)
             await scheduler.wait_for(FINISHED_TYPE, THIRD)
             beat = await scheduler.wait_for(HEARTBEAT_TYPE)
-            assert parse_heartbeat(beat.payload) == set()
+            assert parse_heartbeat(beat.payload) == (TAGS, MAX_RUNNING, set())
             await scheduler.send(ACK_TYPE, key_payload(RUN_ID, 1))
             await until(lambda: not agent.pending)
             await world.clock.advance(HEARTBEAT_EVERY)
@@ -210,7 +211,7 @@ class TestReports:
             await world.scheduler.wait_for(STARTED_TYPE)
             await world.clock.advance(HEARTBEAT_EVERY)
             beat = await world.scheduler.wait_for(HEARTBEAT_TYPE)
-            assert parse_heartbeat(beat.payload) == {(RUN_ID, 1)}
+            assert parse_heartbeat(beat.payload) == (TAGS, MAX_RUNNING, {(RUN_ID, 1)})
             (tmp_path / GATE).touch()
             await world.scheduler.wait_for(FINISHED_TYPE)
 

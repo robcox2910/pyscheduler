@@ -60,7 +60,9 @@ class TestRoundTrips:
         running = {(RUN_ID, 1)}
         hello = hello_payload({"gpu", "linux"}, MAX_RUNNING, running)
         assert parse_hello(hello) == (frozenset({"gpu", "linux"}), MAX_RUNNING, running)
-        assert parse_heartbeat(heartbeat_payload(running)) == running
+        beat = heartbeat_payload(running, tags={"gpu"}, max_running=MAX_RUNNING)
+        assert parse_heartbeat(beat) == (frozenset({"gpu"}), MAX_RUNNING, running)
+        assert parse_heartbeat(heartbeat_payload(running)) == (None, None, running)
         started = started_payload(RUN_ID, 1, "/l/a.out", "/l/a.err")
         assert parse_started(started) == ((RUN_ID, 1), "/l/a.out", "/l/a.err")
         for result in (
@@ -135,6 +137,8 @@ class TestRejects:
             (parse_heartbeat, {"running": [[RUN_ID]]}),
             (parse_heartbeat, {"running": "x"}),
             (parse_heartbeat, {"running": [[RUN_ID, "1"]]}),
+            (parse_heartbeat, {"running": [], "tags": ["bad tag"], "max_running": 1}),
+            (parse_heartbeat, {"running": [], "tags": ["gpu"], "max_running": True}),
             (parse_key, {"run_id": RUN_ID}),
             (parse_key, {"run_id": "/var/x.2026-10-20.1", "attempt": 1}),
             (parse_started, key_payload("a/b.2026-10-20.1", 1)),
