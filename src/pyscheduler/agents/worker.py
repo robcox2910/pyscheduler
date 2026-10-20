@@ -203,12 +203,19 @@ class Agent(Reporter):
         except ValueError:
             raise Rejected(MALFORMED_PAYLOAD) from None
         fresh = Entry(order.run_id, order.attempt, RUNNING, None, out, err, status)
+        # Count as launching from now on, so a kill that comes in while the
+        # journal writes is kept for the minder rather than dropped.
+        ours = order.key not in self._launching
+        self._launching.add(order.key)
         try:
             entry, new = await pynet.loop.run_in_thread(self._book().accept, fresh)
         except PyDBError, OSError:
+            self._unlaunch(order.key, ours=ours)
             logger.exception("cannot journal work %s.%d; dropping it", *order.key)
             await delivery.nack(requeue=False)
             return
+        if not new:
+            self._unlaunch(order.key, ours=ours)
         # The journal has it now: a failed ack must not stop the launch, or the
         # attempt would sit in the journal as running with no minder behind it.
         with contextlib.suppress(BrokerError, TimeoutError):
@@ -219,6 +226,12 @@ class Agent(Reporter):
                 await self._send(FINISHED_TYPE, entry.finished)
             return
         await self._launch(order, entry)
+
+    def _unlaunch(self, key: RunKey, *, ours: bool) -> None:
+        """Stop counting ``key`` as launching (if this order started counting it)."""
+        if ours:
+            self._launching.discard(key)
+            self._kills.pop(key, None)
 
     async def _launch(self, order: WorkOrder, entry: Entry) -> None:
         """Start ``order`` under the minder, report ``started`` and watch for its end."""

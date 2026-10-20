@@ -2,15 +2,17 @@
 
 import logging
 import signal
+import threading
 from datetime import timedelta
 from pathlib import Path
 
 import pynet.loop
 import pytest
-from agent_helpers import RUN_ID, World, lines, order, run_world, shell, until
+from agent_helpers import RUN_ID, WAIT, World, lines, order, run_world, shell, until
 from pynet.messaging import JsonValue
 
 from pyscheduler.agents import worker_reports
+from pyscheduler.agents.journal import RUNNING, Entry, Journal
 from pyscheduler.agents.log_messages import LogRequest, log_request_payload
 from pyscheduler.agents.messages import (
     ACK_TYPE,
@@ -31,6 +33,7 @@ from pyscheduler.agents.messages import (
 )
 from pyscheduler.agents.signing import seal
 from pyscheduler.agents.worker import ADOPT_POLL
+from pyscheduler.agents.worker_files import read_log
 from pyscheduler.engine.launcher import LaunchSpec, MinderHandle, MinderLauncher
 
 SECOND = 2
@@ -124,6 +127,7 @@ class TestRepeats:
             await world.scheduler.work(work, fresh_id=True)
             await world.scheduler.wait_for(STARTED_TYPE, SECOND)
             assert world.scheduler.of(FINISHED_TYPE) == []
+            assert world.agent._launching == set()  # the repeat leaves no launch behind
             (tmp_path / GATE).touch()
             await world.scheduler.wait_for(FINISHED_TYPE)
             assert len(world.scheduler.of(STARTED_TYPE)) == SECOND
@@ -168,6 +172,31 @@ class TestKills:
             await world.scheduler.send(KILL_TYPE, kill_payload(RUN_ID, 1, "TERM"))
             await until(lambda: key in world.agent._kills)
             launcher.gate.set()
+            assert await _finished_signal(world) == signal.SIGTERM
+
+        run_world(tmp_path, body)
+
+    def test_kill_while_journalling(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Apply a kill that arrives while the order is still being journalled."""
+        gate, journalling = threading.Event(), threading.Event()
+        accept = Journal.accept
+
+        def held(journal: Journal, entry: Entry) -> tuple[Entry, bool]:
+            """Journal ``entry`` once the gate opens."""
+            journalling.set()
+            gate.wait(WAIT)
+            return accept(journal, entry)
+
+        monkeypatch.setattr(Journal, "accept", held)
+
+        async def body(world: World) -> None:
+            """Hold the journal write, send the kill, then let the write go."""
+            key: RunKey = (RUN_ID, 1)
+            await world.scheduler.work(shell(_gated(tmp_path)))
+            await until(journalling.is_set)
+            await world.scheduler.send(KILL_TYPE, kill_payload(RUN_ID, 1, "TERM"))
+            await until(lambda: key in world.agent._kills)
+            gate.set()
             assert await _finished_signal(world) == signal.SIGTERM
 
         run_world(tmp_path, body)
@@ -261,3 +290,19 @@ class TestFailures:
             await world.scheduler.wait_for(HEARTBEAT_TYPE)
 
         run_world(tmp_path, body)
+
+
+class TestLogFiles:
+    """Reading a log the agent never wrote."""
+
+    @pytest.mark.parametrize("mode", ["tail", "read"])
+    def test_missing_log_is_quiet(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, mode: str
+    ) -> None:
+        """Answer ``missing`` for a log file that does not exist, logging nothing."""
+        caplog.set_level(logging.DEBUG, logger=LOGGER)
+        gone = tmp_path / "gone"
+        entry = Entry(RUN_ID, 1, RUNNING, None, gone / "a.out", gone / "a.err", gone / "s.json")
+        request = LogRequest("ef" * 8, RUN_ID, 1, "stdout", mode, count=1, offset=0)
+        assert read_log(entry, request).missing
+        assert caplog.records == []

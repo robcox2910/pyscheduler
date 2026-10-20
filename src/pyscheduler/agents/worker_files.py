@@ -77,7 +77,8 @@ def look(status_path: Path) -> Found:
 def read_log(entry: Entry | None, request: LogRequest) -> LogReply:
     """Answer ``request`` from the log files of ``entry`` (``None``: never accepted here).
 
-    A missing or unreadable file is answered as ``missing``.
+    A missing or unreadable file is answered as ``missing``; only an
+    unreadable one is logged (a missing one is ordinary, and asked often).
     """
     missing = LogReply(request.request_id, missing=True)
     if entry is None:
@@ -94,6 +95,7 @@ def read_log(entry: Entry | None, request: LogRequest) -> LogReply:
             return missing
         data, offset, shrank = read_from(path, request.offset, request.limit)
     except OSError as exc:
-        logger.warning("cannot read the %s log of %s: %s", request.stream, request.run_id, exc)
+        if not isinstance(exc, FileNotFoundError):  # a missing log is not worth a warning
+            logger.warning("cannot read the %s log of %s: %s", request.stream, request.run_id, exc)
         return missing
     return LogReply(request.request_id, data=data, offset=offset, shrank=shrank)
