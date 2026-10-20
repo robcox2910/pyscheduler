@@ -11,11 +11,13 @@ standing by the letterbox, so it takes no global slot (``global_slot``
 false) and never keeps a jumper waiting.
 
 ``Admission`` counts the slots. ``ReadyQueue`` holds the waiting runs
-in priority order and hands out the ones that fit.
+in priority order and hands out the ones that fit. A run that fits may
+still need a seat somewhere else (a remote agent): the optional ``place``
+check books it last, so a run refused there holds no slot.
 """
 
 import heapq
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from pyscheduler.config.model import Criticality, JobDef, JobKind
@@ -179,13 +181,16 @@ class ReadyQueue:
         *,
         force: frozenset[str] = frozenset(),
         limit: int | None = None,
+        place: Callable[[Run], bool] | None = None,
     ) -> list[Run]:
         """Start every queued run that fits, best first, acquiring as it goes.
 
         Runs that do not fit are skipped and stay queued; later runs may
         still start. Run ids in ``force`` go to the front of the line
         but must still fit. With ``limit``, stop once that many have
-        started (the rest wait, in order, for the next call).
+        started (the rest wait, in order, for the next call). ``place``,
+        if given, is asked last about each run that fits; it books what
+        the run needs elsewhere and returns False to leave it queued.
         """
         started: list[Run] = []
         room = limit if limit is not None else len(self._live)
@@ -196,7 +201,7 @@ class ReadyQueue:
             if len(started) >= room:
                 break
             tried.add(entry.run.run_id)
-            self._try(entry, admission, started)
+            self._try(entry, admission, started, place)
         for global_slot, heap in self._heaps.items():
             skipped: list[tuple[tuple[int, float, str], int]] = []
             while heap and admission.fits({}, global_slot=global_slot) and len(started) < room:
@@ -204,15 +209,23 @@ class ReadyQueue:
                 entry = self._live.get(key[2])
                 if entry is None or entry.seq != seq:
                     continue
-                if key[2] in tried or not self._try(entry, admission, started):
+                if key[2] in tried or not self._try(entry, admission, started, place):
                     skipped.append((key, seq))
             for item in skipped:
                 heapq.heappush(heap, item)
         return started
 
-    def _try(self, entry: _Entry, admission: Admission, started: list[Run]) -> bool:
-        """Start ``entry`` if it fits; return whether it started."""
+    def _try(
+        self,
+        entry: _Entry,
+        admission: Admission,
+        started: list[Run],
+        place: Callable[[Run], bool] | None = None,
+    ) -> bool:
+        """Start ``entry`` if it fits and ``place`` (if any) agrees; return whether it started."""
         if not admission.fits(entry.needs, global_slot=entry.global_slot):
+            return False
+        if place is not None and not place(entry.run):
             return False
         admission.acquire(entry.needs, global_slot=entry.global_slot)
         del self._live[entry.run.run_id]
