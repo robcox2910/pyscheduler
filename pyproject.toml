@@ -138,6 +138,12 @@ max-args = 9
 "src/pyscheduler/agents/worker.py" = ["BLE001", "TRY400"]
 # The agent command line ends any unforeseen failure with one line, not a traceback.
 "src/pyscheduler/agents/cli.py" = ["BLE001"]
+# The hub settles every report whatever goes wrong and logs only the exception's
+# type (a traceback could carry the payload).
+"src/pyscheduler/agents/hub.py" = ["BLE001", "TRY400"]
+# AgentOffline is the brief's name (it reads as a state, like Rejected), and
+# fetch_log takes the brief's keyword arguments.
+"src/pyscheduler/agents/hub_link.py" = ["N818", "PLR0913"]
 
 [tool.ruff.format]
 quote-style = "double"
