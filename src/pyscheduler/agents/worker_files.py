@@ -27,11 +27,20 @@ def attempt_files(order: WorkOrder, log_dir: Path, state_dir: Path) -> tuple[Pat
 
     Logs go to ``{log_dir}/{job}/{run_date}/{run_id}.{attempt}.out`` and
     ``.err``; the minder's note goes to ``{state_dir}/status/{run_id}.{attempt}.json``.
+
+    Raises:
+        ValueError: If a path would leave its folder (a second guard behind
+            the payload checks, which already refuse ``/`` and ``..``).
+
     """
     stem = f"{order.run_id}.{order.attempt}"
     folder = log_dir / order.job / order.run_date
-    status = state_dir / "status" / f"{stem}.json"
-    return folder / f"{stem}.out", folder / f"{stem}.err", status
+    paths = (folder / f"{stem}.out", folder / f"{stem}.err", state_dir / "status" / f"{stem}.json")
+    for path, root in zip(paths, (log_dir, log_dir, state_dir), strict=True):
+        if not path.resolve().is_relative_to(root.resolve()):
+            msg = "an attempt's files would leave the agent's folders"
+            raise ValueError(msg)
+    return paths
 
 
 @dataclass(frozen=True)

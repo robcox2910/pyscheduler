@@ -38,6 +38,7 @@ USAGE = 2
 INTERRUPTED = 130
 DEFAULT_MAX_RUNNING = 4
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+MAX_PORT = 65535
 OTHERS_MAY_READ = stat.S_IRWXG | stat.S_IRWXO
 
 logger = logging.getLogger("pyscheduler.agents.cli")
@@ -76,8 +77,9 @@ def read_secret(path: Path) -> str:
     try:
         text = path.read_text(encoding="utf-8")
         mode = path.stat().st_mode
-    except (OSError, UnicodeDecodeError) as exc:
-        msg = f"cannot read secret file: {exc}"
+    except OSError, UnicodeDecodeError:
+        # A fixed message: the error's own text could quote bytes of the secret.
+        msg = f"cannot read secret file {path} (missing, unreadable or not UTF-8)"
         raise AgentUsageError(msg) from None
     secret = text.strip()
     if len(secret) < MIN_SECRET_LENGTH:
@@ -96,8 +98,8 @@ def _broker(text: str) -> tuple[str, int]:
 
     """
     host, _, port = text.rpartition(":")
-    if not host or not port.isdigit():
-        msg = f"--broker must be host:port, not {text!r}"
+    if not host or not port.isascii() or not port.isdigit() or not 1 <= int(port) <= MAX_PORT:
+        msg = f"--broker must be host:port with a port from 1 to {MAX_PORT}, not {text!r}"
         raise AgentUsageError(msg)
     return host, int(port)
 
@@ -198,5 +200,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return INTERRUPTED
     except (PyDBError, BrokerError, OSError) as exc:
         sys.stderr.write(f"pysched-agent: {exc}\n")
+        return FAILED
+    except Exception as exc:  # one line, no traceback, for anything unforeseen
+        sys.stderr.write(f"pysched-agent: unexpected error: {type(exc).__name__}: {exc}\n")
         return FAILED
     return OK

@@ -19,44 +19,36 @@ finds them in the logbook and picks them up.
 import contextlib
 import logging
 import os
-from collections.abc import Coroutine, Iterable
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
 
 import pynet.loop
 from pydb.errors import PyDBError
 from pymq.broker import BrokerClient, BrokerError, Delivery
-from pynet.loop import Future, Task
-from pynet.messaging import ConnectionEvent, JsonValue
 
-from pyscheduler.agents.journal import RUNNING, Entry, Journal, Report
+from pyscheduler.agents.journal import RUNNING, Entry, Journal
 from pyscheduler.agents.log_messages import LogRequest, log_reply_payload, parse_log_request
 from pyscheduler.agents.messages import (
     ACK_TYPE,
     FINISHED_TYPE,
-    HEARTBEAT_EVERY,
-    HEARTBEAT_TYPE,
-    HELLO_TYPE,
     KILL_TYPE,
     LOG_REPLY_TYPE,
+    MALFORMED_PAYLOAD,
     QUEUE_CONFIG,
     REPORTS_QUEUE,
     SCHEDULER_TYPES,
-    STARTED_TYPE,
     WORK_TYPE,
     RunKey,
     WorkOrder,
     finished_payload,
-    heartbeat_payload,
-    hello_payload,
     parse_key,
     parse_kill,
     parse_work,
-    started_payload,
     work_queue,
 )
-from pyscheduler.agents.signing import Message, Rejected, Verifier, seal
+from pyscheduler.agents.signing import Message, Rejected, Verifier
 from pyscheduler.agents.worker_files import attempt_files, look, read_log
+from pyscheduler.agents.worker_reports import Reporter
 from pyscheduler.engine.adopted import AdoptedHandle
 from pyscheduler.engine.clock import Clock
 from pyscheduler.engine.launcher import AttemptHandle, LaunchSpec, MinderLauncher
@@ -71,7 +63,7 @@ MINDER_GONE = "agent restarted; minder gone"
 logger = logging.getLogger("pyscheduler.agents.worker")
 
 
-class Agent:
+class Agent(Reporter):
     """A ``pysched-agent`` worker, run on the pynet loop.
 
     Args:
@@ -99,37 +91,22 @@ class Agent:
         clock: Clock,
     ) -> None:
         """Set the agent up; nothing is opened or sent until ``start``."""
-        self.name = name
-        self.tags = frozenset(tags)
-        self._secret = secret
+        super().__init__(
+            name=name, tags=frozenset(tags), secret=secret, max_running=max_running, clock=clock
+        )
         self.broker = broker
         self.state_dir = state_dir
         self.log_dir = log_dir
-        self.max_running = max_running
-        self.clock = clock
         self._verifier = Verifier(self._secret_for, clock=clock, accept=SCHEDULER_TYPES)
         self._launcher = MinderLauncher()
         self._journal: Journal | None = None
-        self._client: BrokerClient | None = None
-        self._handles: dict[RunKey, AttemptHandle] = {}
-        self._pending: dict[RunKey, Report] = {}
-        self._tasks: set[Task[None]] = set()
-        self._stopped = False
+        self._launching: set[RunKey] = set()
+        self._kills: dict[RunKey, str] = {}
 
     def __repr__(self) -> str:
         """Show the name and broker, never the secret."""
         host, port = self.broker
         return f"Agent(name={self.name!r}, broker='{host}:{port}')"
-
-    @property
-    def running(self) -> frozenset[RunKey]:
-        """Return the attempts running here now."""
-        return frozenset(self._handles)
-
-    @property
-    def pending(self) -> frozenset[RunKey]:
-        """Return the attempts whose ``finished`` report the scheduler has not acked."""
-        return frozenset(self._pending)
 
     def _secret_for(self, name: str) -> str | None:
         """Return the secret for orders addressed to this agent; any other name is unknown."""
@@ -157,15 +134,15 @@ class Agent:
         self._spawn(self._beat(), "heartbeat")
 
     async def stop(self) -> None:
-        """Hang up and close the journal; running jobs carry on (safe to call twice).
+        """End the background tasks, hang up and close the journal (safe to call twice).
 
-        The next ``start`` on the same state folder adopts them.
+        Running jobs carry on; the next ``start`` on the same state folder
+        adopts them.
         """
         if self._stopped:
             return
         self._stopped = True
-        for task in list(self._tasks):
-            task.cancel()
+        await self._end_tasks()
         if self._client is not None:
             await self._client.close()
         if self._journal is not None:
@@ -182,63 +159,6 @@ class Agent:
             msg = "the agent has not started"
             raise RuntimeError(msg)
         return self._journal
-
-    def _spawn(self, work: Coroutine[Any, Any, None], name: str) -> None:
-        """Run ``work`` as a task the agent cancels on ``stop``; log it if it fails."""
-        task = pynet.loop.spawn(work, name=f"agent-{self.name}-{name}")
-        self._tasks.add(task)
-
-        def done(finished: Future[None]) -> None:
-            """Forget the task, logging an unexpected failure."""
-            self._tasks.discard(task)
-            if not finished.cancelled() and (error := finished.exception()) is not None:
-                logger.error("agent task %s failed: %s", name, error, exc_info=error)
-
-        task.add_done_callback(done)
-
-    # Sending -----------------------------------------------------------
-
-    async def _send(self, kind: str, payload: dict[str, JsonValue]) -> None:
-        """Seal ``payload`` afresh (a new nonce every time) and post it to the scheduler.
-
-        A broker that cannot be reached is logged, not raised: heartbeats,
-        reconnects and repeat orders send the news again.
-        """
-        client = self._client
-        if client is None or self._stopped:
-            return
-        body, headers = seal(kind, self.name, payload, self._secret, now=self.clock.now())
-        try:
-            await client.put(REPORTS_QUEUE, body, headers=headers)
-        except (BrokerError, TimeoutError) as exc:
-            logger.warning("cannot send %s to the scheduler: %s", kind, exc)
-
-    async def _greet(self) -> None:
-        """Say hello (tags, capacity, what runs) and send every unacked report again."""
-        await self._send(HELLO_TYPE, hello_payload(self.tags, self.max_running, self._handles))
-        await self._resend()
-
-    async def _resend(self) -> None:
-        """Send every unacked ``finished`` report again."""
-        for report in list(self._pending.values()):
-            await self._send(FINISHED_TYPE, report)
-
-    async def _beat(self) -> None:
-        """Every ``HEARTBEAT_EVERY``, say what runs and send unacked reports again."""
-        while True:
-            await self.clock.sleep_until(self.clock.now() + HEARTBEAT_EVERY)
-            await self._send(HEARTBEAT_TYPE, heartbeat_payload(self._handles))
-            await self._resend()
-
-    async def _send_started(self, entry: Entry) -> None:
-        """Send the ``started`` report of ``entry`` with its log paths."""
-        out, err = str(entry.stdout_path), str(entry.stderr_path)
-        await self._send(STARTED_TYPE, started_payload(entry.run_id, entry.attempt, out, err))
-
-    def _on_event(self, event: ConnectionEvent) -> None:
-        """After a reconnect, say hello again and re-send the unacked reports."""
-        if event is ConnectionEvent.RECONNECTED and not self._stopped:
-            self._spawn(self._greet(), "greet")
 
     # Receiving ---------------------------------------------------------
 
@@ -257,7 +177,11 @@ class Agent:
             await self._order(message)
         except Rejected as exc:
             logger.warning("rejected a message (delivery %s): %s", delivery.id, exc.reason)
-        await delivery.ack()
+        except Exception as exc:  # settle it whatever went wrong; never log the payload
+            name = type(exc).__name__
+            logger.error("cannot handle a message (delivery %s): %s", delivery.id, name)
+        with contextlib.suppress(BrokerError, TimeoutError):
+            await delivery.ack()
 
     async def _order(self, message: Message) -> None:
         """Act on a checked ``finished_ack``, ``kill`` or ``log_request``."""
@@ -274,7 +198,10 @@ class Agent:
         If the journal cannot record it, the order is dead-lettered unacted;
         the scheduler sends it again until it hears ``started``.
         """
-        out, err, status = attempt_files(order, self.log_dir, self.state_dir)
+        try:
+            out, err, status = attempt_files(order, self.log_dir, self.state_dir)
+        except ValueError:
+            raise Rejected(MALFORMED_PAYLOAD) from None
         fresh = Entry(order.run_id, order.attempt, RUNNING, None, out, err, status)
         try:
             entry, new = await pynet.loop.run_in_thread(self._book().accept, fresh)
@@ -305,14 +232,20 @@ class Agent:
             stderr_path=entry.stderr_path,
             status_path=entry.status_path,
         )
+        self._launching.add(entry.key)
         try:
             handle = await self._launcher.launch(spec)
-        except (OSError, ValueError, TypeError) as exc:
+        except Exception as exc:  # any failure to start is the attempt's start error
+            logger.warning("cannot start %s.%d: %s", *entry.key, type(exc).__name__)
             await self._send_started(entry)
             failed = AttemptResult(None, None, None, self.clock.now(), str(exc))
             await self._finish(entry.key, failed)
             return
+        finally:
+            self._launching.discard(entry.key)
         self._handles[entry.key] = handle
+        if (asked := self._kills.pop(entry.key, None)) is not None:
+            self._signal(handle, asked)  # a kill came in while the minder was starting
         await self._send_started(entry)
         self._spawn(self._watch(entry.key, handle), f"watch-{entry.run_id}.{entry.attempt}")
 
@@ -332,6 +265,7 @@ class Agent:
             logger.exception("cannot journal the end of %s.%d", *key)
         self._pending[key] = report
         self._handles.pop(key, None)
+        self._kills.pop(key, None)
         await self._send(FINISHED_TYPE, report)
 
     async def _acked(self, key: RunKey) -> None:
@@ -340,11 +274,25 @@ class Agent:
             await pynet.loop.run_in_thread(self._book().acked, key)
 
     def _kill(self, run_id: str, attempt: int, signal: str) -> None:
-        """Send ``TERM`` or ``KILL`` to the attempt's process group, if it runs here."""
-        handle = self._handles.get((run_id, attempt))
-        if handle is None:
+        """Send ``TERM`` or ``KILL`` to the attempt's process group, if it runs here.
+
+        A kill for an attempt whose minder is still starting is kept and
+        sent as soon as it has started (a ``KILL`` outranks a ``TERM``).
+        """
+        key = (run_id, attempt)
+        handle = self._handles.get(key)
+        if handle is not None:
+            self._signal(handle, signal)
+        elif key in self._launching:
+            if self._kills.get(key) != "KILL":
+                self._kills[key] = signal
+        else:
             logger.info("kill for %s.%d, which is not running here", run_id, attempt)
-        elif signal == "TERM":
+
+    @staticmethod
+    def _signal(handle: AttemptHandle, signal: str) -> None:
+        """Send ``TERM`` or ``KILL`` through ``handle``."""
+        if signal == "TERM":
             handle.terminate()
         else:
             handle.kill()

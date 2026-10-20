@@ -9,8 +9,10 @@ import pytest
 from agent_helpers import HOST, WAIT, Scheduler, make_agent, now_clock
 from pymq.broker import BrokerServer
 
-from pyscheduler.agents.cli import build_agent, main, read_secret, run_agent
+from pyscheduler.agents import cli
+from pyscheduler.agents.cli import AgentUsageError, build_agent, main, read_secret, run_agent
 from pyscheduler.agents.messages import HELLO_TYPE
+from pyscheduler.agents.worker import Agent
 from pyscheduler.engine.clock import SystemClock
 
 USAGE = 2
@@ -52,8 +54,9 @@ class TestCliRefuses:
         assert main(_argv(secret, name="no/slash")) == USAGE
         assert main(_argv(secret, "--tags", "linux,bad tag")) == USAGE
         assert main(_argv(secret, "--max-running", "0")) == USAGE
-        bad_broker = ["--broker", "nowhere", "--name", "b", "--secret-file", str(secret)]
-        assert main(bad_broker) == USAGE
+        for broker in ("nowhere", "h:0", "h:65536", "h:-1"):
+            bad_broker = ["--broker", broker, "--name", "b", "--secret-file", str(secret)]
+            assert main(bad_broker) == USAGE
         assert GOOD not in capsys.readouterr().err
 
     def test_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -64,6 +67,15 @@ class TestCliRefuses:
 
 class TestSecret:
     """The secret file holds one secret line."""
+
+    def test_undecodable_secret_never_quoted(self, tmp_path: Path) -> None:
+        """Refuse a non-UTF-8 file with a fixed message that quotes none of its bytes."""
+        path = tmp_path / "secret"
+        path.write_bytes(b"\xff" + b"z" * 40)
+        with pytest.raises(AgentUsageError) as caught:
+            read_secret(path)
+        assert "xff" not in str(caught.value)
+        assert "not UTF-8" in str(caught.value)
 
     def test_reads_and_strips(self, tmp_path: Path) -> None:
         """Return the secret without its trailing newline."""
@@ -131,3 +143,18 @@ class TestRun:
                 await server.close()
 
         pynet.loop.run(body())
+
+    def test_unexpected_error_is_one_line(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Print one line, with no traceback, and exit 1 for an unforeseen failure."""
+
+        async def broken(agent: Agent) -> None:
+            """Fail like a bug would."""
+            raise RuntimeError(agent.name)
+
+        monkeypatch.setattr(cli, "run_agent", broken)
+        assert main(_argv(_secret_file(tmp_path, GOOD))) == FAILED
+        err = capsys.readouterr().err
+        assert err.strip() == "pysched-agent: unexpected error: RuntimeError: build-01"
+        assert "Traceback" not in err

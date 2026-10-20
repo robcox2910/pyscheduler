@@ -99,9 +99,20 @@ class Scheduler:
         put = await self.client.put(work_queue(NAME), body, headers=headers, id=msg_id)
         return not put.duplicate
 
-    async def work(self, work: WorkOrder) -> bool:
-        """Send ``work`` with its dispatch id."""
-        msg_id = message_id(work.run_id, work.attempt)
+    async def put_raw(self, body: JsonValue, headers: dict[str, str]) -> None:
+        """Put ``body`` and ``headers`` on the agent's queue exactly as given."""
+        assert self.client is not None
+        await self.client.put(work_queue(NAME), body, headers=headers)
+
+    async def settled(self) -> bool:
+        """Return whether every order put on the agent's queue has been acked."""
+        assert self.client is not None
+        stats = await self.client.stats(work_queue(NAME))
+        return stats.in_flight == 0 and stats.ready == 0 and stats.acked == stats.enqueued
+
+    async def work(self, work: WorkOrder, *, fresh_id: bool = False) -> bool:
+        """Send ``work`` with its dispatch id (or a new id, to pass the broker's dedupe)."""
+        msg_id = None if fresh_id else message_id(work.run_id, work.attempt)
         return await self.send(WORK_TYPE, work_payload(work), msg_id=msg_id)
 
     def of(self, kind: str) -> list[Message]:

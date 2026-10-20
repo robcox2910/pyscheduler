@@ -132,6 +132,12 @@ max-args = 9
 "src/pyscheduler/minder.py" = ["PTH", "SIM105"]
 # The brief names the exception Rejected (it reads as a verdict, not an error).
 "src/pyscheduler/agents/signing.py" = ["N818"]
+# The agent settles every order and turns any launch failure into a start error,
+# whatever the exception; it logs only the exception's type, never a traceback
+# (an exception's text or locals could carry the order's payload).
+"src/pyscheduler/agents/worker.py" = ["BLE001", "TRY400"]
+# The agent command line ends any unforeseen failure with one line, not a traceback.
+"src/pyscheduler/agents/cli.py" = ["BLE001"]
 
 [tool.ruff.format]
 quote-style = "double"

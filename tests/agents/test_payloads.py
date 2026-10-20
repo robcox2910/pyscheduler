@@ -1,6 +1,8 @@
 """Tests for the payload builders and parsers shared by the agent and the hub."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pynet.messaging import JsonValue
@@ -31,6 +33,7 @@ from pyscheduler.agents.messages import (
     work_payload,
 )
 from pyscheduler.agents.signing import Rejected
+from pyscheduler.agents.worker_files import attempt_files
 from pyscheduler.engine.status_note import AttemptResult
 
 RUN_ID = "nightly.2026-10-20.1"
@@ -103,6 +106,11 @@ class TestRejects:
             _work(attempt=0),
             _work(attempt=True),
             _work(job="a/b"),
+            _work(job="other"),
+            _work(run_date="2026-10-21"),
+            _work(run_id="/var/x.2026-10-20.1", job="x"),
+            _work(run_id="a/b.2026-10-20.1", job="b"),
+            _work(run_id="...2026-10-20.1"),
             _work(run_date="2026-13-01"),
             _work(argv=[]),
             _work(argv="echo"),
@@ -127,6 +135,8 @@ class TestRejects:
             (parse_heartbeat, {"running": "x"}),
             (parse_heartbeat, {"running": [[RUN_ID, "1"]]}),
             (parse_key, {"run_id": RUN_ID}),
+            (parse_key, {"run_id": "/var/x.2026-10-20.1", "attempt": 1}),
+            (parse_started, key_payload("a/b.2026-10-20.1", 1)),
             (parse_finished, key_payload(RUN_ID, 1) | {"ended_at": "yesterday"}),
             (parse_finished, key_payload(RUN_ID, 1) | {"ended_at": "2026-10-20T12:00:00"}),
             (parse_finished, key_payload(RUN_ID, 1) | {"ended_at": 5}),
@@ -146,3 +156,23 @@ class TestRejects:
         assert callable(parse)
         with pytest.raises(Rejected, match="malformed payload"):
             parse(payload)
+
+
+class TestAttemptFiles:
+    """An attempt's files always stay inside the agent's folders."""
+
+    def test_paths(self, tmp_path: Path) -> None:
+        """Put logs under the job and date, and the note under ``status``."""
+        out, err, status = attempt_files(ORDER, tmp_path / "logs", tmp_path / "state")
+        assert out == tmp_path / "logs" / "nightly" / "2026-10-20" / f"{RUN_ID}.1.out"
+        assert err.name == f"{RUN_ID}.1.err"
+        assert status == tmp_path / "state" / "status" / f"{RUN_ID}.1.json"
+
+    @pytest.mark.parametrize(
+        ("run_id", "job"), [("/var/x.2026-10-20.1", "x"), ("../../x.2026-10-20.1", "nightly")]
+    )
+    def test_refuses_escape(self, tmp_path: Path, run_id: str, job: str) -> None:
+        """Raise for an order (built without the payload checks) whose files would escape."""
+        bad = replace(ORDER, run_id=run_id, job=job)
+        with pytest.raises(ValueError, match="leave"):
+            attempt_files(bad, tmp_path / "logs", tmp_path / "state")

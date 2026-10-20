@@ -16,7 +16,7 @@ from pynet.messaging import JsonValue
 from pyscheduler.agents.signing import MAX_SKEW, NONCE_TTL, Rejected
 from pyscheduler.engine.model import parse_run_id
 from pyscheduler.engine.status_note import AttemptResult
-from pyscheduler.values import check_name, parse_date
+from pyscheduler.values import check_name
 
 __all__ = [
     "ACK_TYPE",
@@ -148,14 +148,20 @@ def key_payload(run_id: str, attempt: int) -> dict[str, JsonValue]:
 def parse_key(payload: Mapping[str, JsonValue]) -> RunKey:
     """Return ``(run_id, attempt)`` from ``payload``; the run id must be a real one.
 
-    A run id names files on the agent, so only ``<job>.<date>.<seq>`` passes.
+    A run id names files on the agent, so only ``<job>.<date>.<seq>`` with
+    a job that passes the job-name rule (no ``/``, no ``..``) is accepted.
     """
-    run_id = text_of(payload, "run_id")
+    return _run_id(text_of(payload, "run_id"))[0], count_of(payload, "attempt", low=1)
+
+
+def _run_id(run_id: str) -> tuple[str, str, str]:
+    """Return ``(run_id, job, run_date)`` for a safe run id or raise ``Rejected``."""
     try:
-        parse_run_id(run_id)
+        job, run_date, _ = parse_run_id(run_id)
+        check_name(job)
     except ValueError:
         raise Rejected(MALFORMED_PAYLOAD) from None
-    return run_id, count_of(payload, "attempt", low=1)
+    return run_id, job, run_date.isoformat()
 
 
 def _keys(value: JsonValue) -> set[RunKey]:
@@ -212,16 +218,14 @@ def work_payload(order: WorkOrder) -> dict[str, JsonValue]:
 def parse_work(payload: Mapping[str, JsonValue]) -> WorkOrder:
     """Return the ``WorkOrder`` in a work payload or raise ``Rejected``.
 
-    The job and run date name folders on the agent, so they must pass the
-    job-name and date rules; the command must be a non-empty list of text.
+    The job and run date name folders on the agent, so they must be the
+    ones spelled in the run id (which passes the job-name rule); the
+    command must be a non-empty list of text.
     """
     run_id, attempt = parse_key(payload)
-    job, run_date = text_of(payload, "job"), text_of(payload, "run_date")
-    try:
-        check_name(job)
-        parse_date(run_date)
-    except ValueError:
-        raise Rejected(MALFORMED_PAYLOAD) from None
+    _, job, run_date = _run_id(run_id)
+    if (text_of(payload, "job"), text_of(payload, "run_date")) != (job, run_date):
+        raise Rejected(MALFORMED_PAYLOAD)
     argv, env = payload.get("argv"), payload.get("env")
     if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
         raise Rejected(MALFORMED_PAYLOAD)
