@@ -55,8 +55,12 @@ class ServiceAgents:
     async def start(self) -> None:
         """Start the hub: the embedded broker listens, or the client dials the outside one.
 
+        An outside broker that is down is not an error: the hub keeps
+        dialling in the background.
+
         Raises:
-            ServiceError: If the embedded broker cannot listen (a busy port, say).
+            ServiceError: If the embedded broker cannot listen (a busy port,
+                say), or the hub cannot set up its line to the outside one.
 
         """
         if self.hub is None:
@@ -65,8 +69,12 @@ class ServiceAgents:
             await self.hub.start()
         except (PyNetError, OSError, BrokerError) as exc:
             cause = exc.__cause__ if isinstance(exc, PyNetError) and exc.__cause__ else exc
-            host, port = self.hub.listen or self.hub.broker or ("?", 0)
-            msg = f"agents: cannot start the broker on {host}:{port}: {cause}"
+            if self.hub.listen is not None:
+                host, port = self.hub.listen
+                msg = f"agents: cannot start the broker on {host}:{port}: {cause}"
+            else:
+                host, port = self.hub.broker or ("?", 0)
+                msg = f"agents: cannot use the outside broker at {host}:{port}: {cause}"
             raise ServiceError(msg) from None
         host, port = self.hub.address
         logger.info("agents meet on the broker at %s:%d", host, port)

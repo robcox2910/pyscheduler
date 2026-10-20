@@ -245,10 +245,12 @@ async def _main(
             ready(url)
         return await pynet.loop.run_in_thread(lambda: _run_jobs(url, seconds))
     finally:
-        for agent in reversed(started):
-            await agent.stop()
-        stop.set()
-        await task
+        try:
+            for agent in reversed(started):
+                await agent.stop()
+        finally:  # the scheduler stops even if an agent's stop fails
+            stop.set()
+            await task
 
 
 def run_agents_demo(
