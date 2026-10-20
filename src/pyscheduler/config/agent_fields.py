@@ -12,9 +12,10 @@ from datetime import timedelta
 from pathlib import Path
 
 from pyscheduler.config.agent_secrets import MIN_SECRET_LENGTH, AgentSecrets, AgentSecretsError
+from pyscheduler.config.agents_model import AgentsDef
 from pyscheduler.config.fields import Reader, check_keys, read_duration, read_map, read_str
-from pyscheduler.config.model import AgentsDef, SourceRef
 from pyscheduler.config.settings_fields import read_listen
+from pyscheduler.config.source_ref import SourceRef
 from pyscheduler.yamlish import Node
 
 __all__ = [

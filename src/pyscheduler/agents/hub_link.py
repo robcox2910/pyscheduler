@@ -36,7 +36,7 @@ from pyscheduler.agents.messages import (
 )
 from pyscheduler.agents.signing import seal
 from pyscheduler.config.agent_secrets import AgentSecrets
-from pyscheduler.config.model import AgentsDef
+from pyscheduler.config.agents_model import AgentsDef
 from pyscheduler.engine.clock import Clock
 
 __all__ = ["LOG_TIMEOUT", "AgentOffline", "HubLink"]

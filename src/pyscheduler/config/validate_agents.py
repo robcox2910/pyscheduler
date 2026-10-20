@@ -9,7 +9,8 @@ it would hold a courier's seat the whole time it waits.
 
 from typing import Protocol
 
-from pyscheduler.config.model import AgentsDef, Config, JobDef, JobKind, SourceRef
+from pyscheduler.config.agents_model import AgentsDef
+from pyscheduler.config.model import Config, JobDef, JobKind, SourceRef
 from pyscheduler.values import check_name
 
 

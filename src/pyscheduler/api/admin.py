@@ -22,7 +22,7 @@ from pyscheduler.api.support import BAD_REQUEST, ApiError, actor_of, guarded
 from pyscheduler.api.users import UserHolder, UsersFileError, UserTable
 from pyscheduler.config import Config, ConfigError, Problem, load_config
 from pyscheduler.config.agent_secrets import AgentSecrets
-from pyscheduler.config.model import AgentsDef
+from pyscheduler.config.agents_model import AgentsDef
 from pyscheduler.engine.core import Engine
 
 __all__ = ["Reload", "Validate", "add_admin_routes", "config_actions"]

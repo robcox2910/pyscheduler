@@ -16,7 +16,8 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pyscheduler.calendars import ALL_DAYS, BusinessCalendar
-from pyscheduler.config.agent_secrets import AgentSecrets
+from pyscheduler.config.agents_model import AgentsDef
+from pyscheduler.config.source_ref import SourceRef
 from pyscheduler.schedule.firings import RunDateRule
 from pyscheduler.schedule.specs import Schedule
 
@@ -134,34 +135,6 @@ class WatchSpec:
     min_age: timedelta
     poll: timedelta
     give_up_after: timedelta
-
-
-@dataclass(frozen=True)
-class SourceRef:
-    """Where something was written: a file and a 1-based line."""
-
-    file: str
-    line: int
-
-
-@dataclass(frozen=True)
-class AgentsDef:
-    """The ``agents:`` section: where agents meet the scheduler and how long to wait for them.
-
-    ``listen`` embeds a broker in the scheduler; ``broker`` uses an external
-    one. At most one is set; with neither, agents are off. The secrets file
-    holds each agent's shared secret and is read separately.
-    """
-
-    listen: tuple[str, int] | None
-    broker: tuple[str, int] | None
-    secrets_file: Path
-    agent_grace: timedelta
-    lost_after: timedelta
-    source: SourceRef
-    secrets: AgentSecrets = field(
-        default_factory=lambda: AgentSecrets({}), repr=False, compare=False
-    )
 
 
 @dataclass(frozen=True)
