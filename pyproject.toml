@@ -20,17 +20,11 @@ classifiers = [
 ]
 keywords = ["scheduler", "cron", "jobs", "education"]
 dependencies = [
-    "pynet",
-    "pyweb",
-    "pydb",
-    "pymq",
+    "fromscratch-pynet>=0.2.0",
+    "fromscratch-pyweb>=0.4.0",
+    "fromscratch-pydb>=0.5.0",
+    "fromscratch-pymq>=0.5.0",
 ]
-
-[tool.uv.sources]
-pynet = { git = "https://github.com/robcox2910/pynet", tag = "v0.1.1" }
-pyweb = { git = "https://github.com/robcox2910/pyweb", tag = "v0.3.1" }
-pydb = { git = "https://github.com/robcox2910/pydb", tag = "v0.4.1" }
-pymq = { git = "https://github.com/robcox2910/pymq", tag = "v0.4.1" }
 
 [project.scripts]
 pysched = "pyscheduler.cli:main"
