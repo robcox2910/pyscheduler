@@ -315,13 +315,52 @@ wheels = [
 ]
 
 [[package]]
+name = "fromscratch-pycrypt"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/52/34/996a121630ae21aee86381c945bb8ac59a90e5f75b860b29cdcb7e605565/fromscratch_pycrypt-0.2.0.tar.gz", hash = "sha256:4497a39b5e6d380e24d3681ee340038bee0ffa507a00b1c70371bcda2d4825fb", size = 70786, upload-time = "2026-10-26T11:54:46.737Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/c6/7b9929f6d6a3ce4d68b17196d2e15d7c6689ad708d37ac1a59f14b505445/fromscratch_pycrypt-0.2.0-py3-none-any.whl", hash = "sha256:a81117449b551abd0cefa3a996ce332607429fdedd4f2580c19b8e42c8cdf70a", size = 13343, upload-time = "2026-10-26T11:54:45.472Z" },
+]
+
+[[package]]
+name = "fromscratch-pydb"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/3b/4a4c6bdc3b435ea904efd64379c9f601c248e2bd65b7fcc04b5317d2188b/fromscratch_pydb-0.5.0.tar.gz", hash = "sha256:0d6394312cea576e2b97288cfc3b7ce085eee353c1cd7e47e7f8b03cce0012bd", size = 298143, upload-time = "2026-10-26T11:45:09.53Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/00/af/b36b3335e5e82a5aa236a4712de42f7cc8b80257d8d0fc20cb08c687ecf0/fromscratch_pydb-0.5.0-py3-none-any.whl", hash = "sha256:01a3b6529380bb620d0ad387393f3ac784fc9c85dc5dede7033624b027e10059", size = 100336, upload-time = "2026-10-26T11:45:07.982Z" },
+]
+
+[[package]]
+name = "fromscratch-pymq"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fromscratch-pynet" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4a/f1/160ab189fc16098eca3964e5032661a21ab56b941a6b7cad8f567864197c/fromscratch_pymq-0.5.0.tar.gz", hash = "sha256:027390fddf25e7772420d1bdc4744bc716d249f66f8e861ac423b7b92d23c8fb", size = 184867, upload-time = "2026-10-26T12:04:39.963Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/9a/2dc9b9927e5a47f1dba5e8c5c0a16890031e5533c3e055f757af24f187d1/fromscratch_pymq-0.5.0-py3-none-any.whl", hash = "sha256:d7949c7579e20694861ac4117c895a662c6ec4d6267ecd0943fa56279b68f887", size = 61906, upload-time = "2026-10-26T12:04:38.453Z" },
+]
+
+[[package]]
+name = "fromscratch-pynet"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/70/ee/ae041491adb4ce50d19fbc3d572417151a4ddced76332030a306a7b99cc1/fromscratch_pynet-0.2.0.tar.gz", hash = "sha256:01a040ede10b56b7860e4034a4ee22942a8539ddb60512a77bbb1c99afc6888e", size = 281429, upload-time = "2026-10-26T11:54:50.064Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/2d/53b36eab586a75f972d4e277d91bc64802a0647c803d646ad1302c554e3c/fromscratch_pynet-0.2.0-py3-none-any.whl", hash = "sha256:6cf61a2c756ea17598c091dfc52a7c432a20cbb62a896f08909b1adff8812caa", size = 95331, upload-time = "2026-10-26T11:54:48.526Z" },
+]
+
+[[package]]
 name = "fromscratch-pyscheduler"
 source = { editable = "." }
 dependencies = [
-    { name = "pydb" },
-    { name = "pymq" },
-    { name = "pynet" },
-    { name = "pyweb" },
+    { name = "fromscratch-pydb" },
+    { name = "fromscratch-pymq" },
+    { name = "fromscratch-pynet" },
+    { name = "fromscratch-pyweb" },
 ]
 
 [package.optional-dependencies]
@@ -340,20 +379,33 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "commitizen", marker = "extra == 'dev'", specifier = ">=4.4.0" },
+    { name = "fromscratch-pydb", specifier = ">=0.5.0" },
+    { name = "fromscratch-pymq", specifier = ">=0.5.0" },
+    { name = "fromscratch-pynet", specifier = ">=0.2.0" },
+    { name = "fromscratch-pyweb", specifier = ">=0.4.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.170" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.1" },
-    { name = "pydb", git = "https://github.com/robcox2910/pydb?tag=v0.4.1" },
-    { name = "pymq", git = "https://github.com/robcox2910/pymq?tag=v0.4.1" },
-    { name = "pynet", git = "https://github.com/robcox2910/pynet?tag=v0.1.1" },
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.400" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3.1" },
-    { name = "pyweb", git = "https://github.com/robcox2910/pyweb?tag=v0.3.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.3" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "fromscratch-pyweb"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fromscratch-pycrypt" },
+    { name = "fromscratch-pynet" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/26/ff/f2b0c7e33ae6c5cb8f00e8dea2d0786ed2ca9aa4ddc8e3b637318972d830/fromscratch_pyweb-0.4.0.tar.gz", hash = "sha256:8f03bf08884a5c004442d7c01264b44c82b4f4e9253b0d6b65702388984ee461", size = 223815, upload-time = "2026-10-26T12:04:39.701Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/20/df06cc31f6ad5df1fa69ce833fbaefea7c57b2c8945ed7f6f319a43fe8c2/fromscratch_pyweb-0.4.0-py3-none-any.whl", hash = "sha256:16f3b4a61978fe8d5bc778a8a08c7be629e052af803599b7cecc246b9e9e3cc1", size = 68175, upload-time = "2026-10-26T12:04:38.311Z" },
+]
 
 [[package]]
 name = "hypothesis"
@@ -762,16 +814,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pycrypt"
-version = "0.1.1"
-source = { git = "https://github.com/robcox2910/pycrypt?tag=v0.1.1#a67e801e3d123a3e359935077c783b95e1a642d4" }
-
-[[package]]
-name = "pydb"
-version = "0.4.1"
-source = { git = "https://github.com/robcox2910/pydb?tag=v0.4.1#4256469224eb0981df2f7a43411471628259cb6c" }
-
-[[package]]
 name = "pygments"
 version = "2.21.0"
 source = { registry = "https://pypi.org/simple" }
@@ -779,19 +821,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/49/2e/ced460408999b33da
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9", size = 1250147, upload-time = "2026-08-17T08:02:44.912Z" },
 ]
-
-[[package]]
-name = "pymq"
-version = "0.4.1"
-source = { git = "https://github.com/robcox2910/pymq?tag=v0.4.1#651ee7e44e28a288311d1519085b55888e69c0da" }
-dependencies = [
-    { name = "pynet" },
-]
-
-[[package]]
-name = "pynet"
-version = "0.1.1"
-source = { git = "https://github.com/robcox2910/pynet?tag=v0.1.1#824795ac00dddddad64621ab869a0a7b1f85befb" }
 
 [[package]]
 name = "pyparsing"
@@ -867,15 +896,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/fc/54/fad125f5c48f7821644ee6f223ebfcedc4e23597c1a16eeb13d33aa4a91a/python_discovery-1.6.3.tar.gz", hash = "sha256:a62b301d96cf5489cb96ab023b32e068421867fdd5df2e42eece877869047fa2", size = 88998, upload-time = "2026-10-16T03:54:29.507Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/de/ec/643826e4d69b7bdce4213f221e8f5ed06d0a9dd69fa9b33342578d2cc8c8/python_discovery-1.6.3-py3-none-any.whl", hash = "sha256:cb7654125e3dcb594269a6feb56ac693f1f13b7c654493a93eba72dc22d18034", size = 39386, upload-time = "2026-10-16T03:54:28.237Z" },
-]
-
-[[package]]
-name = "pyweb"
-version = "0.3.1"
-source = { git = "https://github.com/robcox2910/pyweb?tag=v0.3.1#015d2e473383bfd09f177d0d383307efa239742f" }
-dependencies = [
-    { name = "pycrypt" },
-    { name = "pynet" },
 ]
 
 [[package]]
