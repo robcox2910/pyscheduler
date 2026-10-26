@@ -21,6 +21,7 @@
 - Test classes and methods also require docstrings
 - Use named constants instead of magic values (PLR2004)
 - Run `uv run pytest` before committing
+- Property-based tests (Hypothesis) live in `tests/test_properties.py` and `tests/test_model.py`; the shared profiles are in the root `conftest.py` (owned by `series sync`). Run `uv run pytest --hypothesis-profile=thorough` before a release.
 
 ## Commits
 

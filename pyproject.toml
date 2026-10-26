@@ -1,5 +1,5 @@
 [project]
-name = "pyscheduler"
+name = "fromscratch-pyscheduler"
 dynamic = ["version"]
 description = "An educational Autosys/Control-M style job scheduler built from scratch in Python"
 readme = "README.md"

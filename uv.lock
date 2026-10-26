@@ -315,6 +315,47 @@ wheels = [
 ]
 
 [[package]]
+name = "fromscratch-pyscheduler"
+source = { editable = "." }
+dependencies = [
+    { name = "pydb" },
+    { name = "pymq" },
+    { name = "pynet" },
+    { name = "pyweb" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "commitizen" },
+    { name = "hypothesis" },
+    { name = "pip-audit" },
+    { name = "pre-commit" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-timeout" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "commitizen", marker = "extra == 'dev'", specifier = ">=4.4.0" },
+    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.170" },
+    { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10.0" },
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.1" },
+    { name = "pydb", git = "https://github.com/robcox2910/pydb?tag=v0.4.1" },
+    { name = "pymq", git = "https://github.com/robcox2910/pymq?tag=v0.4.1" },
+    { name = "pynet", git = "https://github.com/robcox2910/pynet?tag=v0.1.1" },
+    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.400" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
+    { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3.1" },
+    { name = "pyweb", git = "https://github.com/robcox2910/pyweb?tag=v0.3.1" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.3" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "hypothesis"
 version = "6.170.11"
 source = { registry = "https://pypi.org/simple" }
@@ -773,47 +814,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/e1/1b/244c7b710031ada80
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/ba/18b6e682ead424ad24bcc134339ae5d1b931cd9ae260540592a058a91279/pyright-1.1.414-py3-none-any.whl", hash = "sha256:2a6b4b3298c9eec174c5ed83bd338de6eee82df2992f3e1930e6199d381be36f", size = 6225049, upload-time = "2026-09-10T12:26:51.427Z" },
 ]
-
-[[package]]
-name = "pyscheduler"
-source = { editable = "." }
-dependencies = [
-    { name = "pydb" },
-    { name = "pymq" },
-    { name = "pynet" },
-    { name = "pyweb" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "commitizen" },
-    { name = "hypothesis" },
-    { name = "pip-audit" },
-    { name = "pre-commit" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-timeout" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "commitizen", marker = "extra == 'dev'", specifier = ">=4.4.0" },
-    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.170" },
-    { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10.0" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.1" },
-    { name = "pydb", git = "https://github.com/robcox2910/pydb?tag=v0.4.1" },
-    { name = "pymq", git = "https://github.com/robcox2910/pymq?tag=v0.4.1" },
-    { name = "pynet", git = "https://github.com/robcox2910/pynet?tag=v0.1.1" },
-    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.400" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3.1" },
-    { name = "pyweb", git = "https://github.com/robcox2910/pyweb?tag=v0.3.1" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.3" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "pytest"
