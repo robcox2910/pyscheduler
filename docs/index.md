@@ -84,3 +84,11 @@ with something you can run.
 30. [Live Updates (The Radio With Numbered Messages)](concepts/live-updates.md): Server-sent events with ids, replay and reset, and the live log tail.
 31. [Graph Layout (The Seating Plan)](concepts/graph-layout.md): Layers, barycentres and dashed cross-date edges.
 32. [Timelines (The Train Timetable With Ghost Trains)](concepts/timelines.md): Lanes, bars, ghost bars and the day the clocks change.
+
+## Install
+
+```bash
+pip install fromscratch-pyscheduler
+```
+
+Or get the whole series at once with `pip install fromscratch-pystack`. To read the code or run the tests, clone it from [GitHub](https://github.com/robcox2910/pyscheduler).
