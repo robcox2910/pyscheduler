@@ -33,7 +33,7 @@
 - Package manager: uv
 - Run `uv sync --all-extras` after modifying dependencies
 - `uv.lock` is committed; CI and pre-commit audit it with pip-audit through `uvx`, so pip-audit is not a project dependency
-- Sibling projects, where used, are pinned release tags in `[tool.uv.sources]` (git + tag); never use `path` sources
+- Sibling projects, where used, are their PyPI releases (`fromscratch-<name>>=X.Y.Z`); never use `path` or git sources
 
 ## Releasing
 
