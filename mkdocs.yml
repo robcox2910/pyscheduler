@@ -80,3 +80,4 @@ nav:
       - "Remote Agents (The Delivery Drivers)": concepts/remote-agents.md
       - "Heartbeats (The Walkie-Talkie Check-In)": concepts/heartbeats.md
       - "Signed Messages (The Wax Seal and the Date Stamp)": concepts/signed-messages.md
+  - Property Testing: property-testing.md

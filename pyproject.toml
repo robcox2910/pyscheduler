@@ -52,6 +52,7 @@ dev = [
     "commitizen>=4.4.0",
     "pip-audit>=2.10.0",
     "pytest-timeout>=2.3.1",
+    "hypothesis>=6.170",
 ]
 
 [build-system]
