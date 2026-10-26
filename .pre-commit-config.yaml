@@ -1,9 +1,15 @@
+default_language_version:
+  python: python3.14
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # Pages paste real pytest output, trailing spaces included.
       - id: trailing-whitespace
+        exclude: ^docs/property-testing\.md$
       - id: end-of-file-fixer
+        exclude: ^docs/property-testing\.md$
       - id: check-yaml
         args: ['--unsafe']
       - id: check-added-large-files

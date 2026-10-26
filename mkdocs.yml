@@ -1,11 +1,13 @@
 site_name: PyScheduler
 site_url: https://robcox2910.github.io/pyscheduler/
+site_description: "Build your own job scheduler in Python: cron schedules, dependencies, retries, crash recovery and a web UI, explained for learners."
 repo_url: https://github.com/robcox2910/pyscheduler
 repo_name: robcox2910/pyscheduler
 
 # theme:start
 theme:
   name: material
+  custom_dir: overrides
   palette:
     - scheme: default
       primary: deep-purple
@@ -25,6 +27,13 @@ theme:
     - navigation.expand
     - toc.integrate
     - search.highlight
+
+# Social cards need cairo, so they are off unless SOCIAL_CARDS is set (the
+# shared docs workflow sets it). A repo must not add its own plugins key.
+plugins:
+  - search
+  - social:
+      enabled: !ENV [SOCIAL_CARDS, false]
 # theme:end
 
 exclude_docs: |
@@ -81,3 +90,25 @@ nav:
       - "Heartbeats (The Walkie-Talkie Check-In)": concepts/heartbeats.md
       - "Signed Messages (The Wax Seal and the Date Stamp)": concepts/signed-messages.md
   - Property Testing: property-testing.md
+  # series-nav:start
+  - The series:
+      - Series home: https://robcox2910.github.io/
+      - PyOS: https://robcox2910.github.io/py-os/
+      - Pebble: https://robcox2910.github.io/pebble-lang/
+      - PyDB: https://robcox2910.github.io/pydb/
+      - PyKV: https://robcox2910.github.io/pykv/
+      - PyDocDB: https://robcox2910.github.io/pydoc-db/
+      - PyGraphDB: https://robcox2910.github.io/pygraphdb/
+      - PyTSDB: https://robcox2910.github.io/pytsdb/
+      - PyVecDB: https://robcox2910.github.io/pyvecdb/
+      - PyColDB: https://robcox2910.github.io/pycoldb/
+      - PyCrypt: https://robcox2910.github.io/pycrypt/
+      - PyNet: https://robcox2910.github.io/pynet/
+      - PyWeb: https://robcox2910.github.io/pyweb/
+      - PyGit: https://robcox2910.github.io/pygit/
+      - PySearch: https://robcox2910.github.io/pysearch/
+      - PyMQ: https://robcox2910.github.io/pymq/
+      - PyLLM: https://robcox2910.github.io/pyllm/
+      - "[You are here] PyScheduler": https://robcox2910.github.io/pyscheduler/
+      - PyStack: https://robcox2910.github.io/pystack/
+  # series-nav:end
