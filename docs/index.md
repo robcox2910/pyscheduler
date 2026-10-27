@@ -1,4 +1,8 @@
-# What Is a Job Scheduler?
+---
+title: "Build your own job scheduler in Python"
+---
+
+# PyScheduler: Build your own job scheduler in Python
 
 ## The School Timetable
 
